@@ -1,9 +1,10 @@
 /**
  * Companies House Product 195/216 snapshot parser (Bun / TypeScript).
  *
- * Streaming read via Bun.file().stream(); streaming write via file writers.
- * Field positions match parser.go / Python character offsets.
- * Bun APIs where available; otherwise Node built-ins (e.g. fs.mkdir).
+ * Streaming: Bun.file().stream() for input; Bun file writers for CSV with
+ * batched flushes. node:fs/promises.mkdir for directories (no Bun shell).
+ *
+ * Field layout matches parser.go / Python (UTF-8 character offsets).
  *
  * Usage: bun run parser.ts <input.dat> <output_folder>
  */
@@ -14,7 +15,6 @@ const SNAPSHOT_HEADER = "DDDDSNAP";
 const TRAILER_ID = "99999999";
 const COMPANY_TYPE = "1";
 const PERSON_TYPE = "2";
-/** Flush CSV line buffers after this many rows. */
 const WRITE_BATCH = 16_384;
 
 const COMPANIES_HEADER =
@@ -47,11 +47,6 @@ function csvField(s: string): string {
   return s;
 }
 
-function appendField(parts: string[], s: string) {
-  parts.push(csvField(s));
-}
-
-/** Build one company CSV line (including trailing newline). */
 function companyCsvLine(row: string): string {
   const nameLength = parseIntField(slice(row, 36, 40));
   let name = slice(row, 40, 40 + nameLength - 1);
@@ -60,49 +55,51 @@ function companyCsvLine(row: string): string {
     while (end > 0 && name.charCodeAt(end - 1) === 32) end--;
     name = name.slice(0, end);
   }
-  const parts: string[] = [];
-  appendField(parts, slice(row, 0, 8));
-  parts.push(",");
-  appendField(parts, slice(row, 9, 10));
-  parts.push(",");
-  parts.push(String(parseIntField(slice(row, 32, 36))));
-  parts.push(",");
-  appendField(parts, name);
-  parts.push("\n");
-  return parts.join("");
+  return (
+    csvField(slice(row, 0, 8)) +
+    "," +
+    csvField(slice(row, 9, 10)) +
+    "," +
+    parseIntField(slice(row, 32, 36)) +
+    "," +
+    csvField(name) +
+    "\n"
+  );
 }
 
-/** Build one person CSV line (including trailing newline). */
 function personCsvLine(row: string): string {
   const varLen = parseIntField(slice(row, 72, 76));
   const variable = slice(row, 76, 76 + varLen);
   const vparts = variable.split("<");
 
-  const parts: string[] = [];
-  const fixed = [
-    slice(row, 0, 8),
-    slice(row, 9, 10),
-    slice(row, 10, 12),
-    slice(row, 12, 24),
-    slice(row, 24, 25),
-    slice(row, 32, 40),
-    slice(row, 40, 48),
-    slice(row, 48, 56),
-    slice(row, 56, 64),
-    slice(row, 64, 72),
-  ];
-  for (let i = 0; i < fixed.length; i++) {
-    if (i > 0) parts.push(",");
-    appendField(parts, fixed[i]!);
-  }
+  let out =
+    csvField(slice(row, 0, 8)) +
+    "," +
+    csvField(slice(row, 9, 10)) +
+    "," +
+    csvField(slice(row, 10, 12)) +
+    "," +
+    csvField(slice(row, 12, 24)) +
+    "," +
+    csvField(slice(row, 24, 25)) +
+    "," +
+    csvField(slice(row, 32, 40)) +
+    "," +
+    csvField(slice(row, 40, 48)) +
+    "," +
+    csvField(slice(row, 48, 56)) +
+    "," +
+    csvField(slice(row, 56, 64)) +
+    "," +
+    csvField(slice(row, 64, 72));
+
   for (let i = 0; i < 14; i++) {
-    parts.push(",");
-    appendField(parts, i < vparts.length ? vparts[i]! : "");
+    out += "," + csvField(i < vparts.length ? vparts[i]! : "");
   }
-  parts.push("\n");
-  return parts.join("");
+  return out + "\n";
 }
 
+/** UTF-8 line iterator over Bun.file().stream(). */
 async function* readLines(
   stream: ReadableStream<Uint8Array>,
 ): AsyncGenerator<string> {
@@ -133,7 +130,7 @@ async function* readLines(
   }
 }
 
-/** Batches lines as a string[] and flushes with a single join+write. */
+/** Batches lines and flushes with one join+write to the Bun file writer. */
 class BatchWriter {
   private lines: string[] = [];
   constructor(
@@ -149,7 +146,7 @@ class BatchWriter {
   flush() {
     if (this.lines.length === 0) return;
     this.writer.write(this.lines.join(""));
-    this.lines = [];
+    this.lines.length = 0;
   }
 
   async end() {
@@ -179,12 +176,11 @@ async function parseSnapshot(
   companies.writeLine(COMPANIES_HEADER);
   persons.writeLine(PERSONS_HEADER);
 
-  const input = Bun.file(inputPath);
   let companiesN = 0;
   let personsN = 0;
   let rowNum = 0;
 
-  for await (const row of readLines(input.stream())) {
+  for await (const row of readLines(Bun.file(inputPath).stream())) {
     if (rowNum === 0) {
       if (!row.startsWith(SNAPSHOT_HEADER)) {
         console.log(
@@ -241,8 +237,7 @@ async function main() {
     console.log("Usage: bun run parser.ts <input_file> <output_folder>");
     process.exit(1);
   }
-  const code = await parseSnapshot(Bun.argv[2]!, Bun.argv[3]!);
-  process.exit(code);
+  process.exit(await parseSnapshot(Bun.argv[2]!, Bun.argv[3]!));
 }
 
 main();
