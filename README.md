@@ -94,3 +94,11 @@ Records = trailer count (companies + persons). Higher is better.
 On the large file, Go (fast) is about **4×** the simple Go parser and about **7×** Python / Bun for this workload. Python and Bun are in a similar range; the simple Go parser sits between the optimized Go parser and the scripting runtimes.
 
 *Benchmark host/OS: local Windows machine; absolute numbers will vary with disk and CPU. Relative ordering is the useful takeaway.*
+
+## Further work
+
+Ideas to extend this in future:
+ - compress output with zstd set to very low level (1) to reduce disk usage on write
+ - try zig or rust instead of Go, to optimise allocations
+
+ 
