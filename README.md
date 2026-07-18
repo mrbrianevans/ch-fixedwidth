@@ -48,3 +48,57 @@ Before starting your implementation, ensure you are not on the master branch of 
 After each change, efficiency enhancement, performance improvement or code refactor, if the output is correct, commit the change to Git with a message explaining the change. The subject should be short, the body more explainatory. Include the time to convert the files in the commit body.
 
 For test runs, I suggest running on a small file initially to check the output is correct without wasting time. Once you're more confident, run it on a larger file.
+
+## Implementations
+
+| Parser | File | How to run | Lines of code\* |
+|--------|------|------------|----------------:|
+| Go (fast) | `parser.go` | `go build -o parser.exe parser.go` then `.\parser.exe <input.dat> <output_folder>` | 436 |
+| Go (simple) | `simple_parser.go` | `go build -o simple_parser.exe simple_parser.go` then `.\simple_parser.exe …` | 290 |
+| Python | `process_company_appointments_data.py` | `uv run python .\process_company_appointments_data.py <input.dat> <output_folder>` | 177 |
+| Bun / TypeScript | `parser.ts` | `bun run parser.ts <input.dat> <output_folder>` | 243 |
+
+\*Physical source lines in the file (including blanks and comments), counted on the benchmark date.
+
+## Performance benchmark
+
+Timed with PowerShell `Measure-Command` (wall clock; not self-reported). Go parsers measured as built binaries. Correctness checked with DuckDB full-table `EXCEPT` against the Go (fast) CSV outputs: **0 differing rows** for companies and persons on both files for all parsers.
+
+**Test inputs**:
+
+| Label | File | Data records (companies + persons) |
+|-------|------|-----------------------------------:|
+| Small | `Prod216_4257_ni.dat` (~158 MB) | 857 317 |
+| Large | `Prod216_4257_ew_6.dat` (~1.17 GB) | 6 182 956 |
+
+### Wall-clock time
+
+| Parser | Small (s) | Large (s) |
+|--------|----------:|----------:|
+| Go (fast) | 0.56 | 3.46 |
+| Go (simple) | 1.76 | 13.28 |
+| Python | 3.34 | 23.90 |
+| Bun / TypeScript | 3.53 | 24.06 |
+
+### Throughput (records / second)
+
+Records = trailer count (companies + persons). Higher is better.
+
+| Parser | Small (rec/s) | Large (rec/s) |
+|--------|-------------:|-------------:|
+| Go (fast) | ~1 530 000 | ~1 790 000 |
+| Go (simple) | ~487 000 | ~466 000 |
+| Python | ~257 000 | ~259 000 |
+| Bun / TypeScript | ~243 000 | ~257 000 |
+
+On the large file, Go (fast) is about **4×** the simple Go parser and about **7×** Python / Bun for this workload. Python and Bun are in a similar range; the simple Go parser sits between the optimized Go parser and the scripting runtimes.
+
+*Benchmark host/OS: local Windows machine; absolute numbers will vary with disk and CPU. Relative ordering is the useful takeaway.*
+
+## Further work
+
+Ideas to extend this in future:
+ - compress output with zstd set to very low level (1) to reduce disk usage on write
+ - try zig or rust instead of Go, to optimise allocations
+
+ 
