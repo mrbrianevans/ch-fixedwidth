@@ -6,42 +6,35 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode/utf8"
 )
 
 // Companies House Product 195/216 snapshot parser.
 // Converts fixed-width + chevron-separated appointment data to CSV.
 // Field layout matches process_company_appointments_data.py (reference).
+//
+// Positions are Unicode character offsets (Python text mode). Most rows are
+// pure ASCII, so the hot path uses byte indexing; multi-byte rows fall back
+// to []rune so field boundaries still match the reference.
 
 const (
 	snapshotHeaderIdentifier = "DDDDSNAP"
 	trailerRecordIdentifier  = "99999999"
-	companyRecordType        = '1'
-	personRecordType         = '2'
+	companyRecordType        = byte('1')
+	personRecordType         = byte('2')
 
-	// Large buffers: input is sequential read; output is sequential write.
-	// 4–16 MiB keeps syscall overhead low without ballooning RSS.
-	readBufferSize  = 8 * 1024 * 1024
-	writeBufferSize = 4 * 1024 * 1024
-	batchSize       = 30000
+	readBufferSize  = 16 * 1024 * 1024
+	writeBufferSize = 16 * 1024 * 1024
 )
 
 var (
-	companiesHeader = []string{
-		"Company Number", "Company Status", "Number of Officers", "Company Name",
-	}
-	personsHeader = []string{
-		"Company Number", "App Date Origin", "Appointment Type", "Person number",
-		"Corporate indicator", "Appointment Date", "Resignation Date", "Person Postcode",
-		"Partial Date of Birth", "Full Date of Birth", "Title", "Forenames", "Surname",
-		"Honours", "Care_of", "PO_box", "Address line 1", "Address line 2", "Post_town",
-		"County", "Country", "Occupation", "Nationality", "Resident Country",
-	}
+	companiesHeader = []byte("Company Number,Company Status,Number of Officers,Company Name\n")
+	personsHeader   = []byte("Company Number,App Date Origin,Appointment Type,Person number,Corporate indicator,Appointment Date,Resignation Date,Person Postcode,Partial Date of Birth,Full Date of Birth,Title,Forenames,Surname,Honours,Care_of,PO_box,Address line 1,Address line 2,Post_town,County,Country,Occupation,Nationality,Resident Country\n")
 )
 
-func fastAtoi(s string) int {
+func fastAtoiBytes(b []byte) int {
 	n := 0
-	for i := 0; i < len(s); i++ {
-		c := s[i]
+	for _, c := range b {
 		if c >= '0' && c <= '9' {
 			n = n*10 + int(c-'0')
 		}
@@ -49,57 +42,28 @@ func fastAtoi(s string) int {
 	return n
 }
 
-// needsCSVQuote reports whether s must be quoted under standard CSV rules.
-func needsCSVQuote(s string) bool {
-	for i := 0; i < len(s); i++ {
-		switch s[i] {
-		case ',', '"', '\n', '\r':
-			return true
+func isASCIIBytes(b []byte) bool {
+	for _, c := range b {
+		if c >= utf8.RuneSelf {
+			return false
 		}
 	}
-	return false
+	return true
 }
 
-// writeCSVField writes one CSV field (optionally quoted) into b.
-func writeCSVField(b *strings.Builder, s string) {
-	if needsCSVQuote(s) {
-		b.WriteByte('"')
-		for i := 0; i < len(s); i++ {
-			if s[i] == '"' {
-				b.WriteString(`""`)
-			} else {
-				b.WriteByte(s[i])
-			}
-		}
-		b.WriteByte('"')
-		return
+func clampBytes(b []byte, start, end int) []byte {
+	if start < 0 {
+		start = 0
 	}
-	b.WriteString(s)
-}
-
-func writeCSVRow(b *strings.Builder, fields []string) {
-	for i, f := range fields {
-		if i > 0 {
-			b.WriteByte(',')
-		}
-		writeCSVField(b, f)
+	if end > len(b) {
+		end = len(b)
 	}
-	b.WriteByte('\n')
-}
-
-func processHeaderRow(row string) error {
-	if len(row) < 20 || !strings.HasPrefix(row, snapshotHeaderIdentifier) {
-		prefix := row
-		if len(prefix) > 8 {
-			prefix = prefix[:8]
-		}
-		return fmt.Errorf("unsupported file type from header: '%s'", prefix)
+	if start >= end {
+		return nil
 	}
-	fmt.Printf("Processing snapshot file with run number %s from date %s\n", row[8:12], row[12:20])
-	return nil
+	return b[start:end]
 }
 
-// sliceRunes returns string(r[start:end]) with bounds clamping.
 func sliceRunes(r []rune, start, end int) string {
 	if start < 0 {
 		start = 0
@@ -113,158 +77,84 @@ func sliceRunes(r []rune, start, end int) string {
 	return string(r[start:end])
 }
 
-// processCompanyRow extracts company fields matching the Python reference.
-// All field positions are Unicode character offsets (Python text indexing).
-// Company name length includes the trailing '<' delimiter.
-func processCompanyRow(row string, out []string) []string {
-	if cap(out) < 4 {
-		out = make([]string, 4)
-	} else {
-		out = out[:4]
-	}
-	r := []rune(row)
-	nameLength := fastAtoi(sliceRunes(r, 36, 40))
-	// Length includes trailing '<'; take name_length-1 characters from col 40.
-	companyName := sliceRunes(r, 40, 40+nameLength-1)
-	if len(companyName) > 0 && companyName[len(companyName)-1] == ' ' {
-		companyName = strings.TrimRight(companyName, " ")
-	}
-	out[0] = sliceRunes(r, 0, 8)
-	out[1] = sliceRunes(r, 9, 10)
-	// Python writes number_of_officers as int (no zero padding).
-	out[2] = itoa(fastAtoi(sliceRunes(r, 32, 36)))
-	out[3] = companyName
-	return out
+// csvOut writes CSV rows into a large bufio buffer.
+type csvOut struct {
+	file *os.File
+	bw   *bufio.Writer
+	// scratch for integer formatting
+	numBuf [12]byte
 }
 
-// processPersonRow extracts person fields matching the Python reference.
-// Positions are Unicode character offsets (not UTF-8 bytes): multi-byte
-// characters in postcodes/names shift later fields the same way Python does.
-// Layout (0-based): company[0:8], type[8], origin[9], apptType[10:12],
-// personNum[12:24], corp[24], filler[25:32], apptDate[32:40], resign[40:48],
-// postcode[48:56], partialDOB[56:64], fullDOB[64:72], varLen[72:76], varData[76:].
-func processPersonRow(row string, out []string) []string {
-	if cap(out) < 24 {
-		out = make([]string, 24)
-	} else {
-		out = out[:24]
+func newCSVOut(path string, header []byte) (*csvOut, error) {
+	f, err := os.Create(path)
+	if err != nil {
+		return nil, err
 	}
+	bw := bufio.NewWriterSize(f, writeBufferSize)
+	if _, err := bw.Write(header); err != nil {
+		f.Close()
+		return nil, err
+	}
+	return &csvOut{file: f, bw: bw}, nil
+}
 
-	r := []rune(row)
-	varLen := fastAtoi(sliceRunes(r, 72, 76))
-	variableData := sliceRunes(r, 76, 76+varLen)
-
-	// Split on '<' without trimming — empty fields are consecutive chevrons.
-	// Python: parts = variable_data.split('<') then parts[0]..parts[13].
-	var parts [14]string
-	if variableData != "" {
-		start := 0
-		idx := 0
-		for i := 0; i < len(variableData) && idx < 14; i++ {
-			if variableData[i] == '<' {
-				parts[idx] = variableData[start:i]
-				idx++
-				start = i + 1
+func (w *csvOut) writeFieldBytes(s []byte) error {
+	needQuote := false
+	for _, c := range s {
+		if c == ',' || c == '"' || c == '\n' || c == '\r' {
+			needQuote = true
+			break
+		}
+	}
+	if !needQuote {
+		_, err := w.bw.Write(s)
+		return err
+	}
+	if err := w.bw.WriteByte('"'); err != nil {
+		return err
+	}
+	for _, c := range s {
+		if c == '"' {
+			if _, err := w.bw.WriteString(`""`); err != nil {
+				return err
 			}
-		}
-		if idx < 14 {
-			parts[idx] = variableData[start:]
+		} else if err := w.bw.WriteByte(c); err != nil {
+			return err
 		}
 	}
-
-	out[0] = sliceRunes(r, 0, 8)
-	out[1] = sliceRunes(r, 9, 10)
-	out[2] = sliceRunes(r, 10, 12)
-	out[3] = sliceRunes(r, 12, 24)
-	out[4] = sliceRunes(r, 24, 25)
-	out[5] = sliceRunes(r, 32, 40)
-	out[6] = sliceRunes(r, 40, 48)
-	out[7] = sliceRunes(r, 48, 56)
-	out[8] = sliceRunes(r, 56, 64)
-	out[9] = sliceRunes(r, 64, 72)
-	for i := 0; i < 14; i++ {
-		out[10+i] = parts[i]
-	}
-	return out
+	return w.bw.WriteByte('"')
 }
 
-func itoa(n int) string {
+func (w *csvOut) writeFieldString(s string) error {
+	return w.writeFieldBytes([]byte(s))
+}
+
+func (w *csvOut) comma() error  { return w.bw.WriteByte(',') }
+func (w *csvOut) newline() error { return w.bw.WriteByte('\n') }
+
+func (w *csvOut) writeInt(n int) error {
 	if n == 0 {
-		return "0"
+		return w.bw.WriteByte('0')
 	}
-	var buf [12]byte
-	i := len(buf)
+	i := len(w.numBuf)
 	neg := n < 0
 	if neg {
 		n = -n
 	}
 	for n > 0 {
 		i--
-		buf[i] = byte('0' + n%10)
+		w.numBuf[i] = byte('0' + n%10)
 		n /= 10
 	}
 	if neg {
 		i--
-		buf[i] = '-'
+		w.numBuf[i] = '-'
 	}
-	return string(buf[i:])
+	_, err := w.bw.Write(w.numBuf[i:])
+	return err
 }
 
-// csvBatchWriter keeps one file open and flushes rows in batches.
-type csvBatchWriter struct {
-	file   *os.File
-	bw     *bufio.Writer
-	batch  strings.Builder
-	count  int
-	fields []string // scratch for one row
-}
-
-func newCSVBatchWriter(path string, header []string) (*csvBatchWriter, error) {
-	f, err := os.Create(path)
-	if err != nil {
-		return nil, err
-	}
-	w := &csvBatchWriter{
-		file:   f,
-		bw:     bufio.NewWriterSize(f, writeBufferSize),
-		fields: make([]string, 0, 24),
-	}
-	w.batch.Grow(batchSize * 128)
-	writeCSVRow(&w.batch, header)
-	if _, err := w.bw.WriteString(w.batch.String()); err != nil {
-		f.Close()
-		return nil, err
-	}
-	w.batch.Reset()
-	return w, nil
-}
-
-func (w *csvBatchWriter) writeRow(fields []string) error {
-	writeCSVRow(&w.batch, fields)
-	w.count++
-	if w.count >= batchSize {
-		return w.flushBatch()
-	}
-	return nil
-}
-
-func (w *csvBatchWriter) flushBatch() error {
-	if w.batch.Len() == 0 {
-		return nil
-	}
-	if _, err := w.bw.WriteString(w.batch.String()); err != nil {
-		return err
-	}
-	w.batch.Reset()
-	w.count = 0
-	return nil
-}
-
-func (w *csvBatchWriter) close() error {
-	if err := w.flushBatch(); err != nil {
-		w.file.Close()
-		return err
-	}
+func (w *csvOut) close() error {
 	if err := w.bw.Flush(); err != nil {
 		w.file.Close()
 		return err
@@ -272,9 +162,171 @@ func (w *csvBatchWriter) close() error {
 	return w.file.Close()
 }
 
+func processHeaderRow(row []byte) error {
+	if len(row) < 20 || string(row[:8]) != snapshotHeaderIdentifier {
+		prefix := row
+		if len(prefix) > 8 {
+			prefix = prefix[:8]
+		}
+		return fmt.Errorf("unsupported file type from header: '%s'", prefix)
+	}
+	fmt.Printf("Processing snapshot file with run number %s from date %s\n", row[8:12], row[12:20])
+	return nil
+}
+
+func trimRightSpacesBytes(s []byte) []byte {
+	i := len(s)
+	for i > 0 && s[i-1] == ' ' {
+		i--
+	}
+	return s[:i]
+}
+
+// writeCompanyRow parses a company record and writes one CSV line.
+func writeCompanyRow(w *csvOut, row []byte) error {
+	if isASCIIBytes(row) {
+		nameLength := fastAtoiBytes(clampBytes(row, 36, 40))
+		name := clampBytes(row, 40, 40+nameLength-1)
+		if len(name) > 0 && name[len(name)-1] == ' ' {
+			name = trimRightSpacesBytes(name)
+		}
+		if err := w.writeFieldBytes(clampBytes(row, 0, 8)); err != nil {
+			return err
+		}
+		if err := w.comma(); err != nil {
+			return err
+		}
+		if err := w.writeFieldBytes(clampBytes(row, 9, 10)); err != nil {
+			return err
+		}
+		if err := w.comma(); err != nil {
+			return err
+		}
+		if err := w.writeInt(fastAtoiBytes(clampBytes(row, 32, 36))); err != nil {
+			return err
+		}
+		if err := w.comma(); err != nil {
+			return err
+		}
+		if err := w.writeFieldBytes(name); err != nil {
+			return err
+		}
+		return w.newline()
+	}
+
+	r := []rune(string(row))
+	nameLength := fastAtoiBytes([]byte(sliceRunes(r, 36, 40)))
+	name := sliceRunes(r, 40, 40+nameLength-1)
+	if len(name) > 0 && name[len(name)-1] == ' ' {
+		name = strings.TrimRight(name, " ")
+	}
+	if err := w.writeFieldString(sliceRunes(r, 0, 8)); err != nil {
+		return err
+	}
+	if err := w.comma(); err != nil {
+		return err
+	}
+	if err := w.writeFieldString(sliceRunes(r, 9, 10)); err != nil {
+		return err
+	}
+	if err := w.comma(); err != nil {
+		return err
+	}
+	if err := w.writeInt(fastAtoiBytes([]byte(sliceRunes(r, 32, 36)))); err != nil {
+		return err
+	}
+	if err := w.comma(); err != nil {
+		return err
+	}
+	if err := w.writeFieldString(name); err != nil {
+		return err
+	}
+	return w.newline()
+}
+
+// writePersonRow parses a person record and writes one CSV line.
+// Layout (0-based chars): company[0:8], type[8], origin[9], apptType[10:12],
+// personNum[12:24], corp[24], filler[25:32], apptDate[32:40], resign[40:48],
+// postcode[48:56], partialDOB[56:64], fullDOB[64:72], varLen[72:76], varData[76:].
+func writePersonRow(w *csvOut, row []byte) error {
+	var fixed [10][]byte
+	var varParts [14][]byte
+
+	if isASCIIBytes(row) {
+		fixed[0] = clampBytes(row, 0, 8)
+		fixed[1] = clampBytes(row, 9, 10)
+		fixed[2] = clampBytes(row, 10, 12)
+		fixed[3] = clampBytes(row, 12, 24)
+		fixed[4] = clampBytes(row, 24, 25)
+		fixed[5] = clampBytes(row, 32, 40)
+		fixed[6] = clampBytes(row, 40, 48)
+		fixed[7] = clampBytes(row, 48, 56)
+		fixed[8] = clampBytes(row, 56, 64)
+		fixed[9] = clampBytes(row, 64, 72)
+		varLen := fastAtoiBytes(clampBytes(row, 72, 76))
+		splitChevronBytes(clampBytes(row, 76, 76+varLen), varParts[:])
+	} else {
+		r := []rune(string(row))
+		fixed[0] = []byte(sliceRunes(r, 0, 8))
+		fixed[1] = []byte(sliceRunes(r, 9, 10))
+		fixed[2] = []byte(sliceRunes(r, 10, 12))
+		fixed[3] = []byte(sliceRunes(r, 12, 24))
+		fixed[4] = []byte(sliceRunes(r, 24, 25))
+		fixed[5] = []byte(sliceRunes(r, 32, 40))
+		fixed[6] = []byte(sliceRunes(r, 40, 48))
+		fixed[7] = []byte(sliceRunes(r, 48, 56))
+		fixed[8] = []byte(sliceRunes(r, 56, 64))
+		fixed[9] = []byte(sliceRunes(r, 64, 72))
+		varLen := fastAtoiBytes([]byte(sliceRunes(r, 72, 76)))
+		splitChevronBytes([]byte(sliceRunes(r, 76, 76+varLen)), varParts[:])
+	}
+
+	for i, f := range fixed {
+		if i > 0 {
+			if err := w.comma(); err != nil {
+				return err
+			}
+		}
+		if err := w.writeFieldBytes(f); err != nil {
+			return err
+		}
+	}
+	for _, p := range varParts {
+		if err := w.comma(); err != nil {
+			return err
+		}
+		if err := w.writeFieldBytes(p); err != nil {
+			return err
+		}
+	}
+	return w.newline()
+}
+
+// splitChevronBytes fills dst with up to len(dst) fields from s split on '<'.
+func splitChevronBytes(s []byte, dst [][]byte) {
+	for i := range dst {
+		dst[i] = nil
+	}
+	if len(s) == 0 {
+		return
+	}
+	start := 0
+	idx := 0
+	for i := 0; i < len(s) && idx < len(dst); i++ {
+		if s[i] == '<' {
+			dst[idx] = s[start:i]
+			idx++
+			start = i + 1
+		}
+	}
+	if idx < len(dst) {
+		dst[idx] = s[start:]
+	}
+}
+
 func processCompanyAppointmentsData(inputFile *os.File, outputFolder, baseInputName string) int {
-	companiesFilename := filepath.Join(outputFolder, fmt.Sprintf("companies_data_%s.csv", baseInputName))
-	personsFilename := filepath.Join(outputFolder, fmt.Sprintf("persons_data_%s.csv", baseInputName))
+	companiesFilename := filepath.Join(outputFolder, "companies_data_"+baseInputName+".csv")
+	personsFilename := filepath.Join(outputFolder, "persons_data_"+baseInputName+".csv")
 	fmt.Printf("Saving companies data to %s\n", companiesFilename)
 	fmt.Printf("Saving persons data to %s\n", personsFilename)
 
@@ -283,12 +335,12 @@ func processCompanyAppointmentsData(inputFile *os.File, outputFolder, baseInputN
 		return 1
 	}
 
-	companiesOut, err := newCSVBatchWriter(companiesFilename, companiesHeader)
+	companiesOut, err := newCSVOut(companiesFilename, companiesHeader)
 	if err != nil {
 		fmt.Printf("Error opening companies file: %v\n", err)
 		return 1
 	}
-	personsOut, err := newCSVBatchWriter(personsFilename, personsHeader)
+	personsOut, err := newCSVOut(personsFilename, personsHeader)
 	if err != nil {
 		companiesOut.close()
 		fmt.Printf("Error opening persons file: %v\n", err)
@@ -302,15 +354,14 @@ func processCompanyAppointmentsData(inputFile *os.File, outputFolder, baseInputN
 
 	companiesProcessed := 0
 	personsProcessed := 0
-	companyFields := make([]string, 4)
-	personFields := make([]string, 24)
-
 	rowNum := 0
+
 	for scanner.Scan() {
-		row := scanner.Text()
-		// Strip trailing CR if present (Windows-style lines in a text open).
-		if len(row) > 0 && row[len(row)-1] == '\r' {
-			row = row[:len(row)-1]
+		row := scanner.Bytes()
+		// Scanner reuses the buffer; copy is not needed because we write fields
+		// before the next Scan. Trailing CR from CRLF files.
+		if n := len(row); n > 0 && row[n-1] == '\r' {
+			row = row[:n-1]
 		}
 
 		if rowNum == 0 {
@@ -322,16 +373,8 @@ func processCompanyAppointmentsData(inputFile *os.File, outputFolder, baseInputN
 			continue
 		}
 
-		if strings.HasPrefix(row, trailerRecordIdentifier) {
-			if err := companiesOut.flushBatch(); err != nil {
-				fmt.Printf("Error writing companies: %v\n", err)
-				return 1
-			}
-			if err := personsOut.flushBatch(); err != nil {
-				fmt.Printf("Error writing persons: %v\n", err)
-				return 1
-			}
-			recordCount := fastAtoi(row[8:16])
+		if len(row) >= 8 && string(row[:8]) == trailerRecordIdentifier {
+			recordCount := fastAtoiBytes(clampBytes(row, 8, 16))
 			totalProcessed := companiesProcessed + personsProcessed
 			if recordCount != totalProcessed {
 				fmt.Printf("ERROR: Processed %d records out of %d\n", totalProcessed, recordCount)
@@ -348,15 +391,13 @@ func processCompanyAppointmentsData(inputFile *os.File, outputFolder, baseInputN
 
 		switch row[8] {
 		case companyRecordType:
-			companyFields = processCompanyRow(row, companyFields)
-			if err := companiesOut.writeRow(companyFields); err != nil {
+			if err := writeCompanyRow(companiesOut, row); err != nil {
 				fmt.Printf("Error writing company row: %v\n", err)
 				return 1
 			}
 			companiesProcessed++
 		case personRecordType:
-			personFields = processPersonRow(row, personFields)
-			if err := personsOut.writeRow(personFields); err != nil {
+			if err := writePersonRow(personsOut, row); err != nil {
 				fmt.Printf("Error writing person row: %v\n", err)
 				return 1
 			}
