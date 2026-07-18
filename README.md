@@ -64,7 +64,7 @@ For test runs, I suggest running on a small file initially to check the output i
 
 Timed with PowerShell `Measure-Command` (wall clock; not self-reported). Go parsers measured as built binaries. Correctness checked with DuckDB full-table `EXCEPT` against the Go (fast) CSV outputs: **0 differing rows** for companies and persons on both files for all parsers.
 
-**Test inputs** (from `.env`):
+**Test inputs**:
 
 | Label | File | Data records (companies + persons) |
 |-------|------|-----------------------------------:|
