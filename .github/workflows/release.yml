@@ -37,6 +37,8 @@ jobs:
             target: wasm32-wasi
             ext: .wasm
             name: wasm
+            # Larger linear memory for multi‑GB inputs under Bun/node WASI hosts.
+            extra_flags: "--initial-memory=33554432 --max-memory=536870912"
 
     runs-on: ${{ matrix.os }}
 
@@ -50,7 +52,11 @@ jobs:
           version: 0.16.0
 
       - name: Build
-        run: zig build-exe parser.zig -OReleaseFast -fstrip --name parser -target ${{ matrix.target }}
+        shell: bash
+        run: |
+          zig build-exe parser.zig -OReleaseFast -fstrip --name parser \
+            -target ${{ matrix.target }} \
+            ${{ matrix.extra_flags }}
 
       - name: Rename binary
         shell: bash

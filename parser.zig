@@ -22,8 +22,10 @@ const trailer_record_identifier = "99999999";
 const company_record_type: u8 = '1';
 const person_record_type: u8 = '2';
 
-const read_buffer_size = 8 * 1024 * 1024;
-const write_buffer_size = 8 * 1024 * 1024;
+// Smaller buffers under single-threaded (wasm32-wasi) to stay within linear memory
+// and avoid host WASI edge cases with multi‑MB vectored I/O.
+const read_buffer_size: usize = if (builtin.single_threaded) 1 * 1024 * 1024 else 8 * 1024 * 1024;
+const write_buffer_size: usize = if (builtin.single_threaded) 1 * 1024 * 1024 else 8 * 1024 * 1024;
 const max_csv_row_bytes = 64 * 1024;
 const max_workers = 32;
 
@@ -661,7 +663,9 @@ fn processSingle(
     };
     defer input_file.close(io);
 
-    var file_reader = Io.File.Reader.init(input_file, io, read_buf);
+    // Streaming mode: positional pread is unreliable under some WASI hosts (Bun)
+    // once total bytes read exceed the buffer size.
+    var file_reader = Io.File.Reader.initStreaming(input_file, io, read_buf);
     const reader = &file_reader.interface;
 
     var companies_processed: i32 = 0;

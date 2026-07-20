@@ -53,11 +53,21 @@ For test runs, I suggest running on a small file initially to check the output i
 
 | Parser | File | How to run | Lines of code\* |
 |--------|------|------------|----------------:|
-| Zig | `parser.zig` | `zig build-exe parser.zig -OReleaseFast -femit-bin=parser_zig` then rename/run `.\parser_zig.exe <input.dat> <output_folder>` | 761 |
+| Zig (native) | `parser.zig` | `zig build-exe parser.zig -OReleaseFast -femit-bin=parser_zig` then rename/run `.\parser_zig.exe <input.dat> <output_folder>` | ~780 |
+| Zig (WASI) + Bun | `parser.wasm` + `run_wasm.ts` | Build wasm (see below), then `bun run run_wasm.ts <input.dat> <output_folder>` | 79† |
 | Go (fast) | `parser.go` | `go build -o parser.exe parser.go` then `.\parser.exe <input.dat> <output_folder>` | 436 |
 | Go (simple) | `simple_parser.go` | `go build -o simple_parser.exe simple_parser.go` then `.\simple_parser.exe …` | 290 |
 | Python | `process_company_appointments_data.py` | `uv run python .\process_company_appointments_data.py <input.dat> <output_folder>` | 177 |
 | Bun / TypeScript | `parser.ts` | `bun run parser.ts <input.dat> <output_folder>` | 243 |
+
+† Host loader only; parse logic lives in the Zig WASI binary (`parser.wasm`).
+
+Build WASI module:
+
+```bash
+zig build-exe parser.zig -OReleaseFast -fstrip --name parser -target wasm32-wasi \
+  --initial-memory=33554432 --max-memory=536870912
+```
 
 \*Physical source lines in the file (including blanks and comments), counted on the benchmark date.
 
@@ -76,13 +86,15 @@ Timed with PowerShell `Measure-Command` / `Stopwatch` (wall clock; not self-repo
 
 | Parser | Small (s) | Large (s) |
 |--------|----------:|----------:|
-| Zig (parallel) | — | ~0.74 |
+| Zig native (parallel) | — | ~0.74 |
+| Zig WASI via Bun | — | ~3.40‡ |
 | Go (fast) | 0.56 | 3.46 |
 | Go (simple) | 1.76 | 13.28 |
 | Python | 3.34 | 23.90 |
 | Bun / TypeScript | 3.53 | ~28.8† |
 
-† Re-timed on the same host as the Zig work (~28.8 s); earlier table had ~24 s.
+† Re-timed on the same host as the Zig work (~28.8 s); earlier table had ~24 s.  
+‡ Average of 3 PowerShell `Stopwatch` runs; single-threaded WASI (no worker threads). DuckDB full-table `EXCEPT` vs Bun/TS: **0** differing rows.
 
 ### Throughput (records / second)
 
@@ -90,13 +102,14 @@ Records = trailer count (companies + persons). Higher is better.
 
 | Parser | Small (rec/s) | Large (rec/s) |
 |--------|-------------:|-------------:|
-| Zig (parallel) | — | ~8 400 000 |
+| Zig native (parallel) | — | ~8 400 000 |
+| Zig WASI via Bun | — | ~1 820 000 |
 | Go (fast) | ~1 530 000 | ~1 790 000 |
 | Go (simple) | ~487 000 | ~466 000 |
 | Python | ~257 000 | ~259 000 |
 | Bun / TypeScript | ~243 000 | ~215 000 |
 
-On the large file, the parallel Zig parser is about **4–5×** Go (fast) and about **30–40×** Python / Bun for this workload (multi-core line-chunked parse + part-file concat). Single-threaded Zig was already competitive with Go (~2.5 s).
+On the large file, the parallel Zig native parser is about **4–5×** Go (fast) and about **30–40×** pure Bun/TS. The Zig **WASI** module under Bun is roughly **on par with Go (fast)** and about **8×** faster than the pure TypeScript parser, despite single-threaded execution and WASI syscall overhead.
 
 *Benchmark host/OS: local Windows machine (22 logical CPUs); absolute numbers will vary with disk and CPU. Relative ordering is the useful takeaway.*
 
