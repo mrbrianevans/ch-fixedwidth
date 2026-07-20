@@ -12,6 +12,7 @@
 //! Usage: ./parser input_file output_folder
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Io = std.Io;
 const unicode = std.unicode;
 const Thread = std.Thread;
@@ -545,9 +546,17 @@ fn processParallel(
         results[r] = .{};
     }
 
-    // Run first worker on main thread if only one, else spawn
+    // Run first worker on main thread if only one, else spawn.
+    // Comptime-gated so wasm32-wasi / -fsingle-threaded builds still compile.
     if (n_ranges == 1) {
         workerMain(&ctxs[0]);
+    } else if (comptime builtin.single_threaded) {
+        // Sequential fallback (should not be reached; processCompanyAppointmentsData
+        // routes single-threaded targets to processSingle).
+        var t: usize = 0;
+        while (t < n_ranges) : (t += 1) {
+            workerMain(&ctxs[t]);
+        }
     } else {
         var t: usize = 1;
         while (t < n_ranges) : (t += 1) {
@@ -729,7 +738,12 @@ fn processCompanyAppointmentsData(
 
     const base_name = baseInputName(input_path);
 
-    // Parallel workers: use most cores but leave some headroom; single-thread for tiny files.
+    // WASI / -fsingle-threaded: no worker threads.
+    if (comptime builtin.single_threaded) {
+        return processSingle(io, arena, input_path, output_folder, base_name);
+    }
+
+    // Parallel workers: use most cores; single-thread when only one CPU.
     const cpu_count = Thread.getCpuCount() catch 1;
     const n_workers = @max(1, @min(cpu_count, max_workers));
 

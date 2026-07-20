@@ -33,6 +33,10 @@ jobs:
             target: aarch64-macos
             ext: ""
             name: macos-aarch64
+          - os: ubuntu-latest
+            target: wasm32-wasi
+            ext: .wasm
+            name: wasm
 
     runs-on: ${{ matrix.os }}
 
