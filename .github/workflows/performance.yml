@@ -6,13 +6,12 @@ on:
   pull_request:
   workflow_dispatch:
 
-# Large input (~1.2GB) + several full conversions.
-timeout-minutes: 90
-
 jobs:
   bench:
     name: Bench (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    # Large input (~1.2GB) + several full conversions.
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
