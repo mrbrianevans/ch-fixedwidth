@@ -1,0 +1,231 @@
+name: Performance
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+  workflow_dispatch:
+
+# Large input (~1.2 GB) + several full conversions.
+timeout-minutes: 90
+
+jobs:
+  bench:
+    name: Bench (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: "0.16.0"
+
+      - name: Download test input
+        env:
+          INPUT_URL: https://s3.companiescatalogue.co.uk/free/prod216/2026/07/07/Prod216_4257_ew_6.dat
+          INPUT_FILE: Prod216_4257_ew_6.dat
+        run: |
+          set -euo pipefail
+          echo "Downloading ${INPUT_URL}"
+          curl -fL --retry 5 --retry-delay 5 --retry-all-errors \
+            -o "${INPUT_FILE}" "${INPUT_URL}"
+          ls -lh "${INPUT_FILE}"
+          python - <<'PY'
+          import os
+          size = os.path.getsize("Prod216_4257_ew_6.dat")
+          print(f"Downloaded size: {size:,} bytes ({size / (1024**3):.3f} GiB)")
+          if size < 100_000_000:
+              raise SystemExit("Downloaded file looks too small; aborting")
+          PY
+
+      - name: Build parsers
+        run: |
+          set -euo pipefail
+
+          EXT=""
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            EXT=".exe"
+          fi
+
+          # Go
+          go build -o "parser_go${EXT}" parser.go
+          echo "Built Go parser → parser_go${EXT}"
+
+          # Zig native
+          zig build-exe parser.zig -OReleaseFast -fstrip --name parser_zig
+          if [[ -f parser_zig ]]; then
+            chmod +x parser_zig
+          fi
+          echo "Built Zig native parser"
+
+          # Zig WASI
+          zig build-exe parser.zig -OReleaseFast -fstrip --name parser \
+            -target wasm32-wasi \
+            --initial-memory=33554432 --max-memory=536870912
+          if [[ ! -f parser.wasm ]]; then
+            echo "parser.wasm missing after build" >&2
+            ls -la
+            exit 1
+          fi
+          echo "Built Zig WASI parser → parser.wasm"
+
+          # Resolve binary paths for later steps
+          if [[ -f "parser_go${EXT}" ]]; then
+            echo "./parser_go${EXT}" > .go_bin
+          else
+            echo "Go binary not found" >&2
+            exit 1
+          fi
+          if [[ -f "parser_zig${EXT}" ]]; then
+            echo "./parser_zig${EXT}" > .zig_bin
+          elif [[ -f parser_zig ]]; then
+            echo "./parser_zig" > .zig_bin
+          else
+            echo "Zig binary not found" >&2
+            ls -la
+            exit 1
+          fi
+
+          # Python entrypoint: prefer parser.py, fall back to legacy name
+          if [[ -f parser.py ]]; then
+            echo "parser.py" > .py_script
+          elif [[ -f process_company_appointments_data.py ]]; then
+            echo "process_company_appointments_data.py" > .py_script
+          else
+            echo "No Python parser script found" >&2
+            exit 1
+          fi
+
+      - name: Run benchmarks
+        env:
+          INPUT_FILE: Prod216_4257_ew_6.dat
+        run: |
+          set -euo pipefail
+
+          GO_BIN=$(cat .go_bin)
+          ZIG_BIN=$(cat .zig_bin)
+          PY_SCRIPT=$(cat .py_script)
+
+          RESULTS=bench_results.tsv
+          : > "${RESULTS}"
+
+          # name<TAB>seconds<TAB>exit_code
+          run_one() {
+            local name="$1"
+            shift
+            local outdir="bench_out_${name//[^a-zA-Z0-9_-]/_}"
+            rm -rf "${outdir}"
+            mkdir -p "${outdir}"
+
+            echo "::group::${name}"
+            local start end elapsed status
+            start=$(python -c 'import time; print(time.perf_counter())')
+            set +e
+            "$@" >"${outdir}/stdout.log" 2>"${outdir}/stderr.log"
+            status=$?
+            set -e
+            end=$(python -c 'import time; print(time.perf_counter())')
+            elapsed=$(python -c "print(f'{$end - $start:.3f}')")
+
+            echo "exit=${status} time=${elapsed}s"
+            if [[ -s "${outdir}/stdout.log" ]]; then
+              echo "--- stdout (tail) ---"
+              tail -n 20 "${outdir}/stdout.log" || true
+            fi
+            if [[ -s "${outdir}/stderr.log" ]]; then
+              echo "--- stderr (tail) ---"
+              tail -n 20 "${outdir}/stderr.log" || true
+            fi
+            echo "::endgroup::"
+
+            printf '%s\t%s\t%s\n' "${name}" "${elapsed}" "${status}" >> "${RESULTS}"
+
+            # Free disk: each run writes ~0.8 GB of CSV.
+            rm -rf "${outdir}"
+          }
+
+          run_one "Go"                 "${GO_BIN}" "${INPUT_FILE}" "out_go"
+          run_one "Python"             python "${PY_SCRIPT}" "${INPUT_FILE}" "out_py"
+          run_one "TypeScript (Bun)"   bun run parser.ts "${INPUT_FILE}" "out_ts"
+          run_one "Zig (native)"       "${ZIG_BIN}" "${INPUT_FILE}" "out_zig"
+          run_one "Zig (WASI / Bun)"   bun run run_wasm.ts "${INPUT_FILE}" "out_wasm" parser.wasm
+
+          echo "Raw results:"
+          cat "${RESULTS}"
+
+      - name: Write job summary
+        if: always()
+        env:
+          RUNNER_OS: ${{ runner.os }}
+          RUNNER_ARCH: ${{ runner.arch }}
+        run: |
+          set -euo pipefail
+          RESULTS=bench_results.tsv
+          INPUT_FILE=Prod216_4257_ew_6.dat
+
+          {
+            echo "## Performance — \`${{ matrix.os }}\`"
+            echo
+            echo "| Field | Value |"
+            echo "|-------|-------|"
+            echo "| Runner OS | ${RUNNER_OS} |"
+            echo "| Runner arch | ${RUNNER_ARCH} |"
+            if [[ -f "${INPUT_FILE}" ]]; then
+              SIZE=$(python -c "import os; print(f'{os.path.getsize(\"${INPUT_FILE}\"):,}')")
+              echo "| Input | \`${INPUT_FILE}\` (${SIZE} bytes) |"
+            else
+              echo "| Input | missing |"
+            fi
+            echo "| Source | https://s3.companiescatalogue.co.uk/free/prod216/2026/07/07/Prod216_4257_ew_6.dat |"
+            echo
+            echo "Wall-clock time to convert the full snapshot (build time excluded)."
+            echo
+            echo "| Parser | Time (s) | Exit code | Status |"
+            echo "|--------|---------:|----------:|:-------|"
+
+            if [[ ! -f "${RESULTS}" ]]; then
+              echo "| _(no results)_ | — | — | failed before benchmarks |"
+            else
+              while IFS=$'\t' read -r name seconds code; do
+                if [[ "${code}" == "0" ]]; then
+                  status="ok"
+                else
+                  status="**fail**"
+                fi
+                echo "| ${name} | ${seconds} | ${code} | ${status} |"
+              done < "${RESULTS}"
+            fi
+
+            echo
+            echo "### Notes"
+            echo
+            echo "- Times are host wall clock via Python \`time.perf_counter()\` (not self-reported)."
+            echo "- Zig native may use multiple CPU cores; Zig WASI is single-threaded under Bun."
+            echo "- Output CSVs are deleted after each run to save disk."
+          } | tee -a "${GITHUB_STEP_SUMMARY}"
