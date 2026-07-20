@@ -2,11 +2,11 @@ name: Performance
 
 on:
   push:
-    branches: [master, main]
+    branches: [master]
   pull_request:
   workflow_dispatch:
 
-# Large input (~1.2 GB) + several full conversions.
+# Large input (~1.2GB) + several full conversions.
 timeout-minutes: 90
 
 jobs:
@@ -24,15 +24,15 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version: "1.22"
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
