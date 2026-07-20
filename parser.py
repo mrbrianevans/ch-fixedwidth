@@ -84,6 +84,7 @@ def process_company_appointments_data(input_file, output_folder, base_input_name
     persons_processed = 0
     
     # Setup output files
+    os.makedirs(output_folder, exist_ok=True)
     companies_filename = os.path.join(output_folder, COMPANIES_OUTPUT_FILENAME_TEMPLATE % base_input_name)
     persons_filename = os.path.join(output_folder, PERSONS_OUTPUT_FILENAME_TEMPLATE % base_input_name)
     

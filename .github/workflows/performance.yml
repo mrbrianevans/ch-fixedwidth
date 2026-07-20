@@ -52,13 +52,19 @@ jobs:
         run: |
           set -euo pipefail
           echo "Downloading ${INPUT_URL}"
-          curl -fL --retry 5 --retry-delay 5 --retry-all-errors \
-            -o "${INPUT_FILE}" "${INPUT_URL}"
+          # --compressed: send Accept-Encoding for encodings this curl can decode
+          # (typically zstd, br, gzip, deflate) and write the decompressed body.
+          curl -V | grep -E '^(curl |Features:)' || true
+          curl -fL --compressed \
+            --retry 5 --retry-delay 5 --retry-all-errors \
+            -o "${INPUT_FILE}" \
+            -w "Wire transfer: %{size_download} bytes in %{time_total}s (HTTP %{http_code})\n" \
+            "${INPUT_URL}"
           ls -lh "${INPUT_FILE}"
           python - <<'PY'
           import os
           size = os.path.getsize("Prod216_4257_ew_6.dat")
-          print(f"Downloaded size: {size:,} bytes ({size / (1024**3):.3f} GiB)")
+          print(f"Decompressed size: {size:,} bytes ({size / (1024**3):.3f} GiB)")
           if size < 100_000_000:
               raise SystemExit("Downloaded file looks too small; aborting")
           PY
