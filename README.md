@@ -2,7 +2,9 @@
 
 High-performance Zig parser for Companies House bulk appointment data (products 195 / 216). Converts snapshot files from the proprietary fixed-width + chevron format into CSV.
 
-Native builds use **multithreading**: the input is split on line boundaries and worker threads write part CSVs that are concatenated. On large snapshots this typically exceeds **~8 million records/second** on a multi-core machine (wall clock; host-dependent).
+Native builds use **multithreading**: the input is split on line boundaries and worker threads write part CSVs that are concatenated.
+
+**Measured throughput** (PowerShell `Stopwatch` wall clock, not self-reported): `Prod216_4257_ew_6.dat` — 6 182 956 records in ~1.24 s → **~5.0 million records/second** (`zig build -Doptimize=ReleaseFast`, post-refactor CLI). Absolute numbers vary with disk and CPU.
 
 ## File format (overview)
 
