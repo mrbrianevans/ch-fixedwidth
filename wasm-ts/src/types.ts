@@ -31,7 +31,7 @@ export class ChParseError extends Error {
   }
 }
 
-/** Snapshot bytes accepted by the parser (plain-text fixed-width file). */
+/** Snapshot bytes accepted by the one-shot parser (plain-text fixed-width file). */
 export type SnapshotInput = Uint8Array | ArrayBuffer | string;
 
 /**
@@ -61,13 +61,21 @@ export interface ChWasmExports {
   ch_buffer_free(bufPtr: number): void;
 }
 
-/** Options when loading the module. */
+/**
+ * How to load the freestanding `ch_fixedwidth.wasm` module.
+ * Provide exactly one of `module`, `wasmBytes`, or `wasmUrl`.
+ *
+ * For Node/Bun local files, read the file yourself and pass `wasmBytes`
+ * (this package does not depend on a filesystem API).
+ */
 export interface LoadOptions {
-  /**
-   * Path or URL to `ch_fixedwidth.wasm`.
-   * Defaults to `../zig-out/ch_fixedwidth.wasm` relative to this package.
-   */
-  wasmPath?: string | URL;
-  /** Pre-compiled module (skips fetch/compile). */
+  /** Pre-compiled module (skips fetch/compile of bytes). */
   module?: WebAssembly.Module;
+  /** Raw WASM binary. Preferred for local filesystem loads. */
+  wasmBytes?: BufferSource;
+  /**
+   * URL that `fetch` can load (http(s), or a `file:` URL where the runtime allows it).
+   * Not for bare filesystem paths in Node — use `wasmBytes` instead.
+   */
+  wasmUrl?: string | URL;
 }

@@ -1,4 +1,4 @@
-import { join } from "node:path";
+import { getExports, instantiateWasm } from "./load.ts";
 import {
   ChParseError,
   type ChWasmExports,
@@ -9,7 +9,6 @@ import {
 
 /** Size of `ChParseResult` on wasm32 (two buffers + three i32s). */
 const PARSE_RESULT_SIZE = 28;
-/** Offset of `companies_csv` / `persons_csv` pointer+len pairs and counts. */
 const OFF_COMPANIES_PTR = 0;
 const OFF_COMPANIES_LEN = 4;
 const OFF_PERSONS_PTR = 8;
@@ -17,8 +16,6 @@ const OFF_PERSONS_LEN = 12;
 const OFF_COMPANIES = 16;
 const OFF_PERSONS = 20;
 const OFF_TRAILER = 24;
-
-const DEFAULT_WASM = join(import.meta.dir, "..", "..", "zig-out", "ch_fixedwidth.wasm");
 
 function toBytes(input: SnapshotInput): Uint8Array {
   if (typeof input === "string") {
@@ -47,7 +44,9 @@ function copyUtf8(memory: WebAssembly.Memory, ptr: number, len: number): string 
 
 /**
  * Host-side wrapper around the freestanding `ch_fixedwidth` WASM module.
- * Parsing is entirely in linear memory — no filesystem I/O inside WASM.
+ *
+ * One-shot parse: entire input and both CSV outputs live in WASM linear memory.
+ * Prefer the streaming API (when available) for multi-hundred-MB snapshots.
  */
 export class ChFixedWidthParser {
   readonly exports: ChWasmExports;
@@ -55,25 +54,15 @@ export class ChFixedWidthParser {
 
   private constructor(instance: WebAssembly.Instance) {
     this.instance = instance;
-    this.exports = instance.exports as unknown as ChWasmExports;
-    if (!this.exports.memory || typeof this.exports.ch_parse_snapshot !== "function") {
-      throw new Error("Invalid ch_fixedwidth.wasm: missing expected exports");
-    }
+    this.exports = getExports(instance);
   }
 
-  /** Compile and instantiate the WASM module. */
-  static async create(options: LoadOptions = {}): Promise<ChFixedWidthParser> {
-    let module = options.module;
-    if (!module) {
-      const path = options.wasmPath ?? DEFAULT_WASM;
-      const bytes =
-        typeof path === "string" || path instanceof URL
-          ? await Bun.file(path).arrayBuffer()
-          : path;
-      module = await WebAssembly.compile(bytes);
-    }
-    // Freestanding: no imports required.
-    const instance = await WebAssembly.instantiate(module, {});
+  /**
+   * Compile and instantiate the WASM module.
+   * Pass `wasmBytes`, `wasmUrl`, or a prebuilt `module` (see {@link LoadOptions}).
+   */
+  static async create(options: LoadOptions): Promise<ChFixedWidthParser> {
+    const instance = await instantiateWasm(options);
     return new ChFixedWidthParser(instance);
   }
 
@@ -104,7 +93,6 @@ export class ChFixedWidthParser {
     try {
       // Re-read memory.buffer after each alloc — growth may detach the old buffer.
       new Uint8Array(memory.buffer, inputPtr, bytes.byteLength).set(bytes);
-      // Zero the result struct.
       new Uint8Array(memory.buffer, resultPtr, PARSE_RESULT_SIZE).fill(0);
 
       const code = ch_parse_snapshot(inputPtr, bytes.byteLength, resultPtr);
@@ -126,13 +114,9 @@ export class ChFixedWidthParser {
         trailerCount: readI32(view, OFF_TRAILER),
       };
     } finally {
-      // Free CSV buffers owned by the result, then host-owned allocations.
       ch_parse_result_free(resultPtr);
       ch_free(resultPtr, PARSE_RESULT_SIZE);
       ch_free(inputPtr, bytes.byteLength);
     }
   }
 }
-
-export type { ParseResult, SnapshotInput, LoadOptions, ChWasmExports };
-export { ChParseError, ChErrorCode } from "./types.ts";
