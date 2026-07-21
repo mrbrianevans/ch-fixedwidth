@@ -1,6 +1,10 @@
 # Companies House fixed-width parser
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 High-performance Zig parser for Companies House bulk appointment data (products 195 / 216). Converts snapshot files from the proprietary fixed-width + chevron format into CSV.
+
+**Version:** 0.0.1
 
 Native builds use **multithreading**: the input is split on line boundaries and worker threads write part CSVs that are concatenated.
 
