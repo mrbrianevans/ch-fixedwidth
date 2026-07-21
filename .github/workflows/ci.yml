@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  zig:
+    name: Zig (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: "0.16.0"
+
+      - name: Check formatting
+        run: zig fmt --check .
+
+      - name: AST check
+        run: zig ast-check parser.zig
+
+      - name: Build (ReleaseSafe)
+        run: zig build-exe parser.zig -OReleaseSafe -fstrip --name parser_ci
+
+      - name: Run tests
+        run: zig test parser.zig
