@@ -4,7 +4,7 @@
 
 High-performance Zig parser for Companies House bulk appointment data (products 195 / 216). Converts snapshot files from the proprietary fixed-width + chevron format into CSV.
 
-**Version:** 0.0.1
+**Version:** 0.0.1 — see [CHANGELOG.md](CHANGELOG.md).
 
 Native builds use **multithreading**: the input is split on line boundaries and worker threads write part CSVs that are concatenated.
 

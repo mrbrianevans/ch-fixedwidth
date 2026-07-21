@@ -11,5 +11,6 @@
         "include",
         "README.md",
         "LICENSE",
+        "CHANGELOG.md",
     },
 }
