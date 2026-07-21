@@ -1,3 +1,7 @@
+# Reference parsers (comparison archive)
+
+> **Maintained product code** lives at the repository root (Zig library + CLI). This directory keeps alternate language implementations and historical comparison notes.
+
 # Fixed width parser for companies house data
 
 Companies House publish bulk data products in a custom file format which is broadly fixed width + variable width chevron separated values.
@@ -53,21 +57,12 @@ For test runs, I suggest running on a small file initially to check the output i
 
 | Parser | File | How to run | Lines of code\* |
 |--------|------|------------|----------------:|
-| Zig (native) | `parser.zig` | `zig build-exe parser.zig -OReleaseFast -femit-bin=parser_zig` then rename/run `.\parser_zig.exe <input.dat> <output_folder>` | ~780 |
-| Zig (WASI) + Bun | `parser.wasm` + `run_wasm.ts` | Build wasm (see below), then `bun run run_wasm.ts <input.dat> <output_folder>` | 79† |
+| Zig (native, current) | `../` (`zig build`) | `zig build -Doptimize=ReleaseFast` then `./zig-out/bin/parser <input.dat> <output_folder>` | — |
 | Go (fast) | `parser.go` | `go build -o parser.exe parser.go` then `.\parser.exe <input.dat> <output_folder>` | 436 |
 | Go (simple) | `simple_parser.go` | `go build -o simple_parser.exe simple_parser.go` then `.\simple_parser.exe …` | 290 |
-| Python | `process_company_appointments_data.py` | `uv run python .\process_company_appointments_data.py <input.dat> <output_folder>` | 177 |
+| Python | `parser.py` | `uv run python .\parser.py <input.dat> <output_folder>` | 177 |
 | Bun / TypeScript | `parser.ts` | `bun run parser.ts <input.dat> <output_folder>` | 243 |
-
-† Host loader only; parse logic lives in the Zig WASI binary (`parser.wasm`).
-
-Build WASI module:
-
-```bash
-zig build-exe parser.zig -OReleaseFast -fstrip --name parser -target wasm32-wasi \
-  --initial-memory=33554432 --max-memory=536870912
-```
+| Bun WASI host (legacy) | `run_wasm.ts` | Historical host for a file-I/O WASI module; prefer freestanding `zig build wasm` parse API | 79 |
 
 \*Physical source lines in the file (including blanks and comments), counted on the benchmark date.
 
