@@ -32,11 +32,11 @@ jobs:
       - name: Check formatting
         run: zig fmt --check .
 
-      - name: AST check
-        run: zig ast-check parser.zig
-
       - name: Build (ReleaseSafe)
-        run: zig build-exe parser.zig -OReleaseSafe -fstrip --name parser_ci
+        run: zig build -Doptimize=ReleaseSafe
+
+      - name: Build freestanding WASM
+        run: zig build wasm -Doptimize=ReleaseSafe
 
       - name: Run tests
-        run: zig test parser.zig
+        run: zig build test

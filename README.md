@@ -32,9 +32,11 @@ Person columns: Company Number, App Date Origin, Appointment Type, Person number
 
 ## Build and run
 
+Requires [Zig](https://ziglang.org/) 0.16+.
+
 ```bash
-zig build-exe parser.zig -OReleaseFast -fstrip --name parser
-./parser <input.dat> <output_folder>
+zig build -Doptimize=ReleaseFast
+./zig-out/bin/parser <input.dat> <output_folder>
 ```
 
 | Argument | Description |
@@ -45,10 +47,34 @@ zig build-exe parser.zig -OReleaseFast -fstrip --name parser
 Example:
 
 ```bash
-./parser Prod216_4257_ew_6.dat ./output
+./zig-out/bin/parser Prod216_4257_ew_6.dat ./output
 ```
 
 Exit code `0` on success (trailer count matches rows written); non-zero on header/trailer mismatch or I/O errors.
+
+```bash
+zig build test              # unit tests
+zig build wasm -Doptimize=ReleaseFast   # freestanding WASM (parse API only)
+```
+
+## Library API
+
+Parsing is separate from CLI I/O so the same logic can be embedded:
+
+| Surface | Location | Role |
+|---------|----------|------|
+| Zig module | `src/parse.zig`, `src/snapshot.zig` | Pure format + in-memory conversion |
+| C ABI | `include/ch_fixedwidth.h`, `libch_fixedwidth` | `ch_parse_snapshot` for native FFI |
+| WASM | `zig build wasm` → `ch_fixedwidth.wasm` | Same C-style exports, no filesystem I/O |
+| CLI | `src/main.zig` + `src/file_convert.zig` | Multithreaded file conversion |
+
+## Development
+
+```bash
+zig build                   # debug CLI + libs
+zig build test
+zig fmt --check .
+```
 
 ## Alternative implementations
 
