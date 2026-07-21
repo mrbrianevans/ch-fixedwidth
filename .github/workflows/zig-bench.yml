@@ -3,7 +3,17 @@ name: Zig performance
 
 on:
   push:
+    paths:
+      - "src/**"
+      - "build.zig"
+      - "build.zig.zon"
+      - ".github/workflows/zig-bench.yml"
   pull_request:
+    paths:
+      - "src/**"
+      - "build.zig"
+      - "build.zig.zon"
+      - ".github/workflows/zig-bench.yml"
   workflow_dispatch:
 
 permissions:

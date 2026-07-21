@@ -1,6 +1,7 @@
 name: CI
 
 on:
+  # Any branch push and all PRs (formatting, build, tests).
   push:
   pull_request:
 
