@@ -4,6 +4,7 @@
 const std = @import("std");
 const parse = @import("parse.zig");
 const snapshot = @import("snapshot.zig");
+const stream_mod = @import("stream.zig");
 const c_api = @import("c_api.zig");
 
 const mini_snapshot = @embedFile("testdata/mini_snapshot.dat");
@@ -111,4 +112,68 @@ test "C ABI rejects null args" {
     var out: c_api.ChParseResult = .{};
     try std.testing.expectEqual(c_api.CH_ERR_INVALID_ARG, c_api.ch_parse_snapshot(null, 10, &out));
     try std.testing.expectEqual(c_api.CH_ERR_INVALID_ARG, c_api.ch_parse_snapshot(@as([*]const u8, @ptrCast("x")), 0, &out));
+}
+
+test "stream matches snapshot on mini fixture with tiny chunks" {
+    const allocator = std.testing.allocator;
+    var s = stream_mod.Stream.init(allocator, .{ .batch_rows = 2, .batch_bytes = 64 });
+    defer s.deinit();
+
+    // Feed one byte at a time to stress the carry buffer.
+    for (mini_snapshot) |byte| {
+        try s.feed(&.{byte});
+    }
+    try s.finish();
+
+    var companies = std.ArrayList(u8).empty;
+    defer companies.deinit(allocator);
+    var persons = std.ArrayList(u8).empty;
+    defer persons.deinit(allocator);
+
+    while (s.nextBatch()) |batch| {
+        var b = batch;
+        defer b.deinit(allocator);
+        switch (b.kind) {
+            .companies => try companies.appendSlice(allocator, b.data),
+            .persons => try persons.appendSlice(allocator, b.data),
+        }
+    }
+
+    try std.testing.expectEqual(@as(i32, 2), s.companies);
+    try std.testing.expectEqual(@as(i32, 3), s.persons);
+    try std.testing.expectEqual(@as(i32, 5), s.trailer_count.?);
+    try std.testing.expectEqualStrings(expected_companies, companies.items);
+    try std.testing.expectEqualStrings(expected_persons, persons.items);
+}
+
+test "C ABI stream feed/finish on mini fixture" {
+    const s = c_api.ch_stream_create(null) orelse return error.TestUnexpectedResult;
+    defer c_api.ch_stream_destroy(s);
+
+    // Two coarse chunks split mid-file.
+    const mid = mini_snapshot.len / 2;
+    try std.testing.expectEqual(c_api.CH_OK, c_api.ch_stream_feed(s, mini_snapshot.ptr, mid));
+    try std.testing.expectEqual(c_api.CH_OK, c_api.ch_stream_feed(s, mini_snapshot[mid..].ptr, mini_snapshot.len - mid));
+    try std.testing.expectEqual(c_api.CH_OK, c_api.ch_stream_finish(s));
+
+    var companies: i32 = 0;
+    var persons: i32 = 0;
+    var trailer: i32 = 0;
+    c_api.ch_stream_stats(s, &companies, &persons, &trailer);
+    try std.testing.expectEqual(@as(i32, 2), companies);
+    try std.testing.expectEqual(@as(i32, 3), persons);
+    try std.testing.expectEqual(@as(i32, 5), trailer);
+
+    var got_companies: usize = 0;
+    var got_persons: usize = 0;
+    while (true) {
+        var batch: c_api.ChCsvBatch = .{};
+        const n = c_api.ch_stream_next_batch(s, &batch);
+        if (n == 0) break;
+        try std.testing.expectEqual(@as(c_int, 1), n);
+        defer c_api.ch_csv_batch_free(&batch);
+        if (batch.kind == 0) got_companies += @intCast(batch.row_count) else got_persons += @intCast(batch.row_count);
+    }
+    try std.testing.expectEqual(@as(usize, 2), got_companies);
+    try std.testing.expectEqual(@as(usize, 3), got_persons);
 }

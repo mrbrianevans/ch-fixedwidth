@@ -69,11 +69,17 @@ Parsing is separate from CLI I/O so the same logic can be embedded:
 
 | Surface | Location | Role |
 |---------|----------|------|
-| Zig module | `src/parse.zig`, `src/snapshot.zig` | Pure format + in-memory conversion |
-| C ABI | `include/ch_fixedwidth.h`, `libch_fixedwidth` | `ch_parse_snapshot` for native FFI |
+| Zig module | `src/parse.zig`, `src/snapshot.zig`, `src/stream.zig` | Pure format, full-buffer, and chunked streaming conversion |
+| C ABI | `include/ch_fixedwidth.h`, `libch_fixedwidth` | `ch_parse_snapshot` (one-shot) + `ch_stream_*` (batched streaming) |
 | WASM | `zig build wasm` → `ch_fixedwidth.wasm` | Same C-style exports, no filesystem I/O |
-| TypeScript host | [`wasm-ts/`](wasm-ts/) | Publish-ready TS package (`ChFixedWidthParser`); Bun local CLI under `wasm-ts/local/` |
+| TypeScript host | [`wasm-ts/`](wasm-ts/) | Publish-ready package: `ChFixedWidthStream` + `ChFixedWidthParser`; Bun CLI under `wasm-ts/local/` |
 | CLI | `src/main.zig` + `src/file_convert.zig` | Multithreaded file conversion |
+
+### Large files (WASM / C)
+
+Prefer the **streaming** API: feed input in chunks (e.g. 1 MiB) and pull CSV **batches** (default ~1000 rows or 256 KiB per kind). That keeps peak memory near O(chunk + batch) instead of O(file). One-shot `ch_parse_snapshot` / `ChFixedWidthParser.parse` still suit small fixtures and moderate documents.
+
+Product **198** (update files, `DDDDUPDT`) is documented under `docs/` for a future release; only snapshot products **195 / 216** (`DDDSNAP`) are implemented.
 
 ```bash
 zig build wasm -Doptimize=ReleaseFast

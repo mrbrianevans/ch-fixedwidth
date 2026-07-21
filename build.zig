@@ -89,6 +89,13 @@ pub fn build(b: *std.Build) void {
         "ch_buffer_free",
         "ch_alloc",
         "ch_free",
+        "ch_stream_create",
+        "ch_stream_destroy",
+        "ch_stream_feed",
+        "ch_stream_finish",
+        "ch_stream_next_batch",
+        "ch_csv_batch_free",
+        "ch_stream_stats",
     };
 
     const install_wasm = b.addInstallArtifact(wasm, .{

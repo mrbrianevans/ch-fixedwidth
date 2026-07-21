@@ -16,27 +16,52 @@ zig build wasm -Doptimize=ReleaseFast
 
 Produces `zig-out/ch_fixedwidth.wasm`.
 
-## Install (when published)
-
-```bash
-npm install @ch-fixedwidth/wasm-ts
-# plus the WASM binary from GitHub Releases or your own build
-```
-
-Until publish, depend on the monorepo path or copy `wasm-ts/src`.
-
 ## Usage
+
+### Streaming (recommended for large files)
+
+Peak memory stays roughly **O(chunk + batch)**, not O(file). Drain each batch
+(e.g. write to disk) before feeding more if you want to bound host memory.
 
 ```ts
 import { readFile } from "node:fs/promises";
-import { ChFixedWidthParser, ChParseError } from "@ch-fixedwidth/wasm-ts";
+import { ChFixedWidthStream } from "@ch-fixedwidth/wasm-ts";
 
 const wasmBytes = await readFile("ch_fixedwidth.wasm");
-const parser = await ChFixedWidthParser.create({ wasmBytes });
+const stream = await ChFixedWidthStream.create({
+  wasmBytes,
+  // optional: batchRows: 1000, batchBytes: 256 * 1024
+});
 
-const result = parser.parse(await readFile("snapshot.dat"));
-// result.companiesCsv, result.personsCsv, result.companies, result.persons, result.trailerCount
+try {
+  // feed any chunk size — need not end on a newline
+  for (const batch of stream.feed(chunk)) {
+    if (batch.kind === "companies") {
+      // batch.data: Uint8Array CSV fragment (header on first companies batch)
+    } else {
+      // persons
+    }
+  }
+  for (const batch of stream.finish()) {
+    /* final batches + trailer check */
+  }
+  const { companies, persons, trailerCount } = stream.stats();
+} finally {
+  stream.destroy();
+}
 ```
+
+### One-shot (small / moderate files)
+
+```ts
+import { ChFixedWidthParser } from "@ch-fixedwidth/wasm-ts";
+
+const parser = await ChFixedWidthParser.create({ wasmBytes });
+const result = parser.parse(snapshotBytes);
+// result.companiesCsv, result.personsCsv, ...
+```
+
+`parse()` holds the **entire** snapshot and both CSV documents in WASM linear memory. Prefer streaming for multi-hundred-MB / GB snapshots.
 
 ### Load options
 
@@ -48,22 +73,19 @@ Provide **exactly one** of:
 | `wasmUrl` | HTTP(S) or fetchable URL |
 | `module` | Pre-compiled `WebAssembly.Module` |
 
-### One-shot vs large files
-
-`parse()` holds the **entire** snapshot and both CSV documents in WASM linear memory. Fine for small fixtures and moderate files; for multi-hundred-MB / GB snapshots use the native CLI or a streaming host when available.
-
 ### Public exports
 
 | Export | Role |
 |--------|------|
+| `ChFixedWidthStream` | Chunked input → batched CSV (large files) |
 | `ChFixedWidthParser` | One-shot in-memory parse |
 | `ChParseError` / `ChErrorCode` | Typed ABI errors |
 | `compileWasm` / `instantiateWasm` / `getExports` | Low-level load helpers |
-| Types: `ParseResult`, `SnapshotInput`, `LoadOptions`, `ChWasmExports` | |
+| Types: `CsvBatch`, `ParseResult`, `LoadOptions`, `StreamOptions`, … | |
 
 ## Local Bun CLI (not published)
 
-Monorepo helper for manual runs and CI:
+Monorepo helper: streaming read + batch write.
 
 ```bash
 zig build wasm -Doptimize=ReleaseFast

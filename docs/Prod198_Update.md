@@ -1,5 +1,7 @@
 # Companies House Product 198 - Company Appointments Update
 
+> **Status: not implemented yet.** This document is a format reference for a future parser path. The current library and CLI only accept snapshot files (`DDDSNAP`, products 195 / 216).
+
 **File Type**: Update (`DDDDUPDT` header)
 
 **General**  

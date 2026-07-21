@@ -48,3 +48,36 @@ export function getExports(instance: WebAssembly.Instance): ChWasmExports {
   }
   return exports;
 }
+
+/** Require streaming exports (throws if the module is too old). */
+export function requireStreamExports(exports: ChWasmExports): asserts exports is ChWasmExports & {
+  ch_stream_create: (configPtr: number) => number;
+  ch_stream_destroy: (streamPtr: number) => void;
+  ch_stream_feed: (streamPtr: number, dataPtr: number, len: number) => number;
+  ch_stream_finish: (streamPtr: number) => number;
+  ch_stream_next_batch: (streamPtr: number, outPtr: number) => number;
+  ch_csv_batch_free: (batchPtr: number) => void;
+  ch_stream_stats: (
+    streamPtr: number,
+    companiesPtr: number,
+    personsPtr: number,
+    trailerPtr: number,
+  ) => void;
+} {
+  const needed = [
+    "ch_stream_create",
+    "ch_stream_destroy",
+    "ch_stream_feed",
+    "ch_stream_finish",
+    "ch_stream_next_batch",
+    "ch_csv_batch_free",
+    "ch_stream_stats",
+  ] as const;
+  for (const name of needed) {
+    if (typeof exports[name] !== "function") {
+      throw new Error(
+        `Invalid ch_fixedwidth.wasm: missing streaming export ${name}. Rebuild with zig build wasm.`,
+      );
+    }
+  }
+}
