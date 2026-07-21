@@ -46,12 +46,12 @@ fn freeBuffer(buf: *ChBuffer) void {
 }
 
 /// Free a buffer previously filled by `ch_parse_snapshot`.
-export fn ch_buffer_free(buf: ?*ChBuffer) void {
+pub export fn ch_buffer_free(buf: ?*ChBuffer) void {
     if (buf) |b| freeBuffer(b);
 }
 
 /// Free both CSV buffers in a parse result.
-export fn ch_parse_result_free(result: ?*ChParseResult) void {
+pub export fn ch_parse_result_free(result: ?*ChParseResult) void {
     if (result) |r| {
         freeBuffer(&r.companies_csv);
         freeBuffer(&r.persons_csv);
@@ -67,7 +67,7 @@ export fn ch_parse_result_free(result: ?*ChParseResult) void {
 /// `ch_parse_result_free` or `ch_buffer_free` on each field.
 ///
 /// Does not perform filesystem I/O.
-export fn ch_parse_snapshot(
+pub export fn ch_parse_snapshot(
     input: ?[*]const u8,
     input_len: usize,
     out: ?*ChParseResult,
@@ -105,14 +105,14 @@ export fn ch_parse_snapshot(
 }
 
 /// Allocate `size` bytes for host-side use (e.g. WASM hosts copying input in).
-export fn ch_alloc(size: usize) ?[*]u8 {
+pub export fn ch_alloc(size: usize) ?[*]u8 {
     if (size == 0) return null;
     const mem = gpa().alloc(u8, size) catch return null;
     return mem.ptr;
 }
 
 /// Free memory returned by `ch_alloc`.
-export fn ch_free(ptr: ?[*]u8, size: usize) void {
+pub export fn ch_free(ptr: ?[*]u8, size: usize) void {
     if (ptr) |p| {
         if (size > 0) gpa().free(p[0..size]);
     }

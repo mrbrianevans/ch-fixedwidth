@@ -15,4 +15,5 @@ test {
     _ = snapshot;
     _ = file_convert;
     _ = c_api;
+    _ = @import("parse_test.zig");
 }
