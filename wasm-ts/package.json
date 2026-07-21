@@ -1,0 +1,22 @@
+{
+  "name": "@ch-fixedwidth/wasm-ts",
+  "version": "0.1.0",
+  "description": "TypeScript host for the freestanding Companies House fixed-width WASM parser",
+  "module": "src/index.ts",
+  "type": "module",
+  "private": true,
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "cli": "bun run cli.ts",
+    "test": "bun test",
+    "start": "bun run cli.ts"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  }
+}

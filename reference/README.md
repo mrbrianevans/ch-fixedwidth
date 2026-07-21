@@ -62,7 +62,8 @@ For test runs, I suggest running on a small file initially to check the output i
 | Go (simple) | `simple_parser.go` | `go build -o simple_parser.exe simple_parser.go` then `.\simple_parser.exe …` | 290 |
 | Python | `parser.py` | `uv run python .\parser.py <input.dat> <output_folder>` | 177 |
 | Bun / TypeScript | `parser.ts` | `bun run parser.ts <input.dat> <output_folder>` | 243 |
-| Bun WASI host (legacy) | `run_wasm.ts` | Historical host for a file-I/O WASI module; prefer freestanding `zig build wasm` parse API | 79 |
+
+For the maintained freestanding WASM host (typed parse API), see [`../wasm-ts/`](../wasm-ts/).
 
 \*Physical source lines in the file (including blanks and comments), counted on the benchmark date.
 

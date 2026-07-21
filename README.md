@@ -68,7 +68,13 @@ Parsing is separate from CLI I/O so the same logic can be embedded:
 | Zig module | `src/parse.zig`, `src/snapshot.zig` | Pure format + in-memory conversion |
 | C ABI | `include/ch_fixedwidth.h`, `libch_fixedwidth` | `ch_parse_snapshot` for native FFI |
 | WASM | `zig build wasm` → `ch_fixedwidth.wasm` | Same C-style exports, no filesystem I/O |
+| TypeScript host | [`wasm-ts/`](wasm-ts/) | Bun/TS wrapper with typed `ParseResult` over the WASM module |
 | CLI | `src/main.zig` + `src/file_convert.zig` | Multithreaded file conversion |
+
+```bash
+zig build wasm -Doptimize=ReleaseFast
+cd wasm-ts && bun test && bun run cli.ts ../src/testdata/mini_snapshot.dat ./out
+```
 
 ## Development
 

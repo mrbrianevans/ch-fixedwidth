@@ -24,6 +24,11 @@ output/
 *.dat
 !src/testdata/*.dat
 
+# JS / Bun (wasm-ts package)
+node_modules/
+wasm-ts/out/
+wasm-ts/out_*/
+
 # Editor / OS
 .DS_Store
 Thumbs.db
