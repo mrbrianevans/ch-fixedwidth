@@ -1,4 +1,33 @@
+# Local secrets / env
 **/.env
-bin
-output
+
+# Build outputs
+bin/
+zig-out/
+.zig-cache/
 *.exe
+*.o
+*.obj
+*.lib
+*.a
+*.so
+*.dylib
+*.dll
+*.pdb
+parser.wasm
+ch_fixedwidth.wasm
+
+# Generated conversion output
+output/
+
+# Large local data files (download separately for benchmarks)
+*.dat
+!src/testdata/*.dat
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*~
