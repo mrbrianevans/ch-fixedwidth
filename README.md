@@ -2,47 +2,50 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-High-performance Zig parser for Companies House bulk appointment data (products 195 / 216). Converts snapshot files from the proprietary fixed-width + chevron format into CSV.
+High-performance parser for [Companies House](https://www.gov.uk/government/organisations/companies-house) bulk appointment data (products **195** / **216**). Converts proprietary fixed-width + chevron snapshot files into CSV.
+
+It is designed for speed and can exceed **5 million records per second** on modern laptops.
 
 **Version:** 0.0.1 — see [CHANGELOG.md](CHANGELOG.md).
 
-Native builds use **multithreading**: the input is split on line boundaries and worker threads write part CSVs that are concatenated.
+## Source format
 
-**Measured throughput** (PowerShell `Stopwatch` wall clock, not self-reported): `Prod216_4257_ew_6.dat` — 6 182 956 records in ~1.24 s → **~5.0 million records/second** (`zig build -Doptimize=ReleaseFast`, post-refactor CLI). Absolute numbers vary with disk and CPU.
-
-## File format (overview)
-
-Plain-text snapshot files with:
-
-| Record | Identifier / type | Role |
-|--------|-------------------|------|
-| Header | `DDDDSNAP` | Run number and production date |
-| Company | type `1` at column 9 | Fixed fields + variable-length company name |
-| Person  | type `2` at column 9 | Fixed fields + chevron-separated (`<`) variable fields |
-| Trailer | `99999999` | Record count (excludes header/trailer) |
-
-Field positions are Unicode character offsets. Most rows are ASCII (fast path); multi-byte UTF-8 uses a character walk so boundaries match the historical reference parsers.
+Plain-text snapshot files (`DDDDSNAP` header) containing company and officer (person) records in a fixed-width layout, with variable-length name and address fields separated by chevrons (`<`).
 
 Full field layouts: [docs/Prod195_Snapshot.md](docs/Prod195_Snapshot.md).
 
-## Output format
+## Available data
 
-One input file produces two CSVs in the output directory:
+Each input file yields company rows and officer (person) rows.
 
-- `companies_data_<basename>.csv`
-- `persons_data_<basename>.csv`
+**Companies** — company number, status, officer count, and company name.
 
-Company columns: Company Number, Company Status, Number of Officers, Company Name.
+**Officers** — company number; appointment type, dates, and origin; person number and corporate indicator; name parts (title, forenames, surname, honours); dates of birth; address fields; occupation, nationality, and country of residence.
 
-Person columns: Company Number, App Date Origin, Appointment Type, Person number, Corporate indicator, Appointment Date, Resignation Date, Person Postcode, Partial Date of Birth, Full Date of Birth, Title, Forenames, Surname, Honours, Care_of, PO_box, Address line 1, Address line 2, Post_town, County, Country, Occupation, Nationality, Resident Country.
+## Install
 
-## Build and run
+Download a pre-built binary for your platform from the [GitHub Releases](https://github.com/mrbrianevans/ch-fixedwidth/releases) page.
 
-Requires [Zig](https://ziglang.org/) 0.16+.
+Assets are named like:
+
+| Platform | Asset |
+|----------|--------|
+| Windows x86_64 | `parser-windows-x86_64.exe` |
+| Linux x86_64 | `parser-linux-x86_64` |
+| Linux ARM64 | `parser-linux-aarch64` |
+| macOS Intel | `parser-macos-x86_64` |
+| macOS Apple Silicon | `parser-macos-aarch64` |
+
+Make the binary executable on Unix-like systems:
 
 ```bash
-zig build -Doptimize=ReleaseFast
-./zig-out/bin/parser <input.dat> <output_folder>
+chmod +x parser-linux-x86_64
+```
+
+## Run
+
+```bash
+./parser <input.dat> <output_folder>
 ```
 
 | Argument | Description |
@@ -53,47 +56,55 @@ zig build -Doptimize=ReleaseFast
 Example:
 
 ```bash
-./zig-out/bin/parser Prod216_4257_ew_6.dat ./output
+./parser Prod216_4257_ew_6.dat ./output
 ```
 
-Exit code `0` on success (trailer count matches rows written); non-zero on header/trailer mismatch or I/O errors.
+Exit code `0` on success (trailer record count matches rows written); non-zero on header/trailer mismatch or I/O errors.
+
+## Output
+
+One input file produces two CSVs in the output directory:
+
+- `companies_data_<basename>.csv`
+- `persons_data_<basename>.csv`
+
+**Companies header:**
+
+```
+Company Number,Company Status,Number of Officers,Company Name
+```
+
+**Persons header:**
+
+```
+Company Number,App Date Origin,Appointment Type,Person number,Corporate indicator,Appointment Date,Resignation Date,Person Postcode,Partial Date of Birth,Full Date of Birth,Title,Forenames,Surname,Honours,Care_of,PO_box,Address line 1,Address line 2,Post_town,County,Country,Occupation,Nationality,Resident Country
+```
+
+---
+
+## Building from source
+
+Requires [Zig](https://ziglang.org/) 0.16+.
 
 ```bash
-zig build test              # unit tests
-zig build wasm -Doptimize=ReleaseFast   # freestanding WASM (parse API only)
+zig build -Doptimize=ReleaseFast
+./zig-out/bin/parser <input.dat> <output_folder>
 ```
 
-## Library API
-
-Parsing is separate from CLI I/O so the same logic can be embedded:
-
-| Surface | Location | Role |
-|---------|----------|------|
-| Zig module | `src/parse.zig`, `src/snapshot.zig`, `src/stream.zig` | Pure format, full-buffer, and chunked streaming conversion |
-| C ABI | `include/ch_fixedwidth.h`, `libch_fixedwidth` | `ch_parse_snapshot` (one-shot) + `ch_stream_*` (batched streaming) |
-| WASM | `zig build wasm` → `ch_fixedwidth.wasm` | Same C-style exports, no filesystem I/O |
-| TypeScript host | [`wasm-ts/`](wasm-ts/) | Publish-ready package: `ChFixedWidthStream` + `ChFixedWidthParser`; Bun CLI under `wasm-ts/local/` |
-| CLI | `src/main.zig` + `src/file_convert.zig` | Multithreaded file conversion |
-
-### Large files (WASM / C)
-
-Prefer the **streaming** API: feed input in chunks (e.g. 1 MiB) and pull CSV **batches** (default ~1000 rows or 256 KiB per kind). That keeps peak memory near O(chunk + batch) instead of O(file). One-shot `ch_parse_snapshot` / `ChFixedWidthParser.parse` still suit small fixtures and moderate documents.
-
-Product **198** (update files, `DDDDUPDT`) is documented under `docs/` for a future release; only snapshot products **195 / 216** (`DDDSNAP`) are implemented.
-
-```bash
-zig build wasm -Doptimize=ReleaseFast
-cd wasm-ts && bun install && bun test && bun run local ../src/testdata/mini_snapshot.dat ./out
-```
-
-## Development
+### Development
 
 ```bash
 zig build                   # debug CLI + libs
-zig build test
+zig build test              # unit tests
 zig fmt --check .
 ```
 
-## Alternative implementations
+### WASM
 
-Older Go, Python, and TypeScript parsers (and multi-language benchmarks) live under [`reference/`](reference/) for comparison only. The Zig implementation is the maintained product path.
+```bash
+zig build wasm -Doptimize=ReleaseFast
+```
+
+Produces `zig-out/ch_fixedwidth.wasm` (also published on releases as `ch_fixedwidth-wasm32-freestanding.wasm`).
+
+For embedding (C ABI, streaming API, TypeScript host), see [docs/development.md](docs/development.md). Format notes for update product 198 (not yet implemented) are under [docs/](docs/).
