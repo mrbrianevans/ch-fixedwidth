@@ -221,3 +221,20 @@ body {
   background: var(--ok-bg);
   color: var(--ok-text);
 }
+
+.footer {
+  margin: 1.25rem 0 0;
+  font-size: 0.9rem;
+}
+
+.footer a {
+  color: var(--accent);
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 0.12em;
+}
+
+.footer a:hover {
+  color: var(--accent-hover);
+}
+
