@@ -1,0 +1,79 @@
+name: CI
+
+on:
+  # Any branch push and all PRs (formatting, build, tests).
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  zig:
+    name: Zig (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: "0.16.0"
+
+      - name: Check formatting
+        run: zig fmt --check .
+
+      - name: Build (ReleaseSafe)
+        run: zig build -Doptimize=ReleaseSafe
+
+      - name: Build freestanding WASM
+        run: zig build wasm -Doptimize=ReleaseSafe
+
+      - name: Run tests
+        run: zig build test
+
+  wasm-ts:
+    name: wasm-ts (Bun)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: "0.16.0"
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Build freestanding WASM
+        run: zig build wasm -Doptimize=ReleaseSafe
+
+      - name: Install wasm-ts deps
+        working-directory: wasm-ts
+        run: bun install
+
+      - name: Run wasm-ts unit tests
+        working-directory: wasm-ts
+        run: bun test
+
+      - name: Smoke local Bun CLI on mini fixture
+        working-directory: wasm-ts
+        run: bun run local/cli.ts ../src/testdata/mini_snapshot.dat ./out_ci

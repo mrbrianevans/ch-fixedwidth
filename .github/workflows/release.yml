@@ -33,12 +33,6 @@ jobs:
             target: aarch64-macos
             ext: ""
             name: macos-aarch64
-          - os: ubuntu-latest
-            target: wasm32-wasi
-            ext: .wasm
-            name: wasm
-            # Larger linear memory for multi‑GB inputs under Bun/node WASI hosts.
-            extra_flags: "--initial-memory=33554432 --max-memory=536870912"
 
     runs-on: ${{ matrix.os }}
 
@@ -51,30 +45,54 @@ jobs:
         with:
           version: 0.16.0
 
-      - name: Build
+      - name: Build CLI
         shell: bash
         run: |
-          zig build-exe parser.zig -OReleaseFast -fstrip --name parser \
-            -target ${{ matrix.target }} \
-            ${{ matrix.extra_flags }}
-
-      - name: Rename binary
-        shell: bash
-        run: |
-          # Windows emit may be parser.exe; others parser
-          if [ -f "parser${{ matrix.ext }}" ]; then
-            mv "parser${{ matrix.ext }}" "parser-${{ matrix.name }}${{ matrix.ext }}"
-          elif [ -f parser ]; then
-            mv parser "parser-${{ matrix.name }}${{ matrix.ext }}"
+          zig build -Doptimize=ReleaseFast -Dtarget=${{ matrix.target }}
+          if [ -f "zig-out/bin/parser${{ matrix.ext }}" ]; then
+            mv "zig-out/bin/parser${{ matrix.ext }}" "parser-${{ matrix.name }}${{ matrix.ext }}"
+          elif [ -f zig-out/bin/parser ]; then
+            mv zig-out/bin/parser "parser-${{ matrix.name }}${{ matrix.ext }}"
           else
             echo "Built binary not found" >&2
-            ls -la
+            ls -laR zig-out
             exit 1
           fi
 
-      - name: Upload to Release
+      - name: Upload CLI to Release
         uses: softprops/action-gh-release@v2
         with:
           files: parser-${{ matrix.name }}${{ matrix.ext }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  wasm:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: Build freestanding WASM
+        run: |
+          zig build wasm -Doptimize=ReleaseFast
+          if [ -f zig-out/ch_fixedwidth.wasm ]; then
+            mv zig-out/ch_fixedwidth.wasm ch_fixedwidth-wasm32-freestanding.wasm
+          elif [ -f zig-out/bin/ch_fixedwidth.wasm ]; then
+            mv zig-out/bin/ch_fixedwidth.wasm ch_fixedwidth-wasm32-freestanding.wasm
+          else
+            echo "WASM module not found" >&2
+            ls -laR zig-out
+            exit 1
+          fi
+
+      - name: Upload WASM to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ch_fixedwidth-wasm32-freestanding.wasm
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

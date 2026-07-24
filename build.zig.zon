@@ -1,0 +1,16 @@
+.{
+    .name = .ch_fixedwidth,
+    .version = "0.0.1",
+    .fingerprint = 0x2a0a96d795ee6ff8,
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{},
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "include",
+        "README.md",
+        "LICENSE",
+        "CHANGELOG.md",
+    },
+}

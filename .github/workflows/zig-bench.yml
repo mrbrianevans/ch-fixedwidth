@@ -1,0 +1,170 @@
+# Track Zig parser throughput on the public large snapshot for every push/PR.
+name: Zig performance
+
+on:
+  push:
+    paths:
+      - "src/**"
+      - "build.zig"
+      - "build.zig.zon"
+      - ".github/workflows/zig-bench.yml"
+  pull_request:
+    paths:
+      - "src/**"
+      - "build.zig"
+      - "build.zig.zon"
+      - ".github/workflows/zig-bench.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bench:
+    name: Zig bench (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: "0.16.0"
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Download test input
+        env:
+          INPUT_URL: https://s3.companiescatalogue.co.uk/free/prod216/2026/07/07/Prod216_4257_ew_6.dat
+          INPUT_FILE: Prod216_4257_ew_6.dat
+        run: |
+          set -euo pipefail
+          echo "Downloading ${INPUT_URL}"
+          curl -fL --compressed \
+            --retry 5 --retry-delay 5 --retry-all-errors \
+            -o "${INPUT_FILE}" \
+            -w "Wire transfer: %{size_download} bytes in %{time_total}s (HTTP %{http_code})\n" \
+            "${INPUT_URL}"
+          ls -lh "${INPUT_FILE}"
+          python - <<'PY'
+          import os
+          size = os.path.getsize("Prod216_4257_ew_6.dat")
+          print(f"Decompressed size: {size:,} bytes ({size / (1024**3):.3f} GiB)")
+          if size < 100_000_000:
+              raise SystemExit("Downloaded file looks too small; aborting")
+          PY
+
+      - name: Build Zig (ReleaseFast)
+        run: |
+          set -euo pipefail
+          zig build -Doptimize=ReleaseFast
+          EXT=""
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            EXT=".exe"
+          fi
+          if [[ -f "zig-out/bin/parser${EXT}" ]]; then
+            echo "zig-out/bin/parser${EXT}" > .zig_bin
+          elif [[ -f zig-out/bin/parser ]]; then
+            chmod +x zig-out/bin/parser
+            echo "zig-out/bin/parser" > .zig_bin
+          else
+            echo "parser binary missing" >&2
+            ls -laR zig-out || true
+            exit 1
+          fi
+
+      - name: Benchmark Zig
+        env:
+          INPUT_FILE: Prod216_4257_ew_6.dat
+          # Trailer count from this public snapshot (companies + persons).
+          RECORD_COUNT: "6182956"
+        run: |
+          set -euo pipefail
+          ZIG_BIN=$(cat .zig_bin)
+          OUTDIR=bench_out_zig
+          rm -rf "${OUTDIR}"
+          mkdir -p "${OUTDIR}"
+
+          start=$(python -c 'import time; print(time.perf_counter())')
+          set +e
+          "${ZIG_BIN}" "${INPUT_FILE}" "${OUTDIR}" >"${OUTDIR}/stdout.log" 2>"${OUTDIR}/stderr.log"
+          status=$?
+          set -e
+          end=$(python -c 'import time; print(time.perf_counter())')
+          elapsed=$(python -c "print(f'{$end - $start:.3f}')")
+
+          echo "exit=${status} time=${elapsed}s"
+          if [[ -s "${OUTDIR}/stdout.log" ]]; then
+            echo "--- stdout ---"
+            cat "${OUTDIR}/stdout.log"
+          fi
+          if [[ -s "${OUTDIR}/stderr.log" ]]; then
+            echo "--- stderr ---"
+            cat "${OUTDIR}/stderr.log"
+          fi
+
+          if [[ "${status}" != "0" ]]; then
+            echo "Zig parser failed" >&2
+            exit "${status}"
+          fi
+
+          rps=$(python -c "print(f'{int(${RECORD_COUNT}) / float(${elapsed}):.0f}')")
+          printf '%s\t%s\t%s\t%s\n' "Zig (native)" "${elapsed}" "${status}" "${rps}" > bench_results.tsv
+          echo "Throughput ≈ ${rps} records/s"
+
+          # Free disk before summary
+          rm -rf "${OUTDIR}"
+
+      - name: Write job summary
+        if: always()
+        env:
+          RUNNER_OS: ${{ runner.os }}
+          RUNNER_ARCH: ${{ runner.arch }}
+        run: |
+          set -euo pipefail
+          RESULTS=bench_results.tsv
+          INPUT_FILE=Prod216_4257_ew_6.dat
+
+          {
+            echo "## Zig performance — \`${{ matrix.os }}\`"
+            echo
+            echo "| Field | Value |"
+            echo "|-------|-------|"
+            echo "| Runner OS | ${RUNNER_OS} |"
+            echo "| Runner arch | ${RUNNER_ARCH} |"
+            if [[ -f "${INPUT_FILE}" ]]; then
+              SIZE=$(python -c "import os; print(f'{os.path.getsize(\"${INPUT_FILE}\"):,}')")
+              echo "| Input | \`${INPUT_FILE}\` (${SIZE} bytes) |"
+            else
+              echo "| Input | missing |"
+            fi
+            echo "| Source | https://s3.companiescatalogue.co.uk/free/prod216/2026/07/07/Prod216_4257_ew_6.dat |"
+            echo "| Records | 6 182 956 (trailer) |"
+            echo
+            echo "Wall-clock convert time (build excluded). Multithreaded native Zig."
+            echo
+            echo "| Parser | Time (s) | Exit | rec/s |"
+            echo "|--------|---------:|-----:|------:|"
+
+            if [[ ! -f "${RESULTS}" ]]; then
+              echo "| _(no results)_ | — | — | — |"
+            else
+              while IFS=$'\t' read -r name seconds code rps; do
+                echo "| ${name} | ${seconds} | ${code} | ${rps} |"
+              done < "${RESULTS}"
+            fi
+          } | tee -a "${GITHUB_STEP_SUMMARY}"

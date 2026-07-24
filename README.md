@@ -1,123 +1,110 @@
-# Fixed width parser for companies house data
+# Companies House fixed-width parser
 
-Companies House publish bulk data products in a custom file format which is broadly fixed width + variable width chevron separated values.
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-Files have a custom header and trailer format with metadata.
+High-performance parser for [Companies House](https://www.gov.uk/government/organisations/companies-house) bulk appointment data (products **195** / **216**). Converts proprietary fixed-width + chevron snapshot files into CSV.
 
-Files are encoded as plain text - no binary.
+It is designed for speed and can exceed **5 million records per second** on modern laptops.
 
-Most data products are split into multiple files to allow parallel processing.
+**Version:** 0.0.1 — see [CHANGELOG.md](CHANGELOG.md).
 
-## Parser rules
+## Source format
 
-A parser for this format should convert the data into a common, interoperable format like CSV, which can be read by tools like DuckDB.
+Plain-text snapshot files (`DDDDSNAP` header) containing company and officer (person) records in a fixed-width layout, with variable-length name and address fields separated by chevrons (`<`).
 
-A parser implementation MUST correctly convert an input file to valid output data file(s). All input data must be represented in the output - no data rows can be lost (this does not include metadata such as number of lines in a file). 
+Full field layouts: [docs/Prod195_Snapshot.md](docs/Prod195_Snapshot.md).
 
-The output can be compressed (zstd/gzip), if by doing so the processing is sped up by reduce disk usage on output.
+## Available data
 
-Assuming perfect correctness is achieved, a parser should aim to be high performance and efficient to achieve fast conversion times.
+Each input file yields company rows and officer (person) rows.
 
-The input to a parser implementation is a file path pointing to a single data file on disk, and a file path to an output directory where output files are to be written.
+**Companies** — company number, status, officer count, and company name.
 
-The parser must read the input data file, and incrementally parse (in a streaming fashion) all records and write them to the appropriate output file(s).
-At no point should the parser load the entire data set into memory. It MUST allow for larger than memory processing.
-A single input file may result in multiple output files - the general rule for this is one entity type per output file, eg officers in one file, companies in another. But variants of an entity type, eg corporate officer and natural officer can be in the same file provided most of the fields are the same.
+**Officers** — company number; appointment type, dates, and origin; person number and corporate indicator; name parts (title, forenames, surname, honours); dates of birth; address fields; occupation, nationality, and country of residence.
 
-A parser may make full use of available resources on the machine its running on - including all CPU cores.
+## Install
 
-## Instructions to LLMs building a Go parser
+Download a pre-built binary for your platform from the [GitHub Releases](https://github.com/mrbrianevans/ch-fixedwidth/releases) page.
 
-Use the python parser (process_company_appointments_data.py) as the reference implementation. 
-Use the .env file to get paths for testing files, and output to ./output.
-Use DuckDB to verify the output, eg `select * from 'output\persons_data_Prod216_4257_ew_6.csv' using sample 10;` or `select count(*) from 'output\persons_data_Prod216_4257_ni.csv';`. You can run duckdb from the command line to query the files like this: `duckdb -json -c "select * from 'output\persons_data_Prod216_4257_ew_6.csv' using sample 10;"` and it will return json output to stdout.
+Assets are named like:
 
-Compare the output of your Go parser to the reference implementation for specific rows and ensure all values match. 
+| Platform | Asset |
+|----------|--------|
+| Windows x86_64 | `parser-windows-x86_64.exe` |
+| Linux x86_64 | `parser-linux-x86_64` |
+| Linux ARM64 | `parser-linux-aarch64` |
+| macOS Intel | `parser-macos-x86_64` |
+| macOS Apple Silicon | `parser-macos-aarch64` |
 
-Run the python one like this:
-```
-uv run python .\process_company_appointments_data.py "...\Prod216_4257_ew_6.dat" ./output
-```
-And the Go one like this:
-```
-go run parser.go ...\Prod216_4257_ni.dat output
-```
-You can wrap those commands in `Measure-Command` in Powershell to time how long they take - do not trust self-reported measurements from the parser.
-
-Before starting your implementation, ensure you are not on the master branch of the git repo. You must be on a feature branch.
-After each change, efficiency enhancement, performance improvement or code refactor, if the output is correct, commit the change to Git with a message explaining the change. The subject should be short, the body more explainatory. Include the time to convert the files in the commit body.
-
-For test runs, I suggest running on a small file initially to check the output is correct without wasting time. Once you're more confident, run it on a larger file.
-
-## Implementations
-
-| Parser | File | How to run | Lines of code\* |
-|--------|------|------------|----------------:|
-| Zig (native) | `parser.zig` | `zig build-exe parser.zig -OReleaseFast -femit-bin=parser_zig` then rename/run `.\parser_zig.exe <input.dat> <output_folder>` | ~780 |
-| Zig (WASI) + Bun | `parser.wasm` + `run_wasm.ts` | Build wasm (see below), then `bun run run_wasm.ts <input.dat> <output_folder>` | 79† |
-| Go (fast) | `parser.go` | `go build -o parser.exe parser.go` then `.\parser.exe <input.dat> <output_folder>` | 436 |
-| Go (simple) | `simple_parser.go` | `go build -o simple_parser.exe simple_parser.go` then `.\simple_parser.exe …` | 290 |
-| Python | `process_company_appointments_data.py` | `uv run python .\process_company_appointments_data.py <input.dat> <output_folder>` | 177 |
-| Bun / TypeScript | `parser.ts` | `bun run parser.ts <input.dat> <output_folder>` | 243 |
-
-† Host loader only; parse logic lives in the Zig WASI binary (`parser.wasm`).
-
-Build WASI module:
+Make the binary executable on Unix-like systems:
 
 ```bash
-zig build-exe parser.zig -OReleaseFast -fstrip --name parser -target wasm32-wasi \
-  --initial-memory=33554432 --max-memory=536870912
+chmod +x parser-linux-x86_64
 ```
 
-\*Physical source lines in the file (including blanks and comments), counted on the benchmark date.
+## Run
 
-## Performance benchmark
+```bash
+./parser <input.dat> <output_folder>
+```
 
-Timed with PowerShell `Measure-Command` / `Stopwatch` (wall clock; not self-reported). Native parsers measured as release/fast binaries. Correctness checked with DuckDB full-table `EXCEPT`: **0 differing rows** for companies and persons (Zig vs Bun/TypeScript reference on the large file; other parsers previously matched Go).
+| Argument | Description |
+|----------|-------------|
+| `input.dat` | Path to a single snapshot file |
+| `output_folder` | Directory for CSV output (created if missing) |
 
-**Test inputs**:
+Example:
 
-| Label | File | Data records (companies + persons) |
-|-------|------|-----------------------------------:|
-| Small | `Prod216_4257_ni.dat` (~158 MB) | 857 317 |
-| Large | `Prod216_4257_ew_6.dat` (~1.17 GB) | 6 182 956 |
+```bash
+./parser Prod216_4257_ew_6.dat ./output
+```
 
-### Wall-clock time
+Exit code `0` on success (trailer record count matches rows written); non-zero on header/trailer mismatch or I/O errors.
 
-| Parser | Small (s) | Large (s) |
-|--------|----------:|----------:|
-| Zig native (parallel) | — | ~0.74 |
-| Zig WASI via Bun | — | ~3.40‡ |
-| Go (fast) | 0.56 | 3.46 |
-| Go (simple) | 1.76 | 13.28 |
-| Python | 3.34 | 23.90 |
-| Bun / TypeScript | 3.53 | ~28.8† |
+## Output
 
-† Re-timed on the same host as the Zig work (~28.8 s); earlier table had ~24 s.  
-‡ Average of 3 PowerShell `Stopwatch` runs; single-threaded WASI (no worker threads). DuckDB full-table `EXCEPT` vs Bun/TS: **0** differing rows.
+One input file produces two CSVs in the output directory:
 
-### Throughput (records / second)
+- `companies_data_<basename>.csv`
+- `persons_data_<basename>.csv`
 
-Records = trailer count (companies + persons). Higher is better.
+**Companies header:**
 
-| Parser | Small (rec/s) | Large (rec/s) |
-|--------|-------------:|-------------:|
-| Zig native (parallel) | — | ~8 400 000 |
-| Zig WASI via Bun | — | ~1 820 000 |
-| Go (fast) | ~1 530 000 | ~1 790 000 |
-| Go (simple) | ~487 000 | ~466 000 |
-| Python | ~257 000 | ~259 000 |
-| Bun / TypeScript | ~243 000 | ~215 000 |
+```
+Company Number,Company Status,Number of Officers,Company Name
+```
 
-On the large file, the parallel Zig native parser is about **4–5×** Go (fast) and about **30–40×** pure Bun/TS. The Zig **WASI** module under Bun is roughly **on par with Go (fast)** and about **8×** faster than the pure TypeScript parser, despite single-threaded execution and WASI syscall overhead.
+**Persons header:**
 
-*Benchmark host/OS: local Windows machine (22 logical CPUs); absolute numbers will vary with disk and CPU. Relative ordering is the useful takeaway.*
+```
+Company Number,App Date Origin,Appointment Type,Person number,Corporate indicator,Appointment Date,Resignation Date,Person Postcode,Partial Date of Birth,Full Date of Birth,Title,Forenames,Surname,Honours,Care_of,PO_box,Address line 1,Address line 2,Post_town,County,Country,Occupation,Nationality,Resident Country
+```
 
-## Further work
+---
 
-Ideas to extend this in future:
- - compress output with zstd set to very low level (1) to reduce disk usage on write
- - try rust as another systems language comparison
- - avoid intermediate part files (shared ordered writers / memory ring)
+## Building from source
 
- 
+Requires [Zig](https://ziglang.org/) 0.16+.
+
+```bash
+zig build -Doptimize=ReleaseFast
+./zig-out/bin/parser <input.dat> <output_folder>
+```
+
+### Development
+
+```bash
+zig build                   # debug CLI + libs
+zig build test              # unit tests
+zig fmt --check .
+```
+
+### WASM
+
+```bash
+zig build wasm -Doptimize=ReleaseFast
+```
+
+Produces `zig-out/ch_fixedwidth.wasm` (also published on releases as `ch_fixedwidth-wasm32-freestanding.wasm`).
+
+For embedding (C ABI, streaming API, TypeScript host), see [docs/development.md](docs/development.md). Format notes for update product 198 (not yet implemented) are under [docs/](docs/).

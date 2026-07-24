@@ -1,0 +1,13 @@
+# Keep source and fixtures LF for consistent embeds and CI.
+* text=auto eol=lf
+*.zig text eol=lf
+*.zon text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.md text eol=lf
+*.h text eol=lf
+*.csv text eol=lf
+*.dat text eol=lf
+*.png binary
+*.jpg binary
+*.wasm binary
