@@ -27,3 +27,9 @@ bun run smoke    # fixture check against wasm-ts
 ```
 
 Uses the [`serve`](https://www.npmjs.com/package/serve) package for static hosting.
+
+## GitHub Pages
+
+Push to `master`, `production-ready`, or `site` (or run the **Deploy site to GitHub Pages** workflow manually). CI builds freestanding WASM, then `web/` into `web/dist`, and deploys with Actions.
+
+Enable **Settings → Pages → Source: GitHub Actions** if not already set.
