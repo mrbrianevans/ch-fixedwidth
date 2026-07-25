@@ -352,7 +352,7 @@ label.btn.is-disabled {
   color: var(--on-surface-variant);
 }
 
-/* —— Queue —— */
+/* —— Input queue (names + sizes only) —— */
 
 .batch-summary {
   margin: 1rem 0 0.35rem;
@@ -367,8 +367,10 @@ label.btn.is-disabled {
 
 .queue-item {
   display: flex;
-  flex-direction: column;
-  gap: 0.15rem;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.25rem 1rem;
   padding: 0.7rem 0.9rem;
   background: var(--surface);
 }
@@ -388,58 +390,14 @@ label.btn.is-disabled {
 .queue-item-meta {
   font-size: var(--body-sm);
   color: var(--on-surface-variant);
-  word-break: break-word;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
-.queue-item--converting .queue-item-name {
-  color: var(--primary-container);
-}
-
-.queue-item--done .queue-item-meta {
-  color: var(--ok);
-}
-
-.queue-item--error .queue-item-meta {
-  color: var(--danger);
-}
-
-.queue-item--cancelled .queue-item-meta {
-  color: var(--on-surface-variant);
-  font-style: italic;
-}
-
-/* —— Progress —— */
-
-.progress-label {
-  margin: 1rem 0 0.35rem;
-}
-
-.progress-label:first-of-type {
-  margin-top: 1.15rem;
-}
-
-.progress-wrap {
-  height: 0.35rem;
-  background: var(--surface-container-high);
-  border-radius: 0;
-  overflow: hidden;
-  margin: 0 0 0.35rem;
-}
-
-.progress-wrap--batch {
-  height: 0.28rem;
-  margin-bottom: 0.75rem;
-}
-
-.progress-bar {
-  height: 100%;
-  width: 0%;
-  background: var(--navy-gradient);
-  transition: width 0.12s linear;
-}
+/* —— Status —— */
 
 .status {
-  margin: 0;
+  margin: 0.85rem 0 0;
   font-family: var(--font-body);
   font-size: var(--body-md);
   color: var(--on-surface);
@@ -453,50 +411,14 @@ label.btn.is-disabled {
   color: var(--ok);
 }
 
-/* —— Stats —— */
+/* —— Results (per-file, with vertical batch rail) —— */
 
-.stats {
-  display: flex;
-  flex-direction: column;
-  gap: 0;
-  margin: 1.35rem 0 0;
-  padding: 0;
-  background: var(--surface);
+.results-panel {
+  margin-top: 1.25rem;
 }
 
-.stats::before {
-  content: "Results";
-  display: block;
-  font-family: var(--font-body);
-  font-size: var(--label-sm);
-  font-weight: 600;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
-  color: var(--on-primary);
-  background: var(--primary-container);
-  padding: 0.45rem 0.9rem;
-}
-
-.stats > div {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 0.35rem 1rem;
-  padding: 0.7rem 0.9rem;
-  background: var(--surface);
-}
-
-.stats > div:nth-child(even) {
-  background: var(--surface-container-low);
-}
-
-.stats > div:hover {
-  background: var(--surface-container-high);
-}
-
-.stats dt {
-  margin: 0;
+.results-heading {
+  margin: 0 0 0.65rem;
   font-family: var(--font-body);
   font-size: var(--label-sm);
   font-weight: 600;
@@ -505,15 +427,102 @@ label.btn.is-disabled {
   color: var(--on-surface-variant);
 }
 
-.stats dd {
+.results-layout {
+  display: flex;
+  align-items: stretch;
+  gap: 0.75rem;
+  background: var(--surface);
+}
+
+.results-progress-rail {
+  flex: 0 0 0.35rem;
+  position: relative;
+  align-self: stretch;
+  min-height: 3rem;
+  background: var(--surface-container-high);
+  overflow: hidden;
+}
+
+.results-progress-fill {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 0%;
+  background: var(--navy-gradient);
+  transition: height 0.12s linear;
+}
+
+.results-list {
+  list-style: none;
   margin: 0;
+  padding: 0;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.result-item {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  padding: 0.75rem 0.9rem;
+  background: var(--surface);
+}
+
+.result-item:nth-child(even) {
+  background: var(--surface-container-low);
+}
+
+.result-item-name {
   font-family: var(--font-display);
-  font-size: 1.05rem;
+  font-size: var(--title-md);
   font-weight: 600;
-  font-variant-numeric: tabular-nums lining-nums;
-  letter-spacing: -0.01em;
   color: var(--primary);
-  text-align: right;
+  word-break: break-all;
+}
+
+.result-item-meta {
+  font-size: var(--body-sm);
+  color: var(--on-surface-variant);
+  word-break: break-word;
+  font-variant-numeric: tabular-nums lining-nums;
+  line-height: 1.45;
+}
+
+.result-item--converting .result-item-name {
+  color: var(--primary-container);
+}
+
+.result-item--done .result-item-meta {
+  color: var(--ok);
+}
+
+.result-item--error .result-item-meta {
+  color: var(--danger);
+}
+
+.result-item--cancelled .result-item-meta {
+  color: var(--on-surface-variant);
+  font-style: italic;
+}
+
+.result-item-progress {
+  height: 0.28rem;
+  margin-top: 0.35rem;
+  background: var(--surface-container-high);
+  overflow: hidden;
+}
+
+.result-item-progress-bar {
+  height: 100%;
+  width: 0%;
+  background: var(--navy-gradient);
+  transition: width 0.12s linear;
+}
+
+.results-memory {
+  margin: 0.75rem 0 0;
+  font-variant-numeric: tabular-nums;
 }
 
 /* —— Tip + site footer —— */
@@ -562,7 +571,8 @@ label.btn.is-disabled {
 /* —— Reduced motion —— */
 
 @media (prefers-reduced-motion: reduce) {
-  .progress-bar,
+  .results-progress-fill,
+  .result-item-progress-bar,
   .drop-zone {
     transition: none;
   }

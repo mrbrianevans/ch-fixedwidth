@@ -95,41 +95,21 @@
           </button>
           <button type="button" id="btn-cancel" class="btn tertiary danger" disabled>Cancel</button>
         </div>
-        <p class="progress-label meta">Current file</p>
-        <div class="progress-wrap" aria-live="polite">
-          <div class="progress-bar" id="progress-bar" style="width: 0%"></div>
-        </div>
-        <p class="progress-label meta">Batch</p>
-        <div class="progress-wrap progress-wrap--batch">
-          <div class="progress-bar" id="batch-progress-bar" style="width: 0%"></div>
-        </div>
         <p id="status" class="status">Ready.</p>
-        <dl id="stats" class="stats" hidden>
-          <div>
-            <dt>Read</dt>
-            <dd id="stat-read">—</dd>
+        <div id="results-panel" class="results-panel" hidden>
+          <p class="results-heading">Results</p>
+          <div class="results-layout">
+            <div
+              class="results-progress-rail"
+              aria-hidden="true"
+              title="Batch progress"
+            >
+              <div id="results-progress-fill" class="results-progress-fill"></div>
+            </div>
+            <ul id="results-list" class="results-list" aria-live="polite"></ul>
           </div>
-          <div>
-            <dt>Companies</dt>
-            <dd id="stat-companies">—</dd>
-          </div>
-          <div>
-            <dt>Persons</dt>
-            <dd id="stat-persons">—</dd>
-          </div>
-          <div>
-            <dt>Elapsed</dt>
-            <dd id="stat-elapsed">—</dd>
-          </div>
-          <div>
-            <dt>Speed</dt>
-            <dd id="stat-speed">—</dd>
-          </div>
-          <div>
-            <dt>Memory</dt>
-            <dd id="stat-memory">—</dd>
-          </div>
-        </dl>
+          <p id="results-memory" class="results-memory meta" hidden></p>
+        </div>
       </section>
 
       <p class="tip">

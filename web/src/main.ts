@@ -22,16 +22,11 @@ const el = {
   fileInput: document.getElementById("file-input") as HTMLInputElement,
   queueList: document.getElementById("queue-list") as HTMLElement,
   batchSummary: document.getElementById("batch-summary") as HTMLElement,
-  progressBar: document.getElementById("progress-bar") as HTMLElement,
-  batchProgressBar: document.getElementById("batch-progress-bar") as HTMLElement,
   status: document.getElementById("status") as HTMLElement,
-  stats: document.getElementById("stats") as HTMLElement,
-  statRead: document.getElementById("stat-read") as HTMLElement,
-  statCompanies: document.getElementById("stat-companies") as HTMLElement,
-  statPersons: document.getElementById("stat-persons") as HTMLElement,
-  statElapsed: document.getElementById("stat-elapsed") as HTMLElement,
-  statSpeed: document.getElementById("stat-speed") as HTMLElement,
-  statMemory: document.getElementById("stat-memory") as HTMLElement,
+  resultsPanel: document.getElementById("results-panel") as HTMLElement,
+  resultsList: document.getElementById("results-list") as HTMLElement,
+  resultsProgressFill: document.getElementById("results-progress-fill") as HTMLElement,
+  resultsMemory: document.getElementById("results-memory") as HTMLElement,
 };
 
 type ItemStatus = "pending" | "converting" | "done" | "error" | "cancelled";
@@ -44,6 +39,9 @@ interface QueueItem {
   companies?: number;
   persons?: number;
   elapsedMs?: number;
+  bytesRead?: number;
+  /** performance.now() when this file began converting */
+  startedAt?: number;
 }
 
 const hasDirPicker = typeof window.showDirectoryPicker === "function";
@@ -66,6 +64,10 @@ let currentItemId: string | null = null;
 let currentFileBytesRead = 0;
 let lastWasmMemoryBytes = 0;
 let lastMemorySampleAt = 0;
+/** Live elapsed / rec-s tick while a file is converting. */
+let liveStatsTimer: number | null = null;
+/** Show results once a batch has been started (or has outcomes). */
+let resultsVisible = false;
 
 /**
  * Parser version from wasm-ts/package.json, injected by Vite `define`.
@@ -90,14 +92,26 @@ function formatNumber(n: number): string {
   return n.toLocaleString();
 }
 
+function formatElapsed(ms: number): string {
+  const secs = ms / 1000;
+  if (secs < 10) return `${secs.toFixed(1)} s`;
+  if (secs < 60) return `${secs.toFixed(1)} s`;
+  const m = Math.floor(secs / 60);
+  const s = secs - m * 60;
+  return `${m}m ${s.toFixed(0)}s`;
+}
+
+function formatRecPerSec(records: number, elapsedMs: number): string {
+  if (elapsedMs <= 0 || records <= 0) return "—";
+  const recPerSec = records / (elapsedMs / 1000);
+  if (recPerSec >= 1_000_000) return `${(recPerSec / 1_000_000).toFixed(2)} M rec/s`;
+  if (recPerSec >= 1000) return `${(recPerSec / 1000).toFixed(1)} k rec/s`;
+  return `${formatNumber(Math.round(recPerSec))} rec/s`;
+}
+
 function setStatus(text: string, kind: "" | "ok" | "error" = ""): void {
   el.status.textContent = text;
   el.status.className = kind ? `status ${kind}` : "status";
-}
-
-function setFileProgress(bytesRead: number, totalBytes: number): void {
-  const pct = totalBytes > 0 ? Math.min(100, (bytesRead / totalBytes) * 100) : 0;
-  el.progressBar.style.width = `${pct.toFixed(2)}%`;
 }
 
 function queueBytes(): { total: number; done: number } {
@@ -111,16 +125,17 @@ function queueBytes(): { total: number; done: number } {
   return { total, done };
 }
 
-function setBatchProgress(): void {
+function updateVerticalProgress(): void {
   const { total, done } = queueBytes();
   const pct = total > 0 ? Math.min(100, (done / total) * 100) : 0;
-  el.batchProgressBar.style.width = `${pct.toFixed(2)}%`;
+  el.resultsProgressFill.style.height = `${pct.toFixed(2)}%`;
 }
 
 function countByStatus(status: ItemStatus): number {
   return queue.filter((i) => i.status === status).length;
 }
 
+/** Step 1 summary: file count and total size only. */
 function updateBatchSummary(): void {
   if (queue.length === 0) {
     el.batchSummary.hidden = true;
@@ -129,39 +144,64 @@ function updateBatchSummary(): void {
   }
   el.batchSummary.hidden = false;
   const n = queue.length;
-  const done = countByStatus("done");
-  const err = countByStatus("error");
-  const pending = countByStatus("pending");
-  const convertingN = countByStatus("converting");
-  const cancelled = countByStatus("cancelled");
   const totalSize = queue.reduce((s, i) => s + i.file.size, 0);
-  const parts = [
-    `${n} file${n === 1 ? "" : "s"}`,
-    formatBytes(totalSize),
-    `${done} done`,
-  ];
-  if (convertingN) parts.push(`${convertingN} converting`);
-  if (pending) parts.push(`${pending} waiting`);
-  if (err) parts.push(`${err} failed`);
-  if (cancelled) parts.push(`${cancelled} cancelled`);
-  el.batchSummary.textContent = parts.join(" · ");
+  el.batchSummary.textContent = `${n} file${n === 1 ? "" : "s"} · ${formatBytes(totalSize)}`;
 }
 
-function statusLabel(status: ItemStatus): string {
-  switch (status) {
+function itemElapsedMs(item: QueueItem): number {
+  if (item.status === "done" && item.elapsedMs != null) return item.elapsedMs;
+  if (item.status === "converting" && item.startedAt != null) {
+    return performance.now() - item.startedAt;
+  }
+  return item.elapsedMs ?? 0;
+}
+
+function resultMetaLine(item: QueueItem): string {
+  const size = formatBytes(item.file.size);
+  const co = item.companies ?? 0;
+  const pe = item.persons ?? 0;
+  const records = co + pe;
+  const elapsed = itemElapsedMs(item);
+
+  switch (item.status) {
     case "pending":
-      return "Waiting";
-    case "converting":
-      return "Converting";
-    case "done":
-      return "Done";
-    case "error":
-      return "Failed";
+      return `${size} · Waiting`;
+    case "converting": {
+      const bits = [
+        size,
+        "Converting",
+        formatElapsed(elapsed),
+        `${formatNumber(co)} co`,
+        `${formatNumber(pe)} pe`,
+        formatRecPerSec(records, elapsed),
+      ];
+      if (item.bytesRead != null && item.file.size > 0) {
+        const pct = Math.min(100, (item.bytesRead / item.file.size) * 100);
+        bits.splice(2, 0, `${pct.toFixed(0)}%`);
+      }
+      return bits.join(" · ");
+    }
+    case "done": {
+      const bits = [
+        size,
+        `Done in ${formatElapsed(elapsed)}`,
+        `${formatNumber(co)} co`,
+        `${formatNumber(pe)} pe`,
+        formatRecPerSec(records, elapsed),
+      ];
+      return bits.join(" · ");
+    }
+    case "error": {
+      const bits = [size, "Failed"];
+      if (item.error) bits.push(item.error);
+      return bits.join(" · ");
+    }
     case "cancelled":
-      return "Cancelled";
+      return `${size} · Cancelled`;
   }
 }
 
+/** Step 1: names and sizes only — no conversion status. */
 function renderQueue(): void {
   el.queueList.replaceChildren();
   if (queue.length === 0) {
@@ -173,7 +213,7 @@ function renderQueue(): void {
   el.queueList.hidden = false;
   for (const item of queue) {
     const li = document.createElement("li");
-    li.className = `queue-item queue-item--${item.status}`;
+    li.className = "queue-item";
     li.dataset.id = item.id;
 
     const name = document.createElement("span");
@@ -182,21 +222,64 @@ function renderQueue(): void {
 
     const meta = document.createElement("span");
     meta.className = "queue-item-meta";
-    const bits = [formatBytes(item.file.size), statusLabel(item.status)];
-    if (item.status === "done" && item.companies != null) {
-      bits.push(
-        `${formatNumber(item.companies)} co`,
-        `${formatNumber(item.persons ?? 0)} pe`,
-      );
-    }
-    if (item.status === "error" && item.error) bits.push(item.error);
-    meta.textContent = bits.join(" · ");
+    meta.textContent = formatBytes(item.file.size);
 
     li.append(name, meta);
     el.queueList.append(li);
   }
   updateBatchSummary();
   updateConvertEnabled();
+}
+
+function showResultsPanel(show: boolean): void {
+  resultsVisible = show;
+  el.resultsPanel.hidden = !show;
+}
+
+/** Step 3: per-file conversion results with live progress. */
+function renderResults(): void {
+  if (!resultsVisible && !converting && !queue.some((i) => i.status !== "pending")) {
+    el.resultsList.replaceChildren();
+    el.resultsPanel.hidden = true;
+    updateVerticalProgress();
+    return;
+  }
+
+  showResultsPanel(true);
+  el.resultsList.replaceChildren();
+
+  for (const item of queue) {
+    const li = document.createElement("li");
+    li.className = `result-item result-item--${item.status}`;
+    li.dataset.id = item.id;
+
+    const name = document.createElement("span");
+    name.className = "result-item-name";
+    name.textContent = item.file.name;
+
+    const meta = document.createElement("span");
+    meta.className = "result-item-meta";
+    meta.textContent = resultMetaLine(item);
+
+    li.append(name, meta);
+
+    if (item.status === "converting") {
+      const wrap = document.createElement("div");
+      wrap.className = "result-item-progress";
+      const bar = document.createElement("div");
+      bar.className = "result-item-progress-bar";
+      const total = item.file.size;
+      const read = item.bytesRead ?? currentFileBytesRead;
+      const pct = total > 0 ? Math.min(100, (read / total) * 100) : 0;
+      bar.style.width = `${pct.toFixed(2)}%`;
+      wrap.append(bar);
+      li.append(wrap);
+    }
+
+    el.resultsList.append(li);
+  }
+
+  updateVerticalProgress();
 }
 
 function updateConvertEnabled(): void {
@@ -232,9 +315,12 @@ function setInputFiles(files: File[]): void {
     el.inputName.textContent = `${queue.length} files (${formatBytes(total)})`;
   }
   currentFileBytesRead = 0;
-  setFileProgress(0, 1);
-  setBatchProgress();
+  showResultsPanel(false);
+  el.resultsMemory.hidden = true;
+  el.resultsMemory.textContent = "";
+  updateVerticalProgress();
   renderQueue();
+  renderResults();
 }
 
 function isAbortError(err: unknown): boolean {
@@ -395,6 +481,23 @@ function teardownWorker(): void {
   }
 }
 
+function startLiveStatsTimer(): void {
+  stopLiveStatsTimer();
+  liveStatsTimer = window.setInterval(() => {
+    if (!currentItemId) return;
+    const item = queue.find((i) => i.id === currentItemId);
+    if (!item || item.status !== "converting") return;
+    renderResults();
+  }, 100);
+}
+
+function stopLiveStatsTimer(): void {
+  if (liveStatsTimer != null) {
+    window.clearInterval(liveStatsTimer);
+    liveStatsTimer = null;
+  }
+}
+
 /** Chrome `performance.memory` (non-standard; works without COOP/COEP). */
 interface PerformanceMemory {
   usedJSHeapSize: number;
@@ -424,9 +527,13 @@ function formatMemorySample(wasmBytes: number): string {
 function scheduleMemoryUpdate(wasmBytes: number): void {
   lastWasmMemoryBytes = wasmBytes;
   const now = performance.now();
-  if (now - lastMemorySampleAt < 500 && el.statMemory.textContent !== "—") return;
+  if (now - lastMemorySampleAt < 500 && el.resultsMemory.textContent) return;
   lastMemorySampleAt = now;
-  el.statMemory.textContent = formatMemorySample(wasmBytes);
+  const sample = formatMemorySample(wasmBytes);
+  el.resultsMemory.hidden = false;
+  el.resultsMemory.textContent = `Memory · ${sample}`;
+  el.resultsMemory.title =
+    "Estimated RAM: main-thread JS heap (when available) plus WASM linear memory.";
 }
 
 function nextPendingItem(): QueueItem | undefined {
@@ -443,20 +550,17 @@ async function runBatchLoop(): Promise<void> {
     currentItemId = item.id;
     item.status = "converting";
     item.error = undefined;
+    item.companies = 0;
+    item.persons = 0;
+    item.bytesRead = 0;
+    item.elapsedMs = undefined;
+    item.startedAt = performance.now();
     currentFileBytesRead = 0;
-    renderQueue();
+    startLiveStatsTimer();
+    renderResults();
 
     const base = basenameWithoutExt(item.file.name);
     const fileIndex = queue.indexOf(item) + 1;
-    el.stats.hidden = false;
-    el.statRead.textContent = "0 B";
-    el.statCompanies.textContent = "0";
-    el.statPersons.textContent = "0";
-    el.statElapsed.textContent = "—";
-    el.statSpeed.textContent = "—";
-    el.statMemory.textContent = "…";
-    setFileProgress(0, item.file.size);
-    setBatchProgress();
     setStatus(
       queue.length > 1
         ? `File ${fileIndex} of ${queue.length}: ${item.file.name} — starting…`
@@ -466,24 +570,29 @@ async function runBatchLoop(): Promise<void> {
     try {
       await openWritables(base);
     } catch (err) {
+      stopLiveStatsTimer();
       item.status = "error";
       item.error = `Could not create outputs: ${String(err)}`;
+      item.startedAt = undefined;
       currentItemId = null;
-      renderQueue();
+      renderResults();
       setStatus(`${item.file.name}: ${item.error}`, "error");
       continue;
     }
 
     const outcome = await runWorkerForItem(item, base);
+    stopLiveStatsTimer();
     currentItemId = null;
     if (outcome === "cancelled" || batchCancelled) break;
   }
+
+  stopLiveStatsTimer();
 
   if (batchCancelled) {
     for (const q of queue) {
       if (q.status === "pending" || q.status === "converting") q.status = "cancelled";
     }
-    renderQueue();
+    renderResults();
     finishBatchRun("Batch cancelled.");
     return;
   }
@@ -564,11 +673,9 @@ async function handleWorkerMessage(
   switch (msg.type) {
     case "progress": {
       currentFileBytesRead = msg.bytesRead;
-      setFileProgress(msg.bytesRead, msg.totalBytes);
-      setBatchProgress();
-      el.statRead.textContent = `${formatBytes(msg.bytesRead)} / ${formatBytes(msg.totalBytes)}`;
-      el.statCompanies.textContent = formatNumber(msg.companies);
-      el.statPersons.textContent = formatNumber(msg.persons);
+      item.bytesRead = msg.bytesRead;
+      item.companies = msg.companies;
+      item.persons = msg.persons;
       const pct =
         msg.totalBytes > 0 ? ((msg.bytesRead / msg.totalBytes) * 100).toFixed(1) : "0";
       const fileIndex = queue.indexOf(item) + 1;
@@ -578,6 +685,7 @@ async function handleWorkerMessage(
           : `Converting… ${pct}%`,
       );
       scheduleMemoryUpdate(msg.wasmMemoryBytes);
+      renderResults();
       return null;
     }
     case "batch": {
@@ -598,22 +706,11 @@ async function handleWorkerMessage(
         item.companies = msg.companies;
         item.persons = msg.persons;
         item.elapsedMs = msg.elapsedMs;
+        item.bytesRead = msg.bytesRead;
+        item.startedAt = undefined;
         currentFileBytesRead = msg.bytesRead;
-        const records = msg.companies + msg.persons;
-        const secs = msg.elapsedMs / 1000;
-        const recPerSec = secs > 0 ? records / secs : 0;
-        el.statElapsed.textContent = `${secs.toFixed(2)} s`;
-        el.statSpeed.textContent =
-          recPerSec >= 1_000_000
-            ? `${(recPerSec / 1_000_000).toFixed(2)} M rec/s`
-            : `${formatNumber(Math.round(recPerSec))} rec/s`;
-        el.statCompanies.textContent = formatNumber(msg.companies);
-        el.statPersons.textContent = formatNumber(msg.persons);
-        el.statRead.textContent = formatBytes(msg.bytesRead);
-        setFileProgress(msg.bytesRead, msg.bytesRead);
-        setBatchProgress();
         scheduleMemoryUpdate(msg.wasmMemoryBytes);
-        renderQueue();
+        renderResults();
         return "done";
       } catch (err) {
         await markItemError(item, `Failed to close outputs: ${String(err)}`);
@@ -625,8 +722,9 @@ async function handleWorkerMessage(
       if (item.status === "converting") {
         item.status = batchCancelled ? "cancelled" : "error";
         if (!batchCancelled) item.error = "Cancelled";
+        item.startedAt = undefined;
       }
-      renderQueue();
+      renderResults();
       return "cancelled";
     }
     case "error": {
@@ -644,8 +742,9 @@ async function markItemError(item: QueueItem, message: string): Promise<void> {
   if (item.status === "converting" || item.status === "pending") {
     item.status = "error";
     item.error = message;
+    item.startedAt = undefined;
   }
-  renderQueue();
+  renderResults();
   setStatus(`${item.file.name}: ${message}`, "error");
 }
 
@@ -653,9 +752,9 @@ function finishBatchRun(statusMessage?: string): void {
   setConverting(false);
   batchCancelled = false;
   currentItemId = null;
+  stopLiveStatsTimer();
   if (statusMessage) setStatus(statusMessage, "error");
-  setBatchProgress();
-  renderQueue();
+  renderResults();
   scheduleMemoryUpdate(lastWasmMemoryBytes);
 }
 
@@ -671,6 +770,11 @@ async function startBatch(retryFailedOnly: boolean): Promise<void> {
       if (item.status === "error" || item.status === "cancelled") {
         item.status = "pending";
         item.error = undefined;
+        item.companies = undefined;
+        item.persons = undefined;
+        item.elapsedMs = undefined;
+        item.bytesRead = undefined;
+        item.startedAt = undefined;
       }
     }
   }
@@ -682,8 +786,8 @@ async function startBatch(retryFailedOnly: boolean): Promise<void> {
 
   batchCancelled = false;
   setConverting(true);
-  el.stats.hidden = false;
-  renderQueue();
+  showResultsPanel(true);
+  renderResults();
   await runBatchLoop();
 }
 
@@ -825,6 +929,10 @@ function init(): void {
     console.error("Converter UI failed to initialise: missing file controls");
     return;
   }
+  if (!el.resultsPanel || !el.resultsList || !el.resultsProgressFill) {
+    console.error("Converter UI failed to initialise: missing results controls");
+    return;
+  }
 
   initOutputStep();
   initInputStepCopy();
@@ -849,9 +957,6 @@ function init(): void {
   bindDropZone();
   updateConvertEnabled();
   registerServiceWorker();
-
-  el.statMemory.title =
-    "Estimated RAM: main-thread JS heap (when available) plus WASM linear memory.";
 }
 
 init();
@@ -871,7 +976,6 @@ declare global {
   }
 
   interface FileSystemFileHandle {
-    getFile(): Promise<File>;
     createWritable(): Promise<FileSystemWritableFileStream>;
   }
 
@@ -881,5 +985,3 @@ declare global {
     abort(): Promise<void>;
   }
 }
-
-export {};
