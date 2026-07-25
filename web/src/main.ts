@@ -407,28 +407,18 @@ interface PerformanceWithMemory extends Performance {
 }
 
 /**
- * Memory estimate that works the same on localhost and GitHub Pages
- * (no custom headers / cross-origin isolation).
- *
- * - Main-thread JS heap via `performance.memory` when the browser exposes it
- * - WASM linear memory from the worker (always, when converting)
- * - Approximate total = JS heap + WASM (heap is main-thread only; worker JS
- *   is not included)
+ * Single combined memory figure (JS heap + WASM linear memory when both known).
+ * Same on localhost and GitHub Pages — no COOP/COEP required.
  */
 function formatMemorySample(wasmBytes: number): string {
   const perf = performance as PerformanceWithMemory;
   const jsHeap =
     perf.memory && typeof perf.memory.usedJSHeapSize === "number"
       ? perf.memory.usedJSHeapSize
-      : null;
-  const wasmPart = wasmBytes > 0 ? `WASM ${formatBytes(wasmBytes)}` : null;
-
-  if (jsHeap != null && wasmPart) {
-    return `~${formatBytes(jsHeap + wasmBytes)} est. · JS heap ${formatBytes(jsHeap)} · ${wasmPart}`;
-  }
-  if (jsHeap != null) return `JS heap ${formatBytes(jsHeap)}`;
-  if (wasmPart) return wasmPart;
-  return "n/a";
+      : 0;
+  const total = jsHeap + (wasmBytes > 0 ? wasmBytes : 0);
+  if (total <= 0) return "n/a";
+  return formatBytes(total);
 }
 
 function scheduleMemoryUpdate(wasmBytes: number): void {
@@ -861,7 +851,7 @@ function init(): void {
   registerServiceWorker();
 
   el.statMemory.title =
-    "Estimate: main-thread JS heap (when available) plus WASM linear memory from the converter worker. Same on localhost and GitHub Pages.";
+    "Estimated RAM: main-thread JS heap (when available) plus WASM linear memory.";
 }
 
 init();
