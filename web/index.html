@@ -1,15 +1,15 @@
 <!doctype html>
-<html lang="en">
+<html lang="en-GB">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>CH fixed-width converter</title>
+    <title>Companies House appointment converter</title>
     <meta
       name="description"
       content="Convert Companies House bulk appointment snapshots (products 195 / 216) to CSV. Runs locally in your browser."
     />
-    <meta name="theme-color" content="#0f766e" />
-    <meta name="color-scheme" content="light dark" />
+    <meta name="theme-color" content="#002147" />
+    <meta name="color-scheme" content="light" />
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="default" />
@@ -24,58 +24,81 @@
   </head>
   <body>
     <main class="page">
-      <header class="header">
-        <h1>Companies House converter</h1>
+      <header class="masthead">
+        <p class="kicker">Companies House · Products 195 / 216</p>
+        <h1>Appointment snapshot converter</h1>
         <p class="lede">
-          Snapshot products 195 / 216 → CSV. Runs locally in your browser.
+          Transform fixed-width bulk appointment files into CSV schedules for
+          companies and persons with significant control. Processing runs entirely
+          on this machine; nothing is uploaded.
         </p>
       </header>
 
       <section id="capability" class="banner" hidden></section>
 
-      <section class="card">
-        <h2>Input</h2>
+      <section class="panel panel-raised" aria-labelledby="input-heading">
+        <p class="panel-label">Schedule A</p>
+        <h2 id="input-heading">Source file</h2>
         <div class="row">
           <button type="button" id="btn-open" class="btn primary">Open file…</button>
-          <span id="input-name" class="muted">No file selected</span>
+          <span id="input-name" class="meta">No file selected</span>
         </div>
-        <div id="drop-zone" class="drop-zone" tabindex="0">Drop .dat here</div>
+        <div id="drop-zone" class="drop-zone" tabindex="0" role="button" aria-label="Drop snapshot file here">
+          <span class="drop-zone-title">Deposit snapshot</span>
+          <span class="drop-zone-hint">Drop a .dat file here, or press to browse</span>
+        </div>
         <input id="file-input" type="file" accept=".dat,text/plain,*/*" hidden />
       </section>
 
-      <section class="card">
-        <h2>Output</h2>
+      <section class="panel" aria-labelledby="output-heading">
+        <p class="panel-label">Schedule B</p>
+        <h2 id="output-heading">Output destination</h2>
         <div class="row">
-          <button type="button" id="btn-outdir" class="btn" disabled>Choose folder…</button>
-          <span id="outdir-name" class="muted">Not chosen</span>
+          <button type="button" id="btn-outdir" class="btn secondary" disabled>Choose folder…</button>
+          <span id="outdir-name" class="meta">Not chosen</span>
         </div>
       </section>
 
-      <section class="card">
-        <h2>Convert</h2>
+      <section class="panel panel-raised" aria-labelledby="convert-heading">
+        <p class="panel-label">Execution</p>
+        <h2 id="convert-heading">Conversion</h2>
         <div class="row">
           <button type="button" id="btn-convert" class="btn primary" disabled>Convert</button>
-          <button type="button" id="btn-cancel" class="btn danger" disabled>Cancel</button>
+          <button type="button" id="btn-cancel" class="btn tertiary danger" disabled>Cancel</button>
         </div>
         <div class="progress-wrap" aria-live="polite">
           <div class="progress-bar" id="progress-bar" style="width: 0%"></div>
         </div>
         <p id="status" class="status">Ready.</p>
         <dl id="stats" class="stats" hidden>
-          <div><dt>Read</dt><dd id="stat-read">—</dd></div>
-          <div><dt>Companies</dt><dd id="stat-companies">—</dd></div>
-          <div><dt>Persons</dt><dd id="stat-persons">—</dd></div>
-          <div><dt>Elapsed</dt><dd id="stat-elapsed">—</dd></div>
-          <div><dt>Speed</dt><dd id="stat-speed">—</dd></div>
+          <div>
+            <dt>Read</dt>
+            <dd id="stat-read">—</dd>
+          </div>
+          <div>
+            <dt>Companies</dt>
+            <dd id="stat-companies">—</dd>
+          </div>
+          <div>
+            <dt>Persons</dt>
+            <dd id="stat-persons">—</dd>
+          </div>
+          <div>
+            <dt>Elapsed</dt>
+            <dd id="stat-elapsed">—</dd>
+          </div>
+          <div>
+            <dt>Speed</dt>
+            <dd id="stat-speed">—</dd>
+          </div>
         </dl>
       </section>
 
-      <p class="footer muted">
-        Need more speed? The native
-        <a href="https://github.com/mrbrianevans/ch-fixedwidth/releases">CLI</a>
-        is about 10× faster than this web converter.
+      <p class="footer">
+        For larger ledgers, the native
+        <a href="https://github.com/mrbrianevans/ch-fixedwidth/releases">command-line tool</a>
+        is approximately ten times faster than this browser converter.
       </p>
     </main>
   </body>
 </html>
-

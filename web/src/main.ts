@@ -400,11 +400,12 @@ function init(): void {
   el.capability.hidden = false;
   if (canStreamToDisk) {
     el.capability.className = "banner ok";
-    el.capability.textContent = "Streaming to disk available (Chrome / Edge).";
+    el.capability.textContent =
+      "Direct-to-folder writing is available in this browser (Chrome or Edge recommended).";
   } else {
     el.capability.className = "banner warn";
     el.capability.textContent =
-      "Limited browser: output downloads in memory. Use Chrome/Edge for large files.";
+      "This browser will download results into memory. Prefer Chrome or Edge for large ledgers.";
   }
 
   el.btnOutdir.disabled = !canStreamToDisk;
