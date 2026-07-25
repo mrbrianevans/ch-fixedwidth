@@ -6,7 +6,7 @@ Convert Companies House officers bulk data (products 195 / 216, `.dat`) to tabul
 - Streams input (`File.stream`, 8 MiB batches) in a Worker
 - Chromium: write CSVs to a chosen folder; multi-file batch queue (one file at a time, retry failed)
 - Other browsers: single file, in-memory download fallback
-- Memory estimate during conversion (WASM heap always; full page measure when cross-origin isolated)
+- Memory estimate during conversion (JS heap when available + WASM linear memory; no special headers required)
 - **Vite** for dev (HMR) and production builds — plain HTML / CSS / TypeScript (no UI framework)
 
 ## Setup

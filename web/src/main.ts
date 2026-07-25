@@ -66,7 +66,6 @@ let batchCancelled = false;
 let currentItemId: string | null = null;
 let currentFileBytesRead = 0;
 let lastWasmMemoryBytes = 0;
-let memorySampleChain: Promise<void> = Promise.resolve();
 let lastMemorySampleAt = 0;
 
 /** Injected from wasm-ts/package.json at build time (vite define). */
@@ -387,7 +386,7 @@ function teardownWorker(): void {
   }
 }
 
-/** Chrome `performance.memory` (non-standard). */
+/** Chrome `performance.memory` (non-standard; works without COOP/COEP). */
 interface PerformanceMemory {
   usedJSHeapSize: number;
   totalJSHeapSize: number;
@@ -396,71 +395,39 @@ interface PerformanceMemory {
 
 interface PerformanceWithMemory extends Performance {
   memory?: PerformanceMemory;
-  measureUserAgentSpecificMemory?: () => Promise<{ bytes: number }>;
 }
 
 /**
- * Sample browser memory when available; always surface WASM linear memory from the worker.
- * `measureUserAgentSpecificMemory` needs cross-origin isolation (COOP/COEP).
+ * Memory estimate that works the same on localhost and GitHub Pages
+ * (no custom headers / cross-origin isolation).
+ *
+ * - Main-thread JS heap via `performance.memory` when the browser exposes it
+ * - WASM linear memory from the worker (always, when converting)
+ * - Approximate total = JS heap + WASM (heap is main-thread only; worker JS
+ *   is not included)
  */
-async function formatMemorySample(wasmBytes: number): Promise<string> {
+function formatMemorySample(wasmBytes: number): string {
   const perf = performance as PerformanceWithMemory;
-  let pageBytes: number | null = null;
-  let pageLabel = "";
-
-  if (
-    globalThis.crossOriginIsolated &&
-    typeof perf.measureUserAgentSpecificMemory === "function"
-  ) {
-    try {
-      const m = await perf.measureUserAgentSpecificMemory();
-      pageBytes = m.bytes;
-      pageLabel = "page";
-    } catch {
-      /* permission / unsupported */
-    }
-  }
-
-  if (pageBytes == null && perf.memory && typeof perf.memory.usedJSHeapSize === "number") {
-    pageBytes = perf.memory.usedJSHeapSize;
-    pageLabel = "JS heap";
-  }
-
+  const jsHeap =
+    perf.memory && typeof perf.memory.usedJSHeapSize === "number"
+      ? perf.memory.usedJSHeapSize
+      : null;
   const wasmPart = wasmBytes > 0 ? `WASM ${formatBytes(wasmBytes)}` : null;
 
-  if (pageBytes != null) {
-    // UA measure should include workers/WASM when isolated; still show WASM heap
-    // so users can see linear-memory growth if it is under-counted.
-    const parts = [`${formatBytes(pageBytes)} (${pageLabel})`];
-    if (wasmPart) parts.push(wasmPart);
-    if (!globalThis.crossOriginIsolated && pageLabel === "JS heap") {
-      // JS heap is main-thread only — add WASM for a closer total.
-      const approx = pageBytes + wasmBytes;
-      return `~${formatBytes(approx)} est. · ${parts.join(" · ")}`;
-    }
-    return parts.join(" · ");
+  if (jsHeap != null && wasmPart) {
+    return `~${formatBytes(jsHeap + wasmBytes)} est. · JS heap ${formatBytes(jsHeap)} · ${wasmPart}`;
   }
-
+  if (jsHeap != null) return `JS heap ${formatBytes(jsHeap)}`;
   if (wasmPart) return wasmPart;
-  if (!globalThis.crossOriginIsolated) {
-    return "n/a (needs COOP/COEP for full estimate)";
-  }
   return "n/a";
 }
 
 function scheduleMemoryUpdate(wasmBytes: number): void {
   lastWasmMemoryBytes = wasmBytes;
   const now = performance.now();
-  // Throttle expensive UA measurement.
-  if (now - lastMemorySampleAt < 1500 && el.statMemory.textContent !== "—") return;
+  if (now - lastMemorySampleAt < 500 && el.statMemory.textContent !== "—") return;
   lastMemorySampleAt = now;
-  memorySampleChain = memorySampleChain
-    .then(async () => {
-      el.statMemory.textContent = await formatMemorySample(wasmBytes);
-    })
-    .catch(() => {
-      /* ignore */
-    });
+  el.statMemory.textContent = formatMemorySample(wasmBytes);
 }
 
 function nextPendingItem(): QueueItem | undefined {
@@ -790,10 +757,13 @@ function initOutputStep(): void {
     el.btnOutdir.disabled = false;
     el.outdirName.textContent = "Not chosen";
   } else {
+    // No directory picker — replace folder controls with the download warning.
     el.outputHeading.textContent = "Output";
     el.outputFolderUi.hidden = true;
     el.outputDownloadNote.hidden = false;
     el.btnOutdir.disabled = true;
+    el.outputDownloadNote.textContent =
+      "This browser will download results into memory. Prefer Chrome or Edge for large files and multi-file batches.";
   }
 }
 
@@ -849,11 +819,8 @@ function init(): void {
   updateConvertEnabled();
   registerServiceWorker();
 
-  // Initial memory capability hint
-  if (!globalThis.crossOriginIsolated) {
-    el.statMemory.title =
-      "Full page memory needs cross-origin isolation (COOP/COEP). WASM heap is always reported during conversion.";
-  }
+  el.statMemory.title =
+    "Estimate: main-thread JS heap (when available) plus WASM linear memory from the converter worker. Same on localhost and GitHub Pages.";
 }
 
 init();
