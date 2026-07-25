@@ -67,8 +67,12 @@ let currentFileBytesRead = 0;
 let lastWasmMemoryBytes = 0;
 let lastMemorySampleAt = 0;
 
-/** Injected from wasm-ts/package.json at build time (vite define). */
-declare const __PARSER_VERSION__: string | undefined;
+/**
+ * Parser version from wasm-ts/package.json, injected by Vite `define`.
+ * Do not wrap in `typeof … !== "undefined"` — that pattern breaks under esbuild
+ * define replacement (can leave a dangling identifier like `__PARSER_VERSION_`).
+ */
+declare const __PARSER_VERSION__: string;
 
 function basenameWithoutExt(name: string): string {
   const i = name.lastIndexOf(".");
