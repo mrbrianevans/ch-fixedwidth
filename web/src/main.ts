@@ -381,6 +381,21 @@ function bindDropZone(): void {
   });
 }
 
+/**
+ * Progressive enhancement: register the service worker only when supported.
+ * Failures are silent — the converter works fully without offline caching.
+ */
+function registerServiceWorker(): void {
+  if (!("serviceWorker" in navigator)) return;
+  // Relative to the page so GitHub project pages (/repo/) stay in scope.
+  const swUrl = new URL("./sw.js", self.location.href);
+  window.addEventListener("load", () => {
+    void navigator.serviceWorker.register(swUrl, { scope: "./" }).catch(() => {
+      /* optional enhancement */
+    });
+  });
+}
+
 function init(): void {
   el.capability.hidden = false;
   if (canStreamToDisk) {
@@ -405,6 +420,7 @@ function init(): void {
   });
   bindDropZone();
   updateConvertEnabled();
+  registerServiceWorker();
 }
 
 init();

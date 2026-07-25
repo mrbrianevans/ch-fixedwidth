@@ -20,13 +20,28 @@ bun install
 ## Build & serve
 
 ```bash
-bun run build    # → dist/
+bun run build    # → dist/ (includes PWA manifest + service worker)
 bun run dev      # build + serve dist on :3000
 bun run start    # serve existing dist/
 bun run smoke    # fixture check against wasm-ts
+bun run icons    # regenerate PNG icons from SVG (needs ffmpeg on PATH)
 ```
 
 Uses the [`serve`](https://www.npmjs.com/package/serve) package for static hosting.
+
+## Progressive Web App
+
+The site is a static PWA (no backend). Installable offline after first visit.
+
+| Piece | Role |
+| --- | --- |
+| `manifest.webmanifest` | Name, `standalone` display, theme, 192/512 (+ maskable) icons |
+| `sw.js` | Lean versioned service worker; build injects cache name + precache list |
+| `icons/` | Chevron SVG source + PNG sizes (favicon, Apple touch, maskable) |
+
+Progressive enhancement: conversion works without the service worker or manifest. The SW only caches same-origin static assets (HTML/CSS/JS/WASM/worker/icons). Cache names are content-hashed at build time so deploys update reliably.
+
+Icon pipeline: edit `icons/icon.svg` / `icons/icon-maskable.svg`, then `bun run icons` (resvg → 1024 master, ffmpeg → sizes).
 
 ## GitHub Pages
 

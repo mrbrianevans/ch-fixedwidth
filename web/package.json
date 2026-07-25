@@ -8,6 +8,7 @@
     "postinstall": "bun run link-local",
     "link-local": "bun run scripts/link-local.ts",
     "copy-wasm": "bun run scripts/copy-wasm.ts",
+    "icons": "bun run scripts/generate-icons.ts",
     "build": "bun run scripts/build.ts",
     "smoke": "bun run copy-wasm && bun run scripts/smoke.ts",
     "dev": "bun run build && serve dist -l 3000",
@@ -17,6 +18,7 @@
     "@ch-fixedwidth/wasm-ts": "file:../wasm-ts"
   },
   "devDependencies": {
+    "@resvg/resvg-js": "^2.6.2",
     "@types/bun": "latest",
     "serve": "^14.2.4"
   }

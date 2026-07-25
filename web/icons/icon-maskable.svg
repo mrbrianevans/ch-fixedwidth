@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="CH Converter">
+  <!-- Maskable: full-bleed background; glyph stays in the central safe zone (~80%). -->
+  <rect width="512" height="512" fill="#0f766e"/>
+  <path
+    d="M208 156 L320 256 L208 356"
+    fill="none"
+    stroke="#fafaf9"
+    stroke-width="48"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+</svg>
