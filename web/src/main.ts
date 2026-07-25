@@ -825,10 +825,7 @@ function initSiteFooter(): void {
 
   const verEl = document.getElementById("parser-version");
   if (verEl) {
-    const v =
-      typeof __PARSER_VERSION__ !== "undefined" && __PARSER_VERSION_
-        ? __PARSER_VERSION__
-        : "dev";
+    const v = __PARSER_VERSION__ || "dev";
     verEl.textContent = v.startsWith("v") ? v : `v${v}`;
   }
 }
