@@ -46,9 +46,8 @@ interface QueueItem {
   elapsedMs?: number;
 }
 
-const hasOpenPicker = typeof window.showOpenFilePicker === "function";
 const hasDirPicker = typeof window.showDirectoryPicker === "function";
-/** Folder write API — required for multi-file batch. */
+/** Folder write API — required for multi-file batch (Chromium). */
 const canStreamToDisk = hasDirPicker;
 const allowMultiFile = canStreamToDisk;
 
@@ -244,28 +243,14 @@ function resolveAssetUrl(url: string): string {
   return new URL(url, self.location.href).href;
 }
 
-async function pickInputFile(): Promise<void> {
-  if (hasOpenPicker) {
-    try {
-      const handles = await window.showOpenFilePicker!({
-        multiple: allowMultiFile,
-        types: [
-          {
-            description: "Companies House officers bulk data",
-            accept: {
-              "application/octet-stream": [".dat"],
-              "text/plain": [".dat", ".txt"],
-            },
-          },
-        ],
-      });
-      const files = await Promise.all(handles.map((h) => h.getFile()));
-      setInputFiles(files);
-      return;
-    } catch (err) {
-      if (isAbortError(err)) return;
-    }
-  }
+/**
+ * Open files via a synchronous &lt;input type="file"&gt; click.
+ *
+ * Avoid showOpenFilePicker here: some browsers expose a partial/broken
+ * implementation, and after an async failure Firefox blocks the fallback
+ * input.click() (lost user activation). The classic input works everywhere.
+ */
+function pickInputFile(): void {
   el.fileInput.click();
 }
 
@@ -729,12 +714,12 @@ function bindDropZone(): void {
     setInputFiles(Array.from(list));
   });
   zone.addEventListener("click", () => {
-    if (!converting) void pickInputFile();
+    if (!converting) pickInputFile();
   });
   zone.addEventListener("keydown", (e) => {
     if ((e.key === "Enter" || e.key === " ") && !converting) {
       e.preventDefault();
-      void pickInputFile();
+      pickInputFile();
     }
   });
 }
@@ -805,14 +790,16 @@ function init(): void {
   initInputStepCopy();
   initSiteFooter();
 
-  el.btnOpen.addEventListener("click", () => void pickInputFile());
+  el.btnOpen.addEventListener("click", () => {
+    if (!converting) pickInputFile();
+  });
   el.btnOutdir.addEventListener("click", () => void pickOutputDir());
   el.btnConvert.addEventListener("click", () => void startBatch(false));
   el.btnRetry.addEventListener("click", () => void startBatch(true));
   el.btnCancel.addEventListener("click", () => cancelConvert());
   el.fileInput.addEventListener("change", () => {
     const files = el.fileInput.files ? Array.from(el.fileInput.files) : [];
-    setInputFiles(files);
+    if (files.length) setInputFiles(files);
     el.fileInput.value = "";
   });
   bindDropZone();
@@ -827,10 +814,6 @@ init();
 
 declare global {
   interface Window {
-    showOpenFilePicker?: (options?: {
-      multiple?: boolean;
-      types?: Array<{ description?: string; accept: Record<string, string[]> }>;
-    }) => Promise<FileSystemFileHandle[]>;
     showDirectoryPicker?: (options?: {
       mode?: "read" | "readwrite";
     }) => Promise<FileSystemDirectoryHandle>;

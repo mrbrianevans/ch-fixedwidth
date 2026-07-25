@@ -46,7 +46,12 @@
           <span class="drop-zone-title">Drop .dat file</span>
           <span class="drop-zone-hint">Officers bulk data file, or press to browse</span>
         </div>
-        <input id="file-input" type="file" accept=".dat,text/plain,*/*" hidden />
+        <input
+          id="file-input"
+          type="file"
+          accept=".dat,.txt,application/octet-stream,text/plain"
+          hidden
+        />
         <p id="batch-summary" class="batch-summary meta" hidden></p>
         <ul id="queue-list" class="queue-list" hidden></ul>
       </section>
