@@ -30,6 +30,14 @@ test "parseHeader rejects bad header" {
     try std.testing.expectError(error.UnsupportedFileType, parse.parseHeader("DDDDSNAP"));
 }
 
+test "requireSnapshotHeader checks file prefix" {
+    try parse.requireSnapshotHeader("DDDDSNAP425720260706\n");
+    try std.testing.expectError(error.UnsupportedFileType, parse.requireSnapshotHeader(""));
+    try std.testing.expectError(error.UnsupportedFileType, parse.requireSnapshotHeader("DDDDSNA"));
+    try std.testing.expectError(error.UnsupportedFileType, parse.requireSnapshotHeader("NOTASNAP425720260706\n"));
+    try std.testing.expectError(error.UnsupportedFileType, parse.requireSnapshotHeader("PK\x03\x04zipfile"));
+}
+
 test "parseTrailerCount" {
     try std.testing.expectEqual(@as(i32, 4), parse.parseTrailerCount("9999999900000004"));
     try std.testing.expectEqual(@as(i32, 6182956), parse.parseTrailerCount("9999999906182956"));
@@ -93,6 +101,18 @@ test "parseSnapshot missing trailer" {
     try std.testing.expectError(error.MissingTrailer, snapshot.parseSnapshot(std.testing.allocator, bad));
 }
 
+test "parseSnapshot rejects non-snapshot prefix" {
+    const bad =
+        \\NOTASNAP425720260706
+        \\029052131D                      00010013WGFA LIMITED<
+        \\9999999900000001
+        \\
+    ;
+    try std.testing.expectError(error.UnsupportedFileType, snapshot.parseSnapshot(std.testing.allocator, bad));
+    try std.testing.expectError(error.UnsupportedFileType, snapshot.parseSnapshot(std.testing.allocator, ""));
+    try std.testing.expectError(error.UnsupportedFileType, snapshot.parseSnapshot(std.testing.allocator, "random csv,data\n"));
+}
+
 test "C ABI ch_parse_snapshot on mini fixture" {
     var out: c_api.ChParseResult = .{};
     const rc = c_api.ch_parse_snapshot(mini_snapshot.ptr, mini_snapshot.len, &out);
@@ -144,6 +164,31 @@ test "stream matches snapshot on mini fixture with tiny chunks" {
     try std.testing.expectEqual(@as(i32, 5), s.trailer_count.?);
     try std.testing.expectEqualStrings(expected_companies, companies.items);
     try std.testing.expectEqualStrings(expected_persons, persons.items);
+}
+
+test "stream rejects wrong file prefix early" {
+    const allocator = std.testing.allocator;
+    var s = stream_mod.Stream.init(allocator, .{});
+    defer s.deinit();
+
+    try std.testing.expectError(error.UnsupportedFileType, s.feed("NOTASNAP4257\n"));
+}
+
+test "stream rejects wrong prefix across tiny chunks" {
+    const allocator = std.testing.allocator;
+    var s = stream_mod.Stream.init(allocator, .{});
+    defer s.deinit();
+
+    // Same path the web client can take: magic split across feeds.
+    try s.feed("NOTA");
+    try std.testing.expectError(error.UnsupportedFileType, s.feed("SNAP!!!!"));
+}
+
+test "stream finish rejects empty input" {
+    const allocator = std.testing.allocator;
+    var s = stream_mod.Stream.init(allocator, .{});
+    defer s.deinit();
+    try std.testing.expectError(error.UnsupportedFileType, s.finish());
 }
 
 test "C ABI stream feed/finish on mini fixture" {

@@ -27,7 +27,10 @@ pub const ParseResult = struct {
 
 /// Parse a full snapshot buffer into companies and persons CSV (with headers).
 /// Caller owns the result and must call `deinit`.
+/// Rejects input that does not begin with `DDDDSNAP`.
 pub fn parseSnapshot(allocator: std.mem.Allocator, input: []const u8) ParseError!ParseResult {
+    try parse.requireSnapshotHeader(input);
+
     var companies = std.ArrayList(u8).empty;
     errdefer companies.deinit(allocator);
     var persons = std.ArrayList(u8).empty;

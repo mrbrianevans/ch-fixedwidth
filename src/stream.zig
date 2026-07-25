@@ -75,6 +75,10 @@ pub const Stream = struct {
     finished: bool = false,
     saw_trailer: bool = false,
 
+    /// First bytes of the input stream; must form `DDDDSNAP` once 8 are seen.
+    magic: [parse.snapshot_header_identifier.len]u8 = undefined,
+    magic_len: u8 = 0,
+
     row_buf: [parse.max_csv_row_bytes]u8 = undefined,
 
     pub fn init(allocator: std.mem.Allocator, config: StreamConfig) Stream {
@@ -94,6 +98,8 @@ pub const Stream = struct {
     }
 
     /// Feed the next chunk of snapshot bytes. Drain with `nextBatch` afterward.
+    /// The overall input must begin with `DDDDSNAP` (checked once the first
+    /// 8 bytes have arrived).
     pub fn feed(self: *Stream, chunk: []const u8) ParseError!void {
         if (self.finished) return error.AlreadyFinished;
         if (self.saw_trailer) {
@@ -106,6 +112,8 @@ pub const Stream = struct {
             }
             return;
         }
+
+        try self.ingestMagic(chunk);
 
         var rest = chunk;
 
@@ -145,6 +153,11 @@ pub const Stream = struct {
     pub fn finish(self: *Stream) ParseError!void {
         if (self.finished) return error.AlreadyFinished;
 
+        // Incomplete or missing snapshot signature.
+        if (self.magic_len < parse.snapshot_header_identifier.len) {
+            return error.UnsupportedFileType;
+        }
+
         if (!self.saw_trailer and self.carry.items.len > 0) {
             try self.handleLine(self.carry.items);
             self.carry.clearRetainingCapacity();
@@ -162,6 +175,22 @@ pub const Stream = struct {
 
         const tc = self.trailer_count orelse return error.MissingTrailer;
         if (tc != self.companies + self.persons) return error.TrailerMismatch;
+    }
+
+    /// Collect the leading bytes of the stream and require `DDDDSNAP`.
+    fn ingestMagic(self: *Stream, data: []const u8) ParseError!void {
+        const need = parse.snapshot_header_identifier.len;
+        if (self.magic_len >= need) return;
+
+        const take = @min(need - self.magic_len, data.len);
+        if (take == 0) return;
+        @memcpy(self.magic[self.magic_len..][0..take], data[0..take]);
+        self.magic_len += @intCast(take);
+
+        if (self.magic_len < need) return;
+        if (!std.mem.eql(u8, self.magic[0..need], parse.snapshot_header_identifier)) {
+            return error.UnsupportedFileType;
+        }
     }
 
     /// Pop the next completed CSV batch (caller owns `data`). Null if none.

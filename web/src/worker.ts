@@ -12,6 +12,14 @@ function post(msg: WorkerOutMessage, transfer?: Transferable[]): void {
   else self.postMessage(msg);
 }
 
+function wasmMemoryBytes(stream: ChFixedWidthStream): number {
+  try {
+    return stream.exports.memory.buffer.byteLength;
+  } catch {
+    return 0;
+  }
+}
+
 function progressEvery(totalBytes: number): number {
   return Math.max(1, Math.min(32 * 1024 * 1024, Math.floor(totalBytes / 50) || 1));
 }
@@ -31,14 +39,31 @@ async function convert(file: File, wasmUrl: string, inputBatchBytes: number): Pr
   const started = performance.now();
   const totalBytes = file.size;
   let bytesRead = 0;
+  let lastProgressBytes = 0;
   let lastProgressAt = 0;
   const progressStep = progressEvery(totalBytes);
+  /** Also emit on a short wall-clock cadence so UI elapsed/rec-s stay live. */
+  const progressIntervalMs = 150;
 
   const stream = await ChFixedWidthStream.create({
     wasmUrl,
     batchRows: 4000,
     batchBytes: 1024 * 1024,
   });
+
+  const emitProgress = (): void => {
+    lastProgressBytes = bytesRead;
+    lastProgressAt = performance.now();
+    const stats = stream.stats();
+    post({
+      type: "progress",
+      bytesRead,
+      totalBytes,
+      companies: stats.companies,
+      persons: stats.persons,
+      wasmMemoryBytes: wasmMemoryBytes(stream),
+    });
+  };
 
   try {
     const reader = file.stream().getReader();
@@ -80,16 +105,12 @@ async function convert(file: File, wasmUrl: string, inputBatchBytes: number): Pr
 
       if (pendingLen >= inputBatchBytes) flushPending();
 
-      if (bytesRead - lastProgressAt >= progressStep) {
-        lastProgressAt = bytesRead;
-        const stats = stream.stats();
-        post({
-          type: "progress",
-          bytesRead,
-          totalBytes,
-          companies: stats.companies,
-          persons: stats.persons,
-        });
+      const now = performance.now();
+      if (
+        bytesRead - lastProgressBytes >= progressStep ||
+        now - lastProgressAt >= progressIntervalMs
+      ) {
+        emitProgress();
       }
     }
 
@@ -97,12 +118,14 @@ async function convert(file: File, wasmUrl: string, inputBatchBytes: number): Pr
     emitBatches(stream.finish());
 
     const stats = stream.stats();
+    const mem = wasmMemoryBytes(stream);
     post({
       type: "progress",
       bytesRead,
       totalBytes,
       companies: stats.companies,
       persons: stats.persons,
+      wasmMemoryBytes: mem,
     });
     post({
       type: "done",
@@ -111,6 +134,7 @@ async function convert(file: File, wasmUrl: string, inputBatchBytes: number): Pr
       trailerCount: stats.trailerCount,
       bytesRead,
       elapsedMs: performance.now() - started,
+      wasmMemoryBytes: mem,
     });
   } catch (err) {
     if (cancelled) {

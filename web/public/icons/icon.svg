@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="CH Converter">
+  <!-- Chevron on Oxford navy — fixed-width / chevron-delimited bulk data. -->
+  <rect width="512" height="512" fill="#002147"/>
+  <path
+    d="M196 140 L332 256 L196 372"
+    fill="none"
+    stroke="#fcf9f4"
+    stroke-width="56"
+    stroke-linecap="square"
+    stroke-linejoin="miter"
+  />
+</svg>

@@ -8,16 +8,20 @@
     "postinstall": "bun run link-local",
     "link-local": "bun run scripts/link-local.ts",
     "copy-wasm": "bun run scripts/copy-wasm.ts",
-    "build": "bun run scripts/build.ts",
-    "smoke": "bun run copy-wasm && bun run scripts/smoke.ts",
-    "dev": "bun run build && serve dist -l 3000",
-    "start": "serve dist -l 3000"
+    "icons": "bun run scripts/generate-icons.ts",
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "start": "vite preview --port 3000",
+    "smoke": "bun run copy-wasm && bun run scripts/smoke.ts"
   },
   "dependencies": {
     "@ch-fixedwidth/wasm-ts": "file:../wasm-ts"
   },
   "devDependencies": {
+    "@resvg/resvg-js": "^2.6.2",
     "@types/bun": "latest",
-    "serve": "^14.2.4"
+    "typescript": "^7.0.2",
+    "vite": "^8.1.5"
   }
 }
