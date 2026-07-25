@@ -489,8 +489,13 @@ label.btn.is-disabled {
   line-height: 1.45;
 }
 
-.result-item--converting .result-item-name {
+.result-item--converting .result-item-name,
+.result-item--writing .result-item-name {
   color: var(--primary-container);
+}
+
+.result-item--writing .result-item-meta {
+  color: var(--on-surface-variant);
 }
 
 .result-item--done .result-item-meta {

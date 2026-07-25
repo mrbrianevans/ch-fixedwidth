@@ -38,10 +38,16 @@ interface QueueItem {
   error?: string;
   companies?: number;
   persons?: number;
+  /** Frozen parse elapsed (set at end of read / on done). */
   elapsedMs?: number;
   bytesRead?: number;
   /** performance.now() when this file began converting */
   startedAt?: number;
+  /**
+   * True once input is fully read (100%) and remaining work is draining
+   * CSV batches to disk. Elapsed and rec/s freeze at this point.
+   */
+  writing?: boolean;
 }
 
 const hasDirPicker = typeof window.showDirectoryPicker === "function";
@@ -149,11 +155,31 @@ function updateBatchSummary(): void {
 }
 
 function itemElapsedMs(item: QueueItem): number {
-  if (item.status === "done" && item.elapsedMs != null) return item.elapsedMs;
-  if (item.status === "converting" && item.startedAt != null) {
+  // Prefer frozen parse time (writing phase or completed).
+  if (item.elapsedMs != null) return item.elapsedMs;
+  if (item.status === "converting" && !item.writing && item.startedAt != null) {
     return performance.now() - item.startedAt;
   }
-  return item.elapsedMs ?? 0;
+  return 0;
+}
+
+/**
+ * Input fully read — remaining work is writing CSV. Freeze parse elapsed/rec/s
+ * and stop the live ticker so the drain phase does not drag the figures down.
+ */
+function enterWritingPhase(item: QueueItem): void {
+  if (item.writing || item.status !== "converting") return;
+  item.writing = true;
+  if (item.elapsedMs == null && item.startedAt != null) {
+    item.elapsedMs = performance.now() - item.startedAt;
+  }
+  stopLiveStatsTimer();
+  const fileIndex = queue.indexOf(item) + 1;
+  setStatus(
+    queue.length > 1
+      ? `File ${fileIndex} of ${queue.length}: ${item.file.name} — writing CSV…`
+      : "Writing CSV…",
+  );
 }
 
 function resultMetaLine(item: QueueItem): string {
@@ -167,6 +193,16 @@ function resultMetaLine(item: QueueItem): string {
     case "pending":
       return `${size} · Waiting`;
     case "converting": {
+      if (item.writing) {
+        return [
+          size,
+          "Writing",
+          formatElapsed(elapsed),
+          `${formatNumber(co)} co`,
+          `${formatNumber(pe)} pe`,
+          formatRecPerSec(records, elapsed),
+        ].join(" · ");
+      }
       const bits = [
         size,
         "Converting",
@@ -250,7 +286,11 @@ function renderResults(): void {
 
   for (const item of queue) {
     const li = document.createElement("li");
-    li.className = `result-item result-item--${item.status}`;
+    const phaseClass =
+      item.status === "converting" && item.writing
+        ? "result-item--writing"
+        : `result-item--${item.status}`;
+    li.className = `result-item ${phaseClass}`;
     li.dataset.id = item.id;
 
     const name = document.createElement("span");
@@ -486,7 +526,8 @@ function startLiveStatsTimer(): void {
   liveStatsTimer = window.setInterval(() => {
     if (!currentItemId) return;
     const item = queue.find((i) => i.id === currentItemId);
-    if (!item || item.status !== "converting") return;
+    // Freeze once writing — elapsed/rec-s must not keep climbing during disk drain.
+    if (!item || item.status !== "converting" || item.writing) return;
     renderResults();
   }, 100);
 }
@@ -554,6 +595,7 @@ async function runBatchLoop(): Promise<void> {
     item.persons = 0;
     item.bytesRead = 0;
     item.elapsedMs = undefined;
+    item.writing = false;
     item.startedAt = performance.now();
     currentFileBytesRead = 0;
     startLiveStatsTimer();
@@ -676,20 +718,34 @@ async function handleWorkerMessage(
       item.bytesRead = msg.bytesRead;
       item.companies = msg.companies;
       item.persons = msg.persons;
-      const pct =
-        msg.totalBytes > 0 ? ((msg.bytesRead / msg.totalBytes) * 100).toFixed(1) : "0";
-      const fileIndex = queue.indexOf(item) + 1;
-      setStatus(
-        queue.length > 1
-          ? `File ${fileIndex} of ${queue.length}: ${item.file.name} — ${pct}%`
-          : `Converting… ${pct}%`,
-      );
+      const readComplete = msg.totalBytes > 0 && msg.bytesRead >= msg.totalBytes;
+      if (readComplete) {
+        enterWritingPhase(item);
+      } else if (!item.writing) {
+        const pct = ((msg.bytesRead / msg.totalBytes) * 100).toFixed(1);
+        const fileIndex = queue.indexOf(item) + 1;
+        setStatus(
+          queue.length > 1
+            ? `File ${fileIndex} of ${queue.length}: ${item.file.name} — ${pct}%`
+            : `Converting… ${pct}%`,
+        );
+      }
       scheduleMemoryUpdate(msg.wasmMemoryBytes);
       renderResults();
       return null;
     }
     case "batch": {
       try {
+        // After the input is fully read, batches still arrive while CSV is flushed.
+        if (
+          !item.writing &&
+          item.bytesRead != null &&
+          item.file.size > 0 &&
+          item.bytesRead >= item.file.size
+        ) {
+          enterWritingPhase(item);
+          renderResults();
+        }
         await writeBatch(msg.kind, msg.data);
         return null;
       } catch (err) {
@@ -700,9 +756,13 @@ async function handleWorkerMessage(
     }
     case "done": {
       try {
+        // Ensure writing status is visible while closing output streams.
+        if (!item.writing) enterWritingPhase(item);
+        renderResults();
         await closeWritables();
         if (!canStreamToDisk || !outputDir) downloadFallback(base);
         item.status = "done";
+        item.writing = false;
         item.companies = msg.companies;
         item.persons = msg.persons;
         item.elapsedMs = msg.elapsedMs;
@@ -723,6 +783,7 @@ async function handleWorkerMessage(
         item.status = batchCancelled ? "cancelled" : "error";
         if (!batchCancelled) item.error = "Cancelled";
         item.startedAt = undefined;
+        item.writing = false;
       }
       renderResults();
       return "cancelled";
@@ -743,6 +804,7 @@ async function markItemError(item: QueueItem, message: string): Promise<void> {
     item.status = "error";
     item.error = message;
     item.startedAt = undefined;
+    item.writing = false;
   }
   renderResults();
   setStatus(`${item.file.name}: ${message}`, "error");
@@ -775,6 +837,7 @@ async function startBatch(retryFailedOnly: boolean): Promise<void> {
         item.elapsedMs = undefined;
         item.bytesRead = undefined;
         item.startedAt = undefined;
+        item.writing = false;
       }
     }
   }
