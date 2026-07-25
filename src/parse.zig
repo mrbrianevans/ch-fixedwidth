@@ -157,6 +157,17 @@ pub fn classifyLine(row: []const u8) LineKind {
     };
 }
 
+/// True if `input` begins with the snapshot magic `DDDDSNAP`.
+pub fn startsWithSnapshotHeader(input: []const u8) bool {
+    return input.len >= snapshot_header_identifier.len and
+        std.mem.eql(u8, input[0..snapshot_header_identifier.len], snapshot_header_identifier);
+}
+
+/// Fail unless `input` begins with `DDDDSNAP` (snapshot file signature).
+pub fn requireSnapshotHeader(input: []const u8) error{UnsupportedFileType}!void {
+    if (!startsWithSnapshotHeader(input)) return error.UnsupportedFileType;
+}
+
 pub fn parseHeader(row: []const u8) error{UnsupportedFileType}!HeaderInfo {
     if (row.len < 20 or !std.mem.eql(u8, row[0..8], snapshot_header_identifier)) {
         return error.UnsupportedFileType;
