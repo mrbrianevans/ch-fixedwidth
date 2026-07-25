@@ -184,7 +184,7 @@ pub const Stream = struct {
 
         const take = @min(need - self.magic_len, data.len);
         if (take == 0) return;
-        @memcpy(self.magic[self.magic_len ..][0..take], data[0..take]);
+        @memcpy(self.magic[self.magic_len..][0..take], data[0..take]);
         self.magic_len += @intCast(take);
 
         if (self.magic_len < need) return;
