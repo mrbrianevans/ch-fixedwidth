@@ -6,13 +6,15 @@ import wasmUrl from "../ch_fixedwidth.wasm";
 import type { WorkerOutMessage } from "./types.ts";
 
 const el = {
-  capability: document.getElementById("capability") as HTMLElement,
   btnOpen: document.getElementById("btn-open") as HTMLButtonElement,
   btnOutdir: document.getElementById("btn-outdir") as HTMLButtonElement,
   btnConvert: document.getElementById("btn-convert") as HTMLButtonElement,
   btnCancel: document.getElementById("btn-cancel") as HTMLButtonElement,
   inputName: document.getElementById("input-name") as HTMLElement,
   outdirName: document.getElementById("outdir-name") as HTMLElement,
+  outputHeading: document.getElementById("output-heading") as HTMLElement,
+  outputFolderUi: document.getElementById("output-folder-ui") as HTMLElement,
+  outputDownloadNote: document.getElementById("output-download-note") as HTMLElement,
   dropZone: document.getElementById("drop-zone") as HTMLElement,
   fileInput: document.getElementById("file-input") as HTMLInputElement,
   progressBar: document.getElementById("progress-bar") as HTMLElement,
@@ -396,20 +398,24 @@ function registerServiceWorker(): void {
   });
 }
 
-function init(): void {
-  el.capability.hidden = false;
+function initOutputStep(): void {
   if (canStreamToDisk) {
-    el.capability.className = "banner ok";
-    el.capability.textContent =
-      "Direct-to-folder writing is available in this browser (Chrome or Edge recommended).";
+    el.outputHeading.textContent = "Output folder";
+    el.outputFolderUi.hidden = false;
+    el.outputDownloadNote.hidden = true;
+    el.btnOutdir.disabled = false;
+    el.outdirName.textContent = "Not chosen";
   } else {
-    el.capability.className = "banner warn";
-    el.capability.textContent =
-      "This browser will download results into memory. Prefer Chrome or Edge for large files.";
+    // Folder picker unavailable — replace Step 2 controls with the download notice.
+    el.outputHeading.textContent = "Output";
+    el.outputFolderUi.hidden = true;
+    el.outputDownloadNote.hidden = false;
+    el.btnOutdir.disabled = true;
   }
+}
 
-  el.btnOutdir.disabled = !canStreamToDisk;
-  el.outdirName.textContent = canStreamToDisk ? "Not chosen" : "Browser downloads";
+function init(): void {
+  initOutputStep();
 
   el.btnOpen.addEventListener("click", () => void pickInputFile());
   el.btnOutdir.addEventListener("click", () => void pickOutputDir());

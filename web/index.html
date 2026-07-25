@@ -25,16 +25,14 @@
   <body>
     <main class="page">
       <header class="masthead">
-        <p class="kicker">Companies House · Products 195 / 216</p>
+        <p class="kicker">Products 195 / 216 · CSV</p>
         <h1>Officers bulk data converter</h1>
         <p class="lede">
           Convert fixed-width officers bulk files (<code>.dat</code>) into tabular
-          CSV for companies and persons with significant control. Processing runs
+          CSV for companies and person appointments. Processing runs
           entirely on this machine; nothing is uploaded.
         </p>
       </header>
-
-      <section id="capability" class="banner" hidden></section>
 
       <section class="panel panel-raised" aria-labelledby="input-heading">
         <p class="panel-label">Step 1</p>
@@ -50,13 +48,16 @@
         <input id="file-input" type="file" accept=".dat,text/plain,*/*" hidden />
       </section>
 
-      <section class="panel" aria-labelledby="output-heading">
+      <section class="panel" id="output-panel" aria-labelledby="output-heading">
         <p class="panel-label">Step 2</p>
         <h2 id="output-heading">Output folder</h2>
-        <div class="row">
-          <button type="button" id="btn-outdir" class="btn secondary" disabled>Choose folder…</button>
+        <div id="output-folder-ui" class="row">
+          <button type="button" id="btn-outdir" class="btn secondary">Choose folder…</button>
           <span id="outdir-name" class="meta">Not chosen</span>
         </div>
+        <p id="output-download-note" class="banner warn panel-banner" hidden>
+          This browser will download results into memory. Prefer Chrome or Edge for large files.
+        </p>
       </section>
 
       <section class="panel panel-raised" aria-labelledby="convert-heading">

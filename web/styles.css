@@ -127,6 +127,10 @@ body {
   font-family: var(--font-body);
 }
 
+.panel-banner {
+  margin: 0;
+}
+
 .banner.ok {
   background: var(--ok-bg);
   color: var(--ok);
