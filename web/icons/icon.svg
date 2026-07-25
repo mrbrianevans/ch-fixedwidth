@@ -1,13 +1,12 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="CH Converter">
-  <!-- App icon: right chevron on teal — nods to chevron-delimited CH data. -->
-  <rect width="512" height="512" rx="112" fill="#0f766e"/>
-  <!-- Safe inset for non-maskable / favicon use (~12% padding). -->
+  <!-- Chevron on Oxford navy — fixed-width / chevron-delimited bulk data. -->
+  <rect width="512" height="512" fill="#002147"/>
   <path
     d="M196 140 L332 256 L196 372"
     fill="none"
-    stroke="#fafaf9"
+    stroke="#fcf9f4"
     stroke-width="56"
-    stroke-linecap="round"
-    stroke-linejoin="round"
+    stroke-linecap="square"
+    stroke-linejoin="miter"
   />
 </svg>

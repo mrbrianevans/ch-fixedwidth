@@ -1,6 +1,6 @@
 /**
- * The Digital Archive — web converter
- * Tokens and rules from agents/design.md
+ * Web converter UI — visual tokens from agents/design.md
+ * (cream / navy heritage palette; product copy is conversion-tool, not archive)
  */
 
 @import url("https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;0,6..72,700;1,6..72,400&family=Work+Sans:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap");
@@ -8,7 +8,7 @@
 :root {
   color-scheme: light;
 
-  /* Surfaces — parchment stack */
+  /* Surfaces */
   --surface: #fcf9f4;
   --surface-container-low: #f6f3ee;
   --surface-container-lowest: #ffffff;
@@ -25,7 +25,7 @@
   --outline-variant: #7a776e;
   --ghost-border: color-mix(in srgb, var(--outline-variant) 15%, transparent);
 
-  /* Status — restrained, archival */
+  /* Status */
   --ok: #1b4332;
   --ok-bg: #e8f0ea;
   --warn: #6b4f1d;
@@ -110,6 +110,12 @@ body {
   font-size: var(--body-md);
   color: var(--on-surface-variant);
   line-height: 1.65;
+}
+
+.lede code {
+  font-family: ui-monospace, "Cascadia Code", "Segoe UI Mono", monospace;
+  font-size: 0.92em;
+  color: var(--primary);
 }
 
 /* —— Capability notice (tonal, not bordered badge) —— */
@@ -254,7 +260,7 @@ body {
   color: var(--on-surface-variant);
 }
 
-/* —— Drop zone: ledger intake —— */
+/* —— Drop zone —— */
 
 .drop-zone {
   margin-top: 0.25rem;
@@ -294,7 +300,7 @@ body {
   color: var(--on-surface-variant);
 }
 
-/* —— Progress: flat ledger bar —— */
+/* —— Progress —— */
 
 .progress-wrap {
   height: 0.35rem;
@@ -326,7 +332,7 @@ body {
   color: var(--ok);
 }
 
-/* —— Stats: Archive Ledger —— */
+/* —— Stats —— */
 
 .stats {
   display: flex;
@@ -338,7 +344,7 @@ body {
 }
 
 .stats::before {
-  content: "Conversion ledger";
+  content: "Results";
   display: block;
   font-family: var(--font-body);
   font-size: var(--label-sm);

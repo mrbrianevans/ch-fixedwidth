@@ -1,7 +1,7 @@
 {
-  "name": "Companies House converter",
+  "name": "Companies House officers converter",
   "short_name": "CH Converter",
-  "description": "Convert Companies House bulk appointment snapshots (products 195 / 216) to CSV. Runs entirely in your browser.",
+  "description": "Convert Companies House officers bulk data (.dat, products 195 / 216) to tabular CSV. Runs entirely in your browser.",
   "id": "./",
   "start_url": "./",
   "scope": "./",

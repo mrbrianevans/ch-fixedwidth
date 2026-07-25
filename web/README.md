@@ -1,6 +1,6 @@
 # Browser converter
 
-Convert Companies House bulk appointment snapshots (products 195 / 216) to CSV in the browser.
+Convert Companies House officers bulk data (products 195 / 216, `.dat`) to tabular CSV in the browser.
 
 - Zig WASM via local `@ch-fixedwidth/wasm-ts`
 - Streams input (`File.stream`, 8 MiB batches) in a Worker

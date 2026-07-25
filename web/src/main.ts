@@ -94,7 +94,7 @@ async function pickInputFile(): Promise<void> {
         multiple: false,
         types: [
           {
-            description: "Companies House snapshot",
+            description: "Companies House officers bulk data",
             accept: {
               "application/octet-stream": [".dat"],
               "text/plain": [".dat", ".txt"],
@@ -405,7 +405,7 @@ function init(): void {
   } else {
     el.capability.className = "banner warn";
     el.capability.textContent =
-      "This browser will download results into memory. Prefer Chrome or Edge for large ledgers.";
+      "This browser will download results into memory. Prefer Chrome or Edge for large files.";
   }
 
   el.btnOutdir.disabled = !canStreamToDisk;

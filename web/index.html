@@ -3,10 +3,10 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Companies House appointment converter</title>
+    <title>Companies House officers bulk converter</title>
     <meta
       name="description"
-      content="Convert Companies House bulk appointment snapshots (products 195 / 216) to CSV. Runs locally in your browser."
+      content="Convert Companies House officers bulk data (.dat, products 195 / 216) to tabular CSV. Runs locally in your browser."
     />
     <meta name="theme-color" content="#002147" />
     <meta name="color-scheme" content="light" />
@@ -26,33 +26,33 @@
     <main class="page">
       <header class="masthead">
         <p class="kicker">Companies House · Products 195 / 216</p>
-        <h1>Appointment snapshot converter</h1>
+        <h1>Officers bulk data converter</h1>
         <p class="lede">
-          Transform fixed-width bulk appointment files into CSV schedules for
-          companies and persons with significant control. Processing runs entirely
-          on this machine; nothing is uploaded.
+          Convert fixed-width officers bulk files (<code>.dat</code>) into tabular
+          CSV for companies and persons with significant control. Processing runs
+          entirely on this machine; nothing is uploaded.
         </p>
       </header>
 
       <section id="capability" class="banner" hidden></section>
 
       <section class="panel panel-raised" aria-labelledby="input-heading">
-        <p class="panel-label">Schedule A</p>
-        <h2 id="input-heading">Source file</h2>
+        <p class="panel-label">Step 1</p>
+        <h2 id="input-heading">Input file</h2>
         <div class="row">
           <button type="button" id="btn-open" class="btn primary">Open file…</button>
           <span id="input-name" class="meta">No file selected</span>
         </div>
-        <div id="drop-zone" class="drop-zone" tabindex="0" role="button" aria-label="Drop snapshot file here">
-          <span class="drop-zone-title">Deposit snapshot</span>
-          <span class="drop-zone-hint">Drop a .dat file here, or press to browse</span>
+        <div id="drop-zone" class="drop-zone" tabindex="0" role="button" aria-label="Drop .dat file here">
+          <span class="drop-zone-title">Drop .dat file</span>
+          <span class="drop-zone-hint">Officers bulk data file, or press to browse</span>
         </div>
         <input id="file-input" type="file" accept=".dat,text/plain,*/*" hidden />
       </section>
 
       <section class="panel" aria-labelledby="output-heading">
-        <p class="panel-label">Schedule B</p>
-        <h2 id="output-heading">Output destination</h2>
+        <p class="panel-label">Step 2</p>
+        <h2 id="output-heading">Output folder</h2>
         <div class="row">
           <button type="button" id="btn-outdir" class="btn secondary" disabled>Choose folder…</button>
           <span id="outdir-name" class="meta">Not chosen</span>
@@ -60,8 +60,8 @@
       </section>
 
       <section class="panel panel-raised" aria-labelledby="convert-heading">
-        <p class="panel-label">Execution</p>
-        <h2 id="convert-heading">Conversion</h2>
+        <p class="panel-label">Step 3</p>
+        <h2 id="convert-heading">Convert to CSV</h2>
         <div class="row">
           <button type="button" id="btn-convert" class="btn primary" disabled>Convert</button>
           <button type="button" id="btn-cancel" class="btn tertiary danger" disabled>Cancel</button>
@@ -95,9 +95,9 @@
       </section>
 
       <p class="footer">
-        For larger ledgers, the native
+        For large files, the native
         <a href="https://github.com/mrbrianevans/ch-fixedwidth/releases">command-line tool</a>
-        is approximately ten times faster than this browser converter.
+        is about ten times faster than this browser converter.
       </p>
     </main>
   </body>
