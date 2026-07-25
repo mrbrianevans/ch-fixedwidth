@@ -30,7 +30,8 @@
         <p class="lede">
           Convert fixed-width officers bulk files (<code>.dat</code>) into tabular
           CSV for companies and person appointments. Processing runs
-          entirely on this machine; nothing is uploaded.
+          entirely on this machine; nothing is uploaded. On Chrome or Edge you can
+          convert a batch of files into a chosen folder, one after another.
         </p>
       </header>
 
@@ -46,6 +47,8 @@
           <span class="drop-zone-hint">Officers bulk data file, or press to browse</span>
         </div>
         <input id="file-input" type="file" accept=".dat,text/plain,*/*" hidden />
+        <p id="batch-summary" class="batch-summary meta" hidden></p>
+        <ul id="queue-list" class="queue-list" hidden></ul>
       </section>
 
       <section class="panel" id="output-panel" aria-labelledby="output-heading">
@@ -56,7 +59,8 @@
           <span id="outdir-name" class="meta">Not chosen</span>
         </div>
         <p id="output-download-note" class="banner warn panel-banner" hidden>
-          This browser will download results into memory. Prefer Chrome or Edge for large files.
+          This browser will download results into memory (one file at a time). Prefer
+          Chrome or Edge for large files and multi-file batches.
         </p>
       </section>
 
@@ -65,10 +69,18 @@
         <h2 id="convert-heading">Convert to CSV</h2>
         <div class="row">
           <button type="button" id="btn-convert" class="btn primary" disabled>Convert</button>
+          <button type="button" id="btn-retry" class="btn secondary" hidden disabled>
+            Retry failed
+          </button>
           <button type="button" id="btn-cancel" class="btn tertiary danger" disabled>Cancel</button>
         </div>
+        <p class="progress-label meta">Current file</p>
         <div class="progress-wrap" aria-live="polite">
           <div class="progress-bar" id="progress-bar" style="width: 0%"></div>
+        </div>
+        <p class="progress-label meta">Batch</p>
+        <div class="progress-wrap progress-wrap--batch">
+          <div class="progress-bar" id="batch-progress-bar" style="width: 0%"></div>
         </div>
         <p id="status" class="status">Ready.</p>
         <dl id="stats" class="stats" hidden>
@@ -92,6 +104,10 @@
             <dt>Speed</dt>
             <dd id="stat-speed">—</dd>
           </div>
+          <div>
+            <dt>Memory</dt>
+            <dd id="stat-memory">—</dd>
+          </div>
         </dl>
       </section>
 
@@ -113,4 +129,3 @@
     </main>
   </body>
 </html>
-

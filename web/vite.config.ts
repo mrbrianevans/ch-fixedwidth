@@ -162,9 +162,19 @@ export default defineConfig({
   server: {
     port: 3000,
     strictPort: false,
+    // crossOriginIsolated → performance.measureUserAgentSpecificMemory()
+    // credentialless is less brittle with third-party fonts than require-corp.
+    headers: {
+      "Cross-Origin-Opener-Policy": "same-origin",
+      "Cross-Origin-Embedder-Policy": "credentialless",
+    },
   },
   preview: {
     port: 3000,
+    headers: {
+      "Cross-Origin-Opener-Policy": "same-origin",
+      "Cross-Origin-Embedder-Policy": "credentialless",
+    },
   },
   // Local monorepo package is TypeScript source — let Vite pre-bundle it.
   optimizeDeps: {

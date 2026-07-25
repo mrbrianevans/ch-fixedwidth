@@ -12,6 +12,14 @@ function post(msg: WorkerOutMessage, transfer?: Transferable[]): void {
   else self.postMessage(msg);
 }
 
+function wasmMemoryBytes(stream: ChFixedWidthStream): number {
+  try {
+    return stream.exports.memory.buffer.byteLength;
+  } catch {
+    return 0;
+  }
+}
+
 function progressEvery(totalBytes: number): number {
   return Math.max(1, Math.min(32 * 1024 * 1024, Math.floor(totalBytes / 50) || 1));
 }
@@ -89,6 +97,7 @@ async function convert(file: File, wasmUrl: string, inputBatchBytes: number): Pr
           totalBytes,
           companies: stats.companies,
           persons: stats.persons,
+          wasmMemoryBytes: wasmMemoryBytes(stream),
         });
       }
     }
@@ -97,12 +106,14 @@ async function convert(file: File, wasmUrl: string, inputBatchBytes: number): Pr
     emitBatches(stream.finish());
 
     const stats = stream.stats();
+    const mem = wasmMemoryBytes(stream);
     post({
       type: "progress",
       bytesRead,
       totalBytes,
       companies: stats.companies,
       persons: stats.persons,
+      wasmMemoryBytes: mem,
     });
     post({
       type: "done",
@@ -111,6 +122,7 @@ async function convert(file: File, wasmUrl: string, inputBatchBytes: number): Pr
       trailerCount: stats.trailerCount,
       bytesRead,
       elapsedMs: performance.now() - started,
+      wasmMemoryBytes: mem,
     });
   } catch (err) {
     if (cancelled) {

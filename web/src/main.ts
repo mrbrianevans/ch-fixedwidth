@@ -1,6 +1,6 @@
 /**
- * Main thread: pickers, progress, streaming writes.
- * Parsing runs in worker.ts.
+ * Main thread: pickers, batch queue, progress, streaming writes.
+ * Parsing runs in worker.ts (one file at a time).
  */
 import wasmUrl from "../ch_fixedwidth.wasm?url";
 import type { WorkerOutMessage } from "./types.ts";
@@ -9,6 +9,7 @@ const el = {
   btnOpen: document.getElementById("btn-open") as HTMLButtonElement,
   btnOutdir: document.getElementById("btn-outdir") as HTMLButtonElement,
   btnConvert: document.getElementById("btn-convert") as HTMLButtonElement,
+  btnRetry: document.getElementById("btn-retry") as HTMLButtonElement,
   btnCancel: document.getElementById("btn-cancel") as HTMLButtonElement,
   inputName: document.getElementById("input-name") as HTMLElement,
   outdirName: document.getElementById("outdir-name") as HTMLElement,
@@ -16,8 +17,13 @@ const el = {
   outputFolderUi: document.getElementById("output-folder-ui") as HTMLElement,
   outputDownloadNote: document.getElementById("output-download-note") as HTMLElement,
   dropZone: document.getElementById("drop-zone") as HTMLElement,
+  dropZoneTitle: document.querySelector(".drop-zone-title") as HTMLElement,
+  dropZoneHint: document.querySelector(".drop-zone-hint") as HTMLElement,
   fileInput: document.getElementById("file-input") as HTMLInputElement,
+  queueList: document.getElementById("queue-list") as HTMLElement,
+  batchSummary: document.getElementById("batch-summary") as HTMLElement,
   progressBar: document.getElementById("progress-bar") as HTMLElement,
+  batchProgressBar: document.getElementById("batch-progress-bar") as HTMLElement,
   status: document.getElementById("status") as HTMLElement,
   stats: document.getElementById("stats") as HTMLElement,
   statRead: document.getElementById("stat-read") as HTMLElement,
@@ -25,20 +31,43 @@ const el = {
   statPersons: document.getElementById("stat-persons") as HTMLElement,
   statElapsed: document.getElementById("stat-elapsed") as HTMLElement,
   statSpeed: document.getElementById("stat-speed") as HTMLElement,
+  statMemory: document.getElementById("stat-memory") as HTMLElement,
 };
+
+type ItemStatus = "pending" | "converting" | "done" | "error" | "cancelled";
+
+interface QueueItem {
+  id: string;
+  file: File;
+  status: ItemStatus;
+  error?: string;
+  companies?: number;
+  persons?: number;
+  elapsedMs?: number;
+}
 
 const hasOpenPicker = typeof window.showOpenFilePicker === "function";
 const hasDirPicker = typeof window.showDirectoryPicker === "function";
+/** Folder write API — required for multi-file batch. */
 const canStreamToDisk = hasDirPicker;
+const allowMultiFile = canStreamToDisk;
 
-let inputFile: File | null = null;
+let queue: QueueItem[] = [];
 let outputDir: FileSystemDirectoryHandle | null = null;
 let companiesChunks: Uint8Array[] = [];
 let personsChunks: Uint8Array[] = [];
 let companiesWritable: FileSystemWritableFileStream | null = null;
 let personsWritable: FileSystemWritableFileStream | null = null;
 let worker: Worker | null = null;
+/** True while a batch run (possibly multi-file) is in progress. */
 let converting = false;
+/** Soft-cancel: finish stopping current file; do not start further pending items. */
+let batchCancelled = false;
+let currentItemId: string | null = null;
+let currentFileBytesRead = 0;
+let lastWasmMemoryBytes = 0;
+let memorySampleChain: Promise<void> = Promise.resolve();
+let lastMemorySampleAt = 0;
 
 /** Injected from wasm-ts/package.json at build time (vite define). */
 declare const __PARSER_VERSION__: string | undefined;
@@ -64,19 +93,146 @@ function setStatus(text: string, kind: "" | "ok" | "error" = ""): void {
   el.status.className = kind ? `status ${kind}` : "status";
 }
 
-function setProgress(bytesRead: number, totalBytes: number): void {
+function setFileProgress(bytesRead: number, totalBytes: number): void {
   const pct = totalBytes > 0 ? Math.min(100, (bytesRead / totalBytes) * 100) : 0;
   el.progressBar.style.width = `${pct.toFixed(2)}%`;
 }
 
-function updateConvertEnabled(): void {
-  el.btnConvert.disabled = !(inputFile && !converting && (canStreamToDisk ? !!outputDir : true));
+function queueBytes(): { total: number; done: number } {
+  let total = 0;
+  let done = 0;
+  for (const item of queue) {
+    total += item.file.size;
+    if (item.status === "done") done += item.file.size;
+    else if (item.status === "converting") done += currentFileBytesRead;
+  }
+  return { total, done };
 }
 
-function setInputFile(file: File | null): void {
-  inputFile = file;
-  el.inputName.textContent = file ? `${file.name} (${formatBytes(file.size)})` : "No file selected";
+function setBatchProgress(): void {
+  const { total, done } = queueBytes();
+  const pct = total > 0 ? Math.min(100, (done / total) * 100) : 0;
+  el.batchProgressBar.style.width = `${pct.toFixed(2)}%`;
+}
+
+function countByStatus(status: ItemStatus): number {
+  return queue.filter((i) => i.status === status).length;
+}
+
+function updateBatchSummary(): void {
+  if (queue.length === 0) {
+    el.batchSummary.hidden = true;
+    el.batchSummary.textContent = "";
+    return;
+  }
+  el.batchSummary.hidden = false;
+  const n = queue.length;
+  const done = countByStatus("done");
+  const err = countByStatus("error");
+  const pending = countByStatus("pending");
+  const convertingN = countByStatus("converting");
+  const cancelled = countByStatus("cancelled");
+  const totalSize = queue.reduce((s, i) => s + i.file.size, 0);
+  const parts = [
+    `${n} file${n === 1 ? "" : "s"}`,
+    formatBytes(totalSize),
+    `${done} done`,
+  ];
+  if (convertingN) parts.push(`${convertingN} converting`);
+  if (pending) parts.push(`${pending} waiting`);
+  if (err) parts.push(`${err} failed`);
+  if (cancelled) parts.push(`${cancelled} cancelled`);
+  el.batchSummary.textContent = parts.join(" · ");
+}
+
+function statusLabel(status: ItemStatus): string {
+  switch (status) {
+    case "pending":
+      return "Waiting";
+    case "converting":
+      return "Converting";
+    case "done":
+      return "Done";
+    case "error":
+      return "Failed";
+    case "cancelled":
+      return "Cancelled";
+  }
+}
+
+function renderQueue(): void {
+  el.queueList.replaceChildren();
+  if (queue.length === 0) {
+    el.queueList.hidden = true;
+    updateBatchSummary();
+    updateConvertEnabled();
+    return;
+  }
+  el.queueList.hidden = false;
+  for (const item of queue) {
+    const li = document.createElement("li");
+    li.className = `queue-item queue-item--${item.status}`;
+    li.dataset.id = item.id;
+
+    const name = document.createElement("span");
+    name.className = "queue-item-name";
+    name.textContent = item.file.name;
+
+    const meta = document.createElement("span");
+    meta.className = "queue-item-meta";
+    const bits = [formatBytes(item.file.size), statusLabel(item.status)];
+    if (item.status === "done" && item.companies != null) {
+      bits.push(
+        `${formatNumber(item.companies)} co`,
+        `${formatNumber(item.persons ?? 0)} pe`,
+      );
+    }
+    if (item.status === "error" && item.error) bits.push(item.error);
+    meta.textContent = bits.join(" · ");
+
+    li.append(name, meta);
+    el.queueList.append(li);
+  }
+  updateBatchSummary();
   updateConvertEnabled();
+}
+
+function updateConvertEnabled(): void {
+  const hasPending = queue.some((i) => i.status === "pending");
+  const hasFailed = queue.some((i) => i.status === "error");
+  const folderOk = canStreamToDisk ? !!outputDir : true;
+  el.btnConvert.disabled = !(hasPending && !converting && folderOk);
+  el.btnRetry.hidden = !hasFailed;
+  el.btnRetry.disabled = !(hasFailed && !converting && folderOk);
+}
+
+function setInputFiles(files: File[]): void {
+  if (converting) return;
+  const list = allowMultiFile ? files : files.slice(0, 1);
+  if (!allowMultiFile && files.length > 1) {
+    setStatus(
+      "This browser only supports one file at a time. Use Chrome or Edge for batch conversion.",
+      "error",
+    );
+  }
+  queue = list.map((file, i) => ({
+    id: `${file.name}-${file.size}-${file.lastModified}-${i}-${Math.random().toString(36).slice(2, 8)}`,
+    file,
+    status: "pending" as const,
+  }));
+  if (queue.length === 0) {
+    el.inputName.textContent = "No file selected";
+  } else if (queue.length === 1) {
+    const f = queue[0]!.file;
+    el.inputName.textContent = `${f.name} (${formatBytes(f.size)})`;
+  } else {
+    const total = queue.reduce((s, i) => s + i.file.size, 0);
+    el.inputName.textContent = `${queue.length} files (${formatBytes(total)})`;
+  }
+  currentFileBytesRead = 0;
+  setFileProgress(0, 1);
+  setBatchProgress();
+  renderQueue();
 }
 
 function isAbortError(err: unknown): boolean {
@@ -92,8 +248,8 @@ function resolveAssetUrl(url: string): string {
 async function pickInputFile(): Promise<void> {
   if (hasOpenPicker) {
     try {
-      const [handle] = await window.showOpenFilePicker!({
-        multiple: false,
+      const handles = await window.showOpenFilePicker!({
+        multiple: allowMultiFile,
         types: [
           {
             description: "Companies House officers bulk data",
@@ -104,7 +260,8 @@ async function pickInputFile(): Promise<void> {
           },
         ],
       });
-      setInputFile(await handle.getFile());
+      const files = await Promise.all(handles.map((h) => h.getFile()));
+      setInputFiles(files);
       return;
     } catch (err) {
       if (isAbortError(err)) return;
@@ -132,8 +289,12 @@ async function openWritables(base: string): Promise<void> {
   personsWritable = null;
 
   if (outputDir) {
-    const cHandle = await outputDir.getFileHandle(`companies_data_${base}.csv`, { create: true });
-    const pHandle = await outputDir.getFileHandle(`persons_data_${base}.csv`, { create: true });
+    const cHandle = await outputDir.getFileHandle(`companies_data_${base}.csv`, {
+      create: true,
+    });
+    const pHandle = await outputDir.getFileHandle(`persons_data_${base}.csv`, {
+      create: true,
+    });
     companiesWritable = await cHandle.createWritable();
     personsWritable = await pHandle.createWritable();
   }
@@ -216,78 +377,262 @@ function setConverting(on: boolean): void {
 }
 
 function createConverterWorker(): Worker {
-  // Vite bundles this as a module worker (dev + production).
   return new Worker(new URL("./worker.ts", import.meta.url), { type: "module" });
 }
 
-async function startConvert(): Promise<void> {
-  if (!inputFile || converting) return;
-  if (canStreamToDisk && !outputDir) {
-    setStatus("Choose an output folder first.", "error");
+function teardownWorker(): void {
+  if (worker) {
+    worker.terminate();
+    worker = null;
+  }
+}
+
+/** Chrome `performance.memory` (non-standard). */
+interface PerformanceMemory {
+  usedJSHeapSize: number;
+  totalJSHeapSize: number;
+  jsHeapSizeLimit: number;
+}
+
+interface PerformanceWithMemory extends Performance {
+  memory?: PerformanceMemory;
+  measureUserAgentSpecificMemory?: () => Promise<{ bytes: number }>;
+}
+
+/**
+ * Sample browser memory when available; always surface WASM linear memory from the worker.
+ * `measureUserAgentSpecificMemory` needs cross-origin isolation (COOP/COEP).
+ */
+async function formatMemorySample(wasmBytes: number): Promise<string> {
+  const perf = performance as PerformanceWithMemory;
+  let pageBytes: number | null = null;
+  let pageLabel = "";
+
+  if (
+    globalThis.crossOriginIsolated &&
+    typeof perf.measureUserAgentSpecificMemory === "function"
+  ) {
+    try {
+      const m = await perf.measureUserAgentSpecificMemory();
+      pageBytes = m.bytes;
+      pageLabel = "page";
+    } catch {
+      /* permission / unsupported */
+    }
+  }
+
+  if (pageBytes == null && perf.memory && typeof perf.memory.usedJSHeapSize === "number") {
+    pageBytes = perf.memory.usedJSHeapSize;
+    pageLabel = "JS heap";
+  }
+
+  const wasmPart = wasmBytes > 0 ? `WASM ${formatBytes(wasmBytes)}` : null;
+
+  if (pageBytes != null) {
+    // UA measure should include workers/WASM when isolated; still show WASM heap
+    // so users can see linear-memory growth if it is under-counted.
+    const parts = [`${formatBytes(pageBytes)} (${pageLabel})`];
+    if (wasmPart) parts.push(wasmPart);
+    if (!globalThis.crossOriginIsolated && pageLabel === "JS heap") {
+      // JS heap is main-thread only — add WASM for a closer total.
+      const approx = pageBytes + wasmBytes;
+      return `~${formatBytes(approx)} est. · ${parts.join(" · ")}`;
+    }
+    return parts.join(" · ");
+  }
+
+  if (wasmPart) return wasmPart;
+  if (!globalThis.crossOriginIsolated) {
+    return "n/a (needs COOP/COEP for full estimate)";
+  }
+  return "n/a";
+}
+
+function scheduleMemoryUpdate(wasmBytes: number): void {
+  lastWasmMemoryBytes = wasmBytes;
+  const now = performance.now();
+  // Throttle expensive UA measurement.
+  if (now - lastMemorySampleAt < 1500 && el.statMemory.textContent !== "—") return;
+  lastMemorySampleAt = now;
+  memorySampleChain = memorySampleChain
+    .then(async () => {
+      el.statMemory.textContent = await formatMemorySample(wasmBytes);
+    })
+    .catch(() => {
+      /* ignore */
+    });
+}
+
+function nextPendingItem(): QueueItem | undefined {
+  return queue.find((i) => i.status === "pending");
+}
+
+type ItemOutcome = "done" | "error" | "cancelled";
+
+async function runBatchLoop(): Promise<void> {
+  while (!batchCancelled) {
+    const item = nextPendingItem();
+    if (!item) break;
+
+    currentItemId = item.id;
+    item.status = "converting";
+    item.error = undefined;
+    currentFileBytesRead = 0;
+    renderQueue();
+
+    const base = basenameWithoutExt(item.file.name);
+    const fileIndex = queue.indexOf(item) + 1;
+    el.stats.hidden = false;
+    el.statRead.textContent = "0 B";
+    el.statCompanies.textContent = "0";
+    el.statPersons.textContent = "0";
+    el.statElapsed.textContent = "—";
+    el.statSpeed.textContent = "—";
+    el.statMemory.textContent = "…";
+    setFileProgress(0, item.file.size);
+    setBatchProgress();
+    setStatus(
+      queue.length > 1
+        ? `File ${fileIndex} of ${queue.length}: ${item.file.name} — starting…`
+        : "Starting…",
+    );
+
+    try {
+      await openWritables(base);
+    } catch (err) {
+      item.status = "error";
+      item.error = `Could not create outputs: ${String(err)}`;
+      currentItemId = null;
+      renderQueue();
+      setStatus(`${item.file.name}: ${item.error}`, "error");
+      continue;
+    }
+
+    const outcome = await runWorkerForItem(item, base);
+    currentItemId = null;
+    if (outcome === "cancelled" || batchCancelled) break;
+  }
+
+  if (batchCancelled) {
+    for (const q of queue) {
+      if (q.status === "pending" || q.status === "converting") q.status = "cancelled";
+    }
+    renderQueue();
+    finishBatchRun("Batch cancelled.");
     return;
   }
 
-  const base = basenameWithoutExt(inputFile.name);
-  setConverting(true);
-  el.stats.hidden = false;
-  el.statRead.textContent = "0 B";
-  el.statCompanies.textContent = "0";
-  el.statPersons.textContent = "0";
-  el.statElapsed.textContent = "—";
-  el.statSpeed.textContent = "—";
-  setProgress(0, inputFile.size);
-  setStatus("Starting…");
-
-  try {
-    await openWritables(base);
-  } catch (err) {
-    setConverting(false);
-    setStatus(`Could not create output files: ${String(err)}`, "error");
-    return;
+  const failed = countByStatus("error");
+  const done = countByStatus("done");
+  if (failed > 0) {
+    setStatus(
+      `Batch finished — ${done} succeeded, ${failed} failed. You can retry failed files.`,
+      "error",
+    );
+    finishBatchRun();
+  } else if (done === 1) {
+    const only = queue.find((i) => i.status === "done");
+    setStatus(
+      `Done — ${formatNumber(only?.companies ?? 0)} companies, ${formatNumber(only?.persons ?? 0)} persons.`,
+      "ok",
+    );
+    finishBatchRun();
+  } else {
+    setStatus(`Batch complete — ${done} file${done === 1 ? "" : "s"} converted.`, "ok");
+    finishBatchRun();
   }
+}
 
-  worker = createConverterWorker();
-  let chain: Promise<void> = Promise.resolve();
-  worker.onmessage = (ev: MessageEvent<WorkerOutMessage>) => {
-    chain = chain
-      .then(() => handleWorkerMessage(ev.data, base))
-      .catch((err) => failConvert(String(err)));
-  };
-  worker.onerror = (ev) => {
-    void failConvert(`Worker error: ${ev.message || "unknown"}`);
-  };
+function runWorkerForItem(item: QueueItem, base: string): Promise<ItemOutcome> {
+  return new Promise((resolve) => {
+    teardownWorker();
+    worker = createConverterWorker();
+    let chain: Promise<void> = Promise.resolve();
+    let settled = false;
 
-  worker.postMessage({
-    type: "convert",
-    file: inputFile,
-    wasmUrl: resolveAssetUrl(String(wasmUrl)),
+    const settle = (outcome: ItemOutcome): void => {
+      if (settled) return;
+      settled = true;
+      teardownWorker();
+      resolve(outcome);
+    };
+
+    worker.onmessage = (ev: MessageEvent<WorkerOutMessage>) => {
+      chain = chain
+        .then(async () => {
+          if (settled) return;
+          const outcome = await handleWorkerMessage(ev.data, item, base);
+          if (outcome) settle(outcome);
+        })
+        .catch(async (err) => {
+          if (settled) return;
+          await markItemError(item, String(err));
+          settle("error");
+        });
+    };
+
+    worker.onerror = (ev) => {
+      chain = chain.then(async () => {
+        if (settled) return;
+        await markItemError(item, `Worker error: ${ev.message || "unknown"}`);
+        settle("error");
+      });
+    };
+
+    worker.postMessage({
+      type: "convert",
+      file: item.file,
+      wasmUrl: resolveAssetUrl(String(wasmUrl)),
+    });
   });
 }
 
-async function handleWorkerMessage(msg: WorkerOutMessage, base: string): Promise<void> {
+/**
+ * @returns terminal outcome when this file is finished; null if more messages expected
+ */
+async function handleWorkerMessage(
+  msg: WorkerOutMessage,
+  item: QueueItem,
+  base: string,
+): Promise<ItemOutcome | null> {
   switch (msg.type) {
     case "progress": {
-      setProgress(msg.bytesRead, msg.totalBytes);
+      currentFileBytesRead = msg.bytesRead;
+      setFileProgress(msg.bytesRead, msg.totalBytes);
+      setBatchProgress();
       el.statRead.textContent = `${formatBytes(msg.bytesRead)} / ${formatBytes(msg.totalBytes)}`;
       el.statCompanies.textContent = formatNumber(msg.companies);
       el.statPersons.textContent = formatNumber(msg.persons);
       const pct =
         msg.totalBytes > 0 ? ((msg.bytesRead / msg.totalBytes) * 100).toFixed(1) : "0";
-      setStatus(`Converting… ${pct}%`);
-      break;
+      const fileIndex = queue.indexOf(item) + 1;
+      setStatus(
+        queue.length > 1
+          ? `File ${fileIndex} of ${queue.length}: ${item.file.name} — ${pct}%`
+          : `Converting… ${pct}%`,
+      );
+      scheduleMemoryUpdate(msg.wasmMemoryBytes);
+      return null;
     }
     case "batch": {
       try {
         await writeBatch(msg.kind, msg.data);
+        return null;
       } catch (err) {
-        await failConvert(`Write failed: ${String(err)}`);
+        worker?.postMessage({ type: "cancel" });
+        await markItemError(item, `Write failed: ${String(err)}`);
+        return "error";
       }
-      break;
     }
     case "done": {
       try {
         await closeWritables();
         if (!canStreamToDisk || !outputDir) downloadFallback(base);
+        item.status = "done";
+        item.companies = msg.companies;
+        item.persons = msg.persons;
+        item.elapsedMs = msg.elapsedMs;
+        currentFileBytesRead = msg.bytesRead;
         const records = msg.companies + msg.persons;
         const secs = msg.elapsedMs / 1000;
         const recPerSec = secs > 0 ? records / secs : 0;
@@ -299,51 +644,95 @@ async function handleWorkerMessage(msg: WorkerOutMessage, base: string): Promise
         el.statCompanies.textContent = formatNumber(msg.companies);
         el.statPersons.textContent = formatNumber(msg.persons);
         el.statRead.textContent = formatBytes(msg.bytesRead);
-        setProgress(msg.bytesRead, msg.bytesRead);
-        setStatus(
-          `Done — ${formatNumber(msg.companies)} companies, ${formatNumber(msg.persons)} persons.`,
-          "ok",
-        );
+        setFileProgress(msg.bytesRead, msg.bytesRead);
+        setBatchProgress();
+        scheduleMemoryUpdate(msg.wasmMemoryBytes);
+        renderQueue();
+        return "done";
       } catch (err) {
-        setStatus(`Failed to close outputs: ${String(err)}`, "error");
-      } finally {
-        teardownWorker();
-        setConverting(false);
+        await markItemError(item, `Failed to close outputs: ${String(err)}`);
+        return "error";
       }
-      break;
     }
     case "cancelled": {
       await abortWritables();
-      setStatus("Cancelled.", "error");
-      teardownWorker();
-      setConverting(false);
-      break;
+      if (item.status === "converting") {
+        item.status = batchCancelled ? "cancelled" : "error";
+        if (!batchCancelled) item.error = "Cancelled";
+      }
+      renderQueue();
+      return "cancelled";
     }
     case "error": {
-      await failConvert(msg.code != null ? `${msg.message} (code ${msg.code})` : msg.message);
-      break;
+      await markItemError(
+        item,
+        msg.code != null ? `${msg.message} (code ${msg.code})` : msg.message,
+      );
+      return "error";
     }
   }
 }
 
-async function failConvert(message: string): Promise<void> {
+async function markItemError(item: QueueItem, message: string): Promise<void> {
   await abortWritables();
-  setStatus(message, "error");
-  teardownWorker();
-  setConverting(false);
+  if (item.status === "converting" || item.status === "pending") {
+    item.status = "error";
+    item.error = message;
+  }
+  renderQueue();
+  setStatus(`${item.file.name}: ${message}`, "error");
 }
 
-function teardownWorker(): void {
-  if (worker) {
-    worker.terminate();
-    worker = null;
+function finishBatchRun(statusMessage?: string): void {
+  setConverting(false);
+  batchCancelled = false;
+  currentItemId = null;
+  if (statusMessage) setStatus(statusMessage, "error");
+  setBatchProgress();
+  renderQueue();
+  scheduleMemoryUpdate(lastWasmMemoryBytes);
+}
+
+async function startBatch(retryFailedOnly: boolean): Promise<void> {
+  if (converting) return;
+  if (canStreamToDisk && !outputDir) {
+    setStatus("Choose an output folder first.", "error");
+    return;
   }
+
+  if (retryFailedOnly) {
+    for (const item of queue) {
+      if (item.status === "error" || item.status === "cancelled") {
+        item.status = "pending";
+        item.error = undefined;
+      }
+    }
+  }
+
+  if (!queue.some((i) => i.status === "pending")) {
+    setStatus("No files waiting to convert.", "error");
+    return;
+  }
+
+  batchCancelled = false;
+  setConverting(true);
+  el.stats.hidden = false;
+  renderQueue();
+  await runBatchLoop();
 }
 
 function cancelConvert(): void {
-  if (!converting || !worker) return;
-  worker.postMessage({ type: "cancel" });
+  if (!converting) return;
+  batchCancelled = true;
   setStatus("Cancelling…");
+  if (worker) {
+    worker.postMessage({ type: "cancel" });
+  } else {
+    for (const q of queue) {
+      if (q.status === "pending" || q.status === "converting") q.status = "cancelled";
+    }
+    finishBatchRun("Batch cancelled.");
+  }
 }
 
 function bindDropZone(): void {
@@ -368,8 +757,9 @@ function bindDropZone(): void {
     prevent(e);
     zone.classList.remove("active");
     if (converting) return;
-    const file = e.dataTransfer?.files?.[0];
-    if (file) setInputFile(file);
+    const list = e.dataTransfer?.files;
+    if (!list?.length) return;
+    setInputFiles(Array.from(list));
   });
   zone.addEventListener("click", () => {
     if (!converting) void pickInputFile();
@@ -382,13 +772,8 @@ function bindDropZone(): void {
   });
 }
 
-/**
- * Progressive enhancement: register the service worker only when supported.
- * Failures are silent — the converter works fully without offline caching.
- */
 function registerServiceWorker(): void {
   if (!("serviceWorker" in navigator)) return;
-  // Relative to the page so GitHub project pages (/repo/) stay in scope.
   const swUrl = new URL("./sw.js", self.location.href);
   window.addEventListener("load", () => {
     void navigator.serviceWorker.register(swUrl, { scope: "./" }).catch(() => {
@@ -405,11 +790,29 @@ function initOutputStep(): void {
     el.btnOutdir.disabled = false;
     el.outdirName.textContent = "Not chosen";
   } else {
-    // Folder picker unavailable — replace Step 2 controls with the download notice.
     el.outputHeading.textContent = "Output";
     el.outputFolderUi.hidden = true;
     el.outputDownloadNote.hidden = false;
     el.btnOutdir.disabled = true;
+  }
+}
+
+function initInputStepCopy(): void {
+  if (allowMultiFile) {
+    el.dropZoneTitle.textContent = "Drop .dat files";
+    el.dropZoneHint.textContent =
+      "One or more officers bulk files (batch requires an output folder)";
+    el.dropZone.setAttribute("aria-label", "Drop .dat files here");
+    el.btnOpen.textContent = "Open files…";
+    el.fileInput.multiple = true;
+    const heading = document.getElementById("input-heading");
+    if (heading) heading.textContent = "Input files";
+  } else {
+    el.dropZoneTitle.textContent = "Drop .dat file";
+    el.dropZoneHint.textContent = "Single file only — use Chrome or Edge for batches";
+    el.dropZone.setAttribute("aria-label", "Drop .dat file here");
+    el.btnOpen.textContent = "Open file…";
+    el.fileInput.multiple = false;
   }
 }
 
@@ -429,19 +832,28 @@ function initSiteFooter(): void {
 
 function init(): void {
   initOutputStep();
+  initInputStepCopy();
   initSiteFooter();
 
   el.btnOpen.addEventListener("click", () => void pickInputFile());
   el.btnOutdir.addEventListener("click", () => void pickOutputDir());
-  el.btnConvert.addEventListener("click", () => void startConvert());
+  el.btnConvert.addEventListener("click", () => void startBatch(false));
+  el.btnRetry.addEventListener("click", () => void startBatch(true));
   el.btnCancel.addEventListener("click", () => cancelConvert());
   el.fileInput.addEventListener("change", () => {
-    setInputFile(el.fileInput.files?.[0] ?? null);
+    const files = el.fileInput.files ? Array.from(el.fileInput.files) : [];
+    setInputFiles(files);
     el.fileInput.value = "";
   });
   bindDropZone();
   updateConvertEnabled();
   registerServiceWorker();
+
+  // Initial memory capability hint
+  if (!globalThis.crossOriginIsolated) {
+    el.statMemory.title =
+      "Full page memory needs cross-origin isolation (COOP/COEP). WASM heap is always reported during conversion.";
+  }
 }
 
 init();
@@ -474,7 +886,6 @@ declare global {
     close(): Promise<void>;
     abort(): Promise<void>;
   }
-
 }
 
 export {};

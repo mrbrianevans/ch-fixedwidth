@@ -304,14 +304,83 @@ body {
   color: var(--on-surface-variant);
 }
 
+/* —— Queue —— */
+
+.batch-summary {
+  margin: 1rem 0 0.35rem;
+}
+
+.queue-list {
+  list-style: none;
+  margin: 0.75rem 0 0;
+  padding: 0;
+  background: var(--surface);
+}
+
+.queue-item {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  padding: 0.7rem 0.9rem;
+  background: var(--surface);
+}
+
+.queue-item:nth-child(even) {
+  background: var(--surface-container-low);
+}
+
+.queue-item-name {
+  font-family: var(--font-display);
+  font-size: var(--title-md);
+  font-weight: 600;
+  color: var(--primary);
+  word-break: break-all;
+}
+
+.queue-item-meta {
+  font-size: var(--body-sm);
+  color: var(--on-surface-variant);
+  word-break: break-word;
+}
+
+.queue-item--converting .queue-item-name {
+  color: var(--primary-container);
+}
+
+.queue-item--done .queue-item-meta {
+  color: var(--ok);
+}
+
+.queue-item--error .queue-item-meta {
+  color: var(--danger);
+}
+
+.queue-item--cancelled .queue-item-meta {
+  color: var(--on-surface-variant);
+  font-style: italic;
+}
+
 /* —— Progress —— */
+
+.progress-label {
+  margin: 1rem 0 0.35rem;
+}
+
+.progress-label:first-of-type {
+  margin-top: 1.15rem;
+}
 
 .progress-wrap {
   height: 0.35rem;
   background: var(--surface-container-high);
   border-radius: 0;
   overflow: hidden;
-  margin: 1.15rem 0 0.75rem;
+  margin: 0 0 0.35rem;
+}
+
+.progress-wrap--batch {
+  height: 0.28rem;
+  margin-bottom: 0.75rem;
 }
 
 .progress-bar {
