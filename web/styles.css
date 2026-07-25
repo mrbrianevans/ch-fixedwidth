@@ -118,6 +118,26 @@ body {
   color: var(--primary);
 }
 
+.source-line {
+  margin: 0.75rem 0 0;
+  max-width: 34em;
+  font-size: var(--body-sm);
+  color: var(--on-surface-variant);
+  line-height: 1.55;
+}
+
+.source-line a {
+  color: var(--primary);
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
+  text-decoration-thickness: 1px;
+}
+
+.source-line a:hover {
+  text-decoration-thickness: 2px;
+}
+
 /* —— Capability notice (tonal, not bordered badge) —— */
 
 .banner {
