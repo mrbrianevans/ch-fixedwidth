@@ -1,9 +1,8 @@
 name: CI
 
 on:
-  # Any branch push and all PRs (formatting, build, tests).
+  # Any branch push (formatting, build, tests).
   push:
-  pull_request:
 
 permissions:
   contents: read
