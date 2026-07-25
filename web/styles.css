@@ -540,6 +540,11 @@ label.btn.is-disabled {
   line-height: 1.6;
 }
 
+.tip.tip-follow {
+  margin-top: 0.45rem;
+  padding-top: 0;
+}
+
 .tip a,
 .site-footer a {
   color: var(--primary);
