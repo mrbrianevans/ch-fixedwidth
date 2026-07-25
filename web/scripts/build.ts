@@ -22,7 +22,25 @@ import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
+const repoRoot = join(root, "..");
 process.chdir(root);
+
+/** Parser version shown in the site footer (from the wasm-ts package). */
+function readParserVersion(): string {
+  const pkgPath = join(repoRoot, "wasm-ts", "package.json");
+  if (!existsSync(pkgPath)) {
+    console.warn("wasm-ts/package.json not found; footer version will be \"dev\"");
+    return "dev";
+  }
+  try {
+    const pkg = JSON.parse(readFileSync(pkgPath, "utf8")) as { version?: string };
+    return pkg.version?.trim() || "dev";
+  } catch {
+    return "dev";
+  }
+}
+
+const parserVersion = readParserVersion();
 
 const wasmSrc = join(root, "ch_fixedwidth.wasm");
 if (!existsSync(wasmSrc)) {
@@ -60,6 +78,7 @@ const app = await Bun.build({
   minify: true,
   define: {
     __WORKER_URL__: JSON.stringify("./worker.js"),
+    __PARSER_VERSION__: JSON.stringify(parserVersion),
   },
 });
 if (!app.success) {
@@ -139,3 +158,4 @@ for (const out of [...worker.outputs, ...app.outputs]) {
 }
 console.log(`  icons/ (${pwaIconFiles.length} PWA icons)`);
 console.log(`  sw.js (cache ${cacheName}, ${precacheUnique.length} precache URLs)`);
+console.log(`  parser version: ${parserVersion}`);

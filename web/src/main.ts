@@ -42,6 +42,8 @@ let converting = false;
 
 /** Injected by production build; falls back for local tooling. */
 declare const __WORKER_URL__: string | undefined;
+/** Injected from wasm-ts/package.json at build time. */
+declare const __PARSER_VERSION__: string | undefined;
 
 function basenameWithoutExt(name: string): string {
   const i = name.lastIndexOf(".");
@@ -414,8 +416,23 @@ function initOutputStep(): void {
   }
 }
 
+function initSiteFooter(): void {
+  const yearEl = document.getElementById("copyright-year");
+  if (yearEl) yearEl.textContent = String(new Date().getFullYear());
+
+  const verEl = document.getElementById("parser-version");
+  if (verEl) {
+    const v =
+      typeof __PARSER_VERSION__ !== "undefined" && __PARSER_VERSION_
+        ? __PARSER_VERSION__
+        : "dev";
+    verEl.textContent = v.startsWith("v") ? v : `v${v}`;
+  }
+}
+
 function init(): void {
   initOutputStep();
+  initSiteFooter();
 
   el.btnOpen.addEventListener("click", () => void pickInputFile());
   el.btnOutdir.addEventListener("click", () => void pickOutputDir());

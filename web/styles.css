@@ -399,9 +399,9 @@ body {
   text-align: right;
 }
 
-/* —— Footer —— */
+/* —— Tip + site footer —— */
 
-.footer {
+.tip {
   margin: 2rem 0 0;
   padding-top: 1.25rem;
   font-size: var(--body-sm);
@@ -409,7 +409,8 @@ body {
   line-height: 1.6;
 }
 
-.footer a {
+.tip a,
+.site-footer a {
   color: var(--primary);
   font-weight: 600;
   text-decoration: underline;
@@ -417,8 +418,28 @@ body {
   text-decoration-thickness: 1px;
 }
 
-.footer a:hover {
+.tip a:hover,
+.site-footer a:hover {
   text-decoration-thickness: 2px;
+}
+
+.site-footer {
+  margin: 1.75rem 0 0;
+  padding: 1.15rem 0 0;
+  font-size: var(--body-sm);
+  color: var(--on-surface-variant);
+  line-height: 1.65;
+  /* No-line rule: separate from content via spacing, not a border */
+}
+
+.site-footer p {
+  margin: 0;
+}
+
+#parser-version {
+  font-variant-numeric: tabular-nums;
+  color: var(--primary);
+  font-weight: 600;
 }
 
 /* —— Reduced motion —— */
