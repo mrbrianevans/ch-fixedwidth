@@ -6,7 +6,7 @@ import wasmUrl from "../ch_fixedwidth.wasm?url";
 import type { WorkerOutMessage } from "./types.ts";
 
 const el = {
-  btnOpen: document.getElementById("btn-open") as HTMLButtonElement,
+  btnOpen: document.getElementById("btn-open") as HTMLElement,
   btnOutdir: document.getElementById("btn-outdir") as HTMLButtonElement,
   btnConvert: document.getElementById("btn-convert") as HTMLButtonElement,
   btnRetry: document.getElementById("btn-retry") as HTMLButtonElement,
@@ -244,14 +244,30 @@ function resolveAssetUrl(url: string): string {
 }
 
 /**
- * Open files via a synchronous &lt;input type="file"&gt; click.
- *
- * Avoid showOpenFilePicker here: some browsers expose a partial/broken
- * implementation, and after an async failure Firefox blocks the fallback
- * input.click() (lost user activation). The classic input works everywhere.
+ * Open the native file dialog.
+ * Prefer label[for=file-input] (no JS). This is a fallback for the drop zone
+ * keyboard/click path. The input must not be display:none / [hidden].
  */
 function pickInputFile(): void {
+  // Reset so choosing the same file again still fires `change`.
+  el.fileInput.value = "";
   el.fileInput.click();
+}
+
+/** Collect File objects from a drop (files list and/or items). */
+function filesFromDataTransfer(dt: DataTransfer | null): File[] {
+  if (!dt) return [];
+  if (dt.files && dt.files.length > 0) return Array.from(dt.files);
+  const out: File[] = [];
+  if (dt.items) {
+    for (const item of Array.from(dt.items)) {
+      if (item.kind === "file") {
+        const f = item.getAsFile();
+        if (f) out.push(f);
+      }
+    }
+  }
+  return out;
 }
 
 async function pickOutputDir(): Promise<void> {
@@ -353,7 +369,11 @@ function downloadFallback(base: string): void {
 
 function setConverting(on: boolean): void {
   converting = on;
-  el.btnOpen.disabled = on;
+  // btnOpen is a <label>; use inert/aria rather than disabled where needed.
+  el.btnOpen.setAttribute("aria-disabled", on ? "true" : "false");
+  if (on) el.btnOpen.classList.add("is-disabled");
+  else el.btnOpen.classList.remove("is-disabled");
+  el.fileInput.disabled = on;
   el.btnOutdir.disabled = on || !canStreamToDisk;
   el.btnCancel.disabled = !on;
   el.dropZone.style.pointerEvents = on ? "none" : "";
@@ -695,23 +715,29 @@ function bindDropZone(): void {
   };
   zone.addEventListener("dragenter", (e) => {
     prevent(e);
+    if (e.dataTransfer) e.dataTransfer.dropEffect = "copy";
     zone.classList.add("active");
   });
   zone.addEventListener("dragover", (e) => {
     prevent(e);
+    if (e.dataTransfer) e.dataTransfer.dropEffect = "copy";
     zone.classList.add("active");
   });
   zone.addEventListener("dragleave", (e) => {
     prevent(e);
+    if (e.relatedTarget instanceof Node && zone.contains(e.relatedTarget)) return;
     zone.classList.remove("active");
   });
   zone.addEventListener("drop", (e) => {
     prevent(e);
     zone.classList.remove("active");
     if (converting) return;
-    const list = e.dataTransfer?.files;
-    if (!list?.length) return;
-    setInputFiles(Array.from(list));
+    const files = filesFromDataTransfer(e.dataTransfer);
+    if (!files.length) {
+      setStatus("No files found in that drop. Try Open file… instead.", "error");
+      return;
+    }
+    setInputFiles(files);
   });
   zone.addEventListener("click", () => {
     if (!converting) pickInputFile();
@@ -724,13 +750,31 @@ function bindDropZone(): void {
   });
 }
 
+/**
+ * Register SW only in production builds. Dev would fight HMR with cache-first.
+ * Also force an update check so deploys replace old cached app shells.
+ */
 function registerServiceWorker(): void {
   if (!("serviceWorker" in navigator)) return;
+  if (import.meta.env.DEV) {
+    void navigator.serviceWorker.getRegistrations().then((regs) => {
+      for (const reg of regs) void reg.unregister();
+    });
+    void caches.keys().then((keys) => {
+      for (const k of keys) void caches.delete(k);
+    });
+    return;
+  }
   const swUrl = new URL("./sw.js", self.location.href);
   window.addEventListener("load", () => {
-    void navigator.serviceWorker.register(swUrl, { scope: "./" }).catch(() => {
-      /* optional enhancement */
-    });
+    void navigator.serviceWorker
+      .register(swUrl, { scope: "./", updateViaCache: "none" })
+      .then((reg) => {
+        void reg.update();
+      })
+      .catch(() => {
+        /* optional enhancement */
+      });
   });
 }
 
@@ -757,7 +801,7 @@ function initInputStepCopy(): void {
     el.dropZoneTitle.textContent = "Drop .dat files";
     el.dropZoneHint.textContent =
       "One or more officers bulk files (batch requires an output folder)";
-    el.dropZone.setAttribute("aria-label", "Drop .dat files here");
+    el.dropZone.setAttribute("aria-label", "Drop .dat files here or press to browse");
     el.btnOpen.textContent = "Open files…";
     el.fileInput.multiple = true;
     const heading = document.getElementById("input-heading");
@@ -765,7 +809,7 @@ function initInputStepCopy(): void {
   } else {
     el.dropZoneTitle.textContent = "Drop .dat file";
     el.dropZoneHint.textContent = "Single file only — use Chrome or Edge for batches";
-    el.dropZone.setAttribute("aria-label", "Drop .dat file here");
+    el.dropZone.setAttribute("aria-label", "Drop .dat file here or press to browse");
     el.btnOpen.textContent = "Open file…";
     el.fileInput.multiple = false;
   }
@@ -786,12 +830,22 @@ function initSiteFooter(): void {
 }
 
 function init(): void {
+  if (!el.fileInput || !el.btnOpen || !el.dropZone) {
+    console.error("Converter UI failed to initialise: missing file controls");
+    return;
+  }
+
   initOutputStep();
   initInputStepCopy();
   initSiteFooter();
 
-  el.btnOpen.addEventListener("click", () => {
-    if (!converting) pickInputFile();
+  // Open uses <label for="file-input"> — no click handler needed on the label.
+  // Prevent double-open if a browser also synthesizes a click we handle elsewhere.
+  el.btnOpen.addEventListener("click", (e) => {
+    if (converting) {
+      e.preventDefault();
+      return;
+    }
   });
   el.btnOutdir.addEventListener("click", () => void pickOutputDir());
   el.btnConvert.addEventListener("click", () => void startBatch(false));
@@ -800,7 +854,6 @@ function init(): void {
   el.fileInput.addEventListener("change", () => {
     const files = el.fileInput.files ? Array.from(el.fileInput.files) : [];
     if (files.length) setInputFiles(files);
-    el.fileInput.value = "";
   });
   bindDropZone();
   updateConvertEnabled();

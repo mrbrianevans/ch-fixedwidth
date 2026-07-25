@@ -264,6 +264,34 @@ body {
   color: var(--on-surface-variant);
 }
 
+/* Keep file input “visible” to the UA (not display:none) so click/label works. */
+.file-input-native {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+  opacity: 0;
+}
+
+/* label.btn is used for Open file */
+label.btn {
+  display: inline-block;
+  text-align: center;
+  cursor: pointer;
+}
+
+label.btn.is-disabled {
+  opacity: 0.4;
+  pointer-events: none;
+  cursor: not-allowed;
+}
+
 /* —— Drop zone —— */
 
 .drop-zone {

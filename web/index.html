@@ -38,20 +38,32 @@
       <section class="panel panel-raised" aria-labelledby="input-heading">
         <p class="panel-label">Step 1</p>
         <h2 id="input-heading">Input file</h2>
+        <!--
+          File input must not use the HTML `hidden` attribute / display:none —
+          several browsers refuse programmatic activation of a display:none file input.
+          Open is a <label for=…> so the dialog opens without script.
+        -->
+        <input
+          id="file-input"
+          class="file-input-native"
+          type="file"
+          accept=".dat,.txt,text/plain"
+        />
         <div class="row">
-          <button type="button" id="btn-open" class="btn primary">Open file…</button>
+          <label id="btn-open" class="btn primary" for="file-input">Open file…</label>
           <span id="input-name" class="meta">No file selected</span>
         </div>
-        <div id="drop-zone" class="drop-zone" tabindex="0" role="button" aria-label="Drop .dat file here">
+        <div
+          id="drop-zone"
+          class="drop-zone"
+          tabindex="0"
+          role="button"
+          aria-controls="file-input"
+          aria-label="Drop .dat file here or press to browse"
+        >
           <span class="drop-zone-title">Drop .dat file</span>
           <span class="drop-zone-hint">Officers bulk data file, or press to browse</span>
         </div>
-        <input
-          id="file-input"
-          type="file"
-          accept=".dat,.txt,application/octet-stream,text/plain"
-          hidden
-        />
         <p id="batch-summary" class="batch-summary meta" hidden></p>
         <ul id="queue-list" class="queue-list" hidden></ul>
       </section>

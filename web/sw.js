@@ -4,11 +4,11 @@
  * Build injects the cache name and precache URL list (see vite.config.ts).
  * Progressive enhancement: the app works fully without this file.
  *
- * Strategy (all assets are static, same-origin):
- * - install: precache the app shell + WASM + worker
- * - activate: drop old versioned caches, claim clients
- * - fetch: cache-first for same-origin GET; network fallback; cache successful responses
- * - navigate offline: fall back to cached index.html / scope root
+ * Strategy:
+ * - install: precache app shell + assets
+ * - activate: drop old caches, claim clients
+ * - navigate (HTML): network-first so deploys are not stuck on a stale shell
+ * - other same-origin GET: cache-first, then network
  */
 /* eslint-disable no-restricted-globals */
 
@@ -25,8 +25,6 @@ self.addEventListener("install", (event) => {
   event.waitUntil(
     (async () => {
       const cache = await caches.open(CACHE_NAME);
-      // addAll fails the whole install if any URL 404s — add one-by-one so a
-      // missing optional asset does not brick updates.
       await Promise.all(
         PRECACHE.map(async (path) => {
           const url = abs(path);
@@ -34,7 +32,7 @@ self.addEventListener("install", (event) => {
             const res = await fetch(url, { cache: "reload" });
             if (res.ok) await cache.put(url, res);
           } catch {
-            // Offline during install of a new SW — leave for later fetches.
+            /* offline during install */
           }
         }),
       );
@@ -66,11 +64,10 @@ async function putInCache(request, response) {
     const cache = await caches.open(CACHE_NAME);
     await cache.put(request, response.clone());
   } catch {
-    // Quota or abort — ignore.
+    /* quota / abort */
   }
 }
 
-/** Offline shell for navigations (scope root and index.html). */
 async function matchShell() {
   const candidates = [
     abs("./"),
@@ -92,22 +89,38 @@ self.addEventListener("fetch", (event) => {
   const url = new URL(request.url);
   if (url.origin !== self.location.origin) return;
 
+  const isNavigate = request.mode === "navigate";
+  const isHtml =
+    request.headers.get("accept")?.includes("text/html") ||
+    url.pathname.endsWith(".html") ||
+    url.pathname.endsWith("/");
+
+  if (isNavigate || isHtml) {
+    // Network-first so a new deploy is not masked by an old shell.
+    event.respondWith(
+      (async () => {
+        try {
+          const network = await fetch(request);
+          event.waitUntil(putInCache(request, network.clone()));
+          return network;
+        } catch {
+          const shell = (await caches.match(request)) || (await matchShell());
+          if (shell) return shell;
+          throw new Error("offline and no cached shell");
+        }
+      })(),
+    );
+    return;
+  }
+
   event.respondWith(
     (async () => {
       const cached = await caches.match(request);
       if (cached) return cached;
 
-      try {
-        const network = await fetch(request);
-        event.waitUntil(putInCache(request, network.clone()));
-        return network;
-      } catch (err) {
-        if (request.mode === "navigate") {
-          const shell = await matchShell();
-          if (shell) return shell;
-        }
-        throw err;
-      }
+      const network = await fetch(request);
+      event.waitUntil(putInCache(request, network.clone()));
+      return network;
     })(),
   );
 });
