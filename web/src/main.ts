@@ -70,8 +70,14 @@ let currentItemId: string | null = null;
 let currentFileBytesRead = 0;
 let lastWasmMemoryBytes = 0;
 let lastMemorySampleAt = 0;
-/** Live elapsed / rec-s tick while a file is converting. */
+/** Live elapsed / rec-s tick while a file is converting (not writing). */
 let liveStatsTimer: number | null = null;
+/** Wall-clock for the whole batch (Convert click → last write finished). */
+let batchWallTimer: number | null = null;
+/** performance.now() when the user started the current batch. */
+let batchStartedAt: number | null = null;
+/** Frozen total once the batch ends (last write complete or cancelled). */
+let batchTotalMs: number | null = null;
 /** Show results once a batch has been started (or has outcomes). */
 let resultsVisible = false;
 
@@ -355,6 +361,9 @@ function setInputFiles(files: File[]): void {
     el.inputName.textContent = `${queue.length} files (${formatBytes(total)})`;
   }
   currentFileBytesRead = 0;
+  batchStartedAt = null;
+  batchTotalMs = null;
+  stopBatchWallTimer();
   showResultsPanel(false);
   el.resultsMemory.hidden = true;
   el.resultsMemory.textContent = "";
@@ -539,6 +548,36 @@ function stopLiveStatsTimer(): void {
   }
 }
 
+function batchElapsedMs(): number {
+  if (batchTotalMs != null) return batchTotalMs;
+  if (batchStartedAt != null) return performance.now() - batchStartedAt;
+  return 0;
+}
+
+function startBatchWallTimer(): void {
+  stopBatchWallTimer();
+  batchWallTimer = window.setInterval(() => {
+    if (batchStartedAt == null || batchTotalMs != null) return;
+    updateResultsFooter();
+  }, 100);
+}
+
+function stopBatchWallTimer(): void {
+  if (batchWallTimer != null) {
+    window.clearInterval(batchWallTimer);
+    batchWallTimer = null;
+  }
+}
+
+/** Freeze wall-clock at end of batch (after last write / cancel cleanup). */
+function freezeBatchTotal(): void {
+  if (batchStartedAt != null && batchTotalMs == null) {
+    batchTotalMs = performance.now() - batchStartedAt;
+  }
+  stopBatchWallTimer();
+  updateResultsFooter();
+}
+
 /** Chrome `performance.memory` (non-standard; works without COOP/COEP). */
 interface PerformanceMemory {
   usedJSHeapSize: number;
@@ -565,16 +604,43 @@ function formatMemorySample(wasmBytes: number): string {
   return formatBytes(total);
 }
 
+/**
+ * Footer under results: batch wall-clock + memory.
+ * Total time runs from Convert click until the last CSV write finishes.
+ */
+function updateResultsFooter(wasmBytes?: number): void {
+  if (wasmBytes != null && wasmBytes > 0) lastWasmMemoryBytes = wasmBytes;
+  const sample = formatMemorySample(lastWasmMemoryBytes);
+  const parts: string[] = [];
+  if (batchStartedAt != null || batchTotalMs != null) {
+    parts.push(`Total time · ${formatElapsed(batchElapsedMs())}`);
+  }
+  if (sample !== "n/a" || lastWasmMemoryBytes > 0 || el.resultsMemory.textContent) {
+    parts.push(`Memory · ${sample}`);
+  }
+  if (parts.length === 0) {
+    el.resultsMemory.hidden = true;
+    el.resultsMemory.textContent = "";
+    return;
+  }
+  el.resultsMemory.hidden = false;
+  el.resultsMemory.textContent = parts.join(" · ");
+  el.resultsMemory.title =
+    "Total time: from Convert until the last output byte is written. " +
+    "Memory: estimated RAM (JS heap when available + WASM linear memory).";
+}
+
 function scheduleMemoryUpdate(wasmBytes: number): void {
   lastWasmMemoryBytes = wasmBytes;
   const now = performance.now();
-  if (now - lastMemorySampleAt < 500 && el.resultsMemory.textContent) return;
+  // Throttle memory sampling; wall-clock is refreshed by batchWallTimer.
+  if (now - lastMemorySampleAt < 500 && el.resultsMemory.textContent) {
+    // Still refresh total time if the batch is live.
+    if (batchStartedAt != null && batchTotalMs == null) updateResultsFooter();
+    return;
+  }
   lastMemorySampleAt = now;
-  const sample = formatMemorySample(wasmBytes);
-  el.resultsMemory.hidden = false;
-  el.resultsMemory.textContent = `Memory · ${sample}`;
-  el.resultsMemory.title =
-    "Estimated RAM: main-thread JS heap (when available) plus WASM linear memory.";
+  updateResultsFooter(wasmBytes);
 }
 
 function nextPendingItem(): QueueItem | undefined {
@@ -815,9 +881,11 @@ function finishBatchRun(statusMessage?: string): void {
   batchCancelled = false;
   currentItemId = null;
   stopLiveStatsTimer();
+  // Last write (or cancel) has finished — freeze wall-clock for the batch.
+  freezeBatchTotal();
   if (statusMessage) setStatus(statusMessage, "error");
   renderResults();
-  scheduleMemoryUpdate(lastWasmMemoryBytes);
+  updateResultsFooter(lastWasmMemoryBytes);
 }
 
 async function startBatch(retryFailedOnly: boolean): Promise<void> {
@@ -848,8 +916,12 @@ async function startBatch(retryFailedOnly: boolean): Promise<void> {
   }
 
   batchCancelled = false;
+  batchStartedAt = performance.now();
+  batchTotalMs = null;
   setConverting(true);
   showResultsPanel(true);
+  startBatchWallTimer();
+  updateResultsFooter();
   renderResults();
   await runBatchLoop();
 }
