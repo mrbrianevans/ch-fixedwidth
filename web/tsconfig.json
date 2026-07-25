@@ -7,7 +7,9 @@
     "strict": true,
     "skipLibCheck": true,
     "noEmit": true,
-    "types": ["bun"]
+    "isolatedModules": true,
+    "moduleDetection": "force",
+    "types": ["vite/client", "bun"]
   },
-  "include": ["src/**/*.ts", "scripts/**/*.ts"]
+  "include": ["src/**/*.ts", "scripts/**/*.ts", "vite.config.ts"]
 }

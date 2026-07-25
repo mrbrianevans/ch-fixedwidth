@@ -2,7 +2,7 @@
  * Main thread: pickers, progress, streaming writes.
  * Parsing runs in worker.ts.
  */
-import wasmUrl from "../ch_fixedwidth.wasm";
+import wasmUrl from "../ch_fixedwidth.wasm?url";
 import type { WorkerOutMessage } from "./types.ts";
 
 const el = {
@@ -40,9 +40,7 @@ let personsWritable: FileSystemWritableFileStream | null = null;
 let worker: Worker | null = null;
 let converting = false;
 
-/** Injected by production build; falls back for local tooling. */
-declare const __WORKER_URL__: string | undefined;
-/** Injected from wasm-ts/package.json at build time. */
+/** Injected from wasm-ts/package.json at build time (vite define). */
 declare const __PARSER_VERSION__: string | undefined;
 
 function basenameWithoutExt(name: string): string {
@@ -218,9 +216,8 @@ function setConverting(on: boolean): void {
 }
 
 function createConverterWorker(): Worker {
-  const src =
-    typeof __WORKER_URL__ !== "undefined" ? __WORKER_URL__ : "./worker.js";
-  return new Worker(src, { type: "module" });
+  // Vite bundles this as a module worker (dev + production).
+  return new Worker(new URL("./worker.ts", import.meta.url), { type: "module" });
 }
 
 async function startConvert(): Promise<void> {
@@ -478,10 +475,6 @@ declare global {
     abort(): Promise<void>;
   }
 
-  declare module "*.wasm" {
-    const url: string;
-    export default url;
-  }
 }
 
 export {};

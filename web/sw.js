@@ -1,7 +1,7 @@
 /**
  * Lean service worker for the static CH converter PWA.
  *
- * Build injects the cache name and precache URL list (see scripts/build.ts).
+ * Build injects the cache name and precache URL list (see vite.config.ts).
  * Progressive enhancement: the app works fully without this file.
  *
  * Strategy (all assets are static, same-origin):

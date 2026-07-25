@@ -17,7 +17,8 @@ import { spawnSync } from "node:child_process";
 import { Resvg } from "@resvg/resvg-js";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-const iconsDir = join(root, "icons");
+// Served as-is via Vite publicDir → dist/icons/
+const iconsDir = join(root, "public", "icons");
 mkdirSync(iconsDir, { recursive: true });
 
 const MASTER = 1024;
