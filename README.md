@@ -15,6 +15,7 @@ Plain-text `.dat` files identified by an 8-byte header magic:
 | `DDDDSNAP` | Appointments snapshot (195 / 216) | [Prod195_Snapshot.md](docs/Prod195_Snapshot.md) | `companies_data_*`, `persons_data_*` |
 | `DDDDUPDT` | Appointments update (198) | [Prod198_Update.md](docs/Prod198_Update.md) | `companies_data_*`, `persons_data_*` |
 | `DISQUALS` | Disqualified persons (192) | [Prod192_Disqualifications.md](docs/Prod192_Disqualifications.md) | `persons_data_*`, `disqualifications_data_*`, `exemptions_data_*`, `variations_data_*` |
+| `LIQNFORM` | Liquidation daily updates (197) | [Prod197_Liquidation.md](docs/Prod197_Liquidation.md) | *not implemented* |
 
 Company and officer (person) records use a fixed-width layout with variable-length name and address fields separated by chevrons (`<`). Update person rows include old/new appointment types, person numbers, postcodes, change/update dates, and the full named variable-field set. Disqualification files use record types 1–4 (person, disqualification, exemption, variation) and a multi-count trailer.
 
