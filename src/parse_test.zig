@@ -1,9 +1,9 @@
-//! Unit tests for pure parse + in-memory snapshot conversion.
+//! Unit tests for pure parse + in-memory document conversion.
 //! Fixtures are embedded from testdata/ (small; safe to keep in git).
 
 const std = @import("std");
 const parse = @import("parse.zig");
-const snapshot = @import("snapshot.zig");
+const document = @import("document.zig");
 const stream_mod = @import("stream.zig");
 const c_api = @import("c_api.zig");
 
@@ -106,9 +106,9 @@ test "appendField quotes commas and doubles quotes" {
     try std.testing.expectEqualStrings("\"a,b\"\"c\"", dest[0..n]);
 }
 
-test "parseSnapshot mini fixture matches expected CSV" {
+test "parseDocument mini fixture matches expected CSV" {
     const allocator = std.testing.allocator;
-    var result = try snapshot.parseSnapshot(allocator, mini_snapshot);
+    var result = try document.parseDocument(allocator, mini_snapshot);
     defer result.deinit(allocator);
 
     try std.testing.expectEqual(@as(i32, 2), result.companies);
@@ -119,40 +119,40 @@ test "parseSnapshot mini fixture matches expected CSV" {
     try std.testing.expectEqualStrings(expected_persons, result.persons_csv);
 }
 
-test "parseSnapshot trailer mismatch" {
+test "parseDocument trailer mismatch" {
     const bad =
         \\DDDDSNAP425720260706
         \\029052131D                      00010013WGFA LIMITED<
         \\9999999900000099
         \\
     ;
-    try std.testing.expectError(error.TrailerMismatch, snapshot.parseSnapshot(std.testing.allocator, bad));
+    try std.testing.expectError(error.TrailerMismatch, document.parseDocument(std.testing.allocator, bad));
 }
 
-test "parseSnapshot missing trailer" {
+test "parseDocument missing trailer" {
     const bad =
         \\DDDDSNAP425720260706
         \\029052131D                      00010013WGFA LIMITED<
         \\
     ;
-    try std.testing.expectError(error.MissingTrailer, snapshot.parseSnapshot(std.testing.allocator, bad));
+    try std.testing.expectError(error.MissingTrailer, document.parseDocument(std.testing.allocator, bad));
 }
 
-test "parseSnapshot rejects non-snapshot prefix" {
+test "parseDocument rejects non-snapshot prefix" {
     const bad =
         \\NOTASNAP425720260706
         \\029052131D                      00010013WGFA LIMITED<
         \\9999999900000001
         \\
     ;
-    try std.testing.expectError(error.UnsupportedFileType, snapshot.parseSnapshot(std.testing.allocator, bad));
-    try std.testing.expectError(error.UnsupportedFileType, snapshot.parseSnapshot(std.testing.allocator, ""));
-    try std.testing.expectError(error.UnsupportedFileType, snapshot.parseSnapshot(std.testing.allocator, "random csv,data\n"));
+    try std.testing.expectError(error.UnsupportedFileType, document.parseDocument(std.testing.allocator, bad));
+    try std.testing.expectError(error.UnsupportedFileType, document.parseDocument(std.testing.allocator, ""));
+    try std.testing.expectError(error.UnsupportedFileType, document.parseDocument(std.testing.allocator, "random csv,data\n"));
 }
 
-test "parseSnapshot mini update fixture matches expected CSV" {
+test "parseDocument mini update fixture matches expected CSV" {
     const allocator = std.testing.allocator;
-    var result = try snapshot.parseSnapshot(allocator, mini_update);
+    var result = try document.parseDocument(allocator, mini_update);
     defer result.deinit(allocator);
 
     try std.testing.expectEqual(@as(i32, 4), result.companies);
@@ -182,9 +182,9 @@ const expected_disqualifications = @embedFile("testdata/expected_disqualificatio
 const expected_exemptions = @embedFile("testdata/expected_exemptions.csv");
 const expected_variations = @embedFile("testdata/expected_variations.csv");
 
-test "parseSnapshot mini disqual fixture matches expected CSV" {
+test "parseDocument mini disqual fixture matches expected CSV" {
     const allocator = std.testing.allocator;
-    var result = try snapshot.parseSnapshot(allocator, mini_disqual);
+    var result = try document.parseDocument(allocator, mini_disqual);
     defer result.deinit(allocator);
 
     try std.testing.expectEqual(@as(i32, 3), result.persons);
@@ -226,7 +226,7 @@ test "stream matches snapshot on mini disqual with tiny chunks" {
             .disqualifications => try disq.appendSlice(allocator, b.data),
             .exemptions => try exempt.appendSlice(allocator, b.data),
             .variations => try variations.appendSlice(allocator, b.data),
-            .companies => {},
+            .companies, .forms, .practitioners, .free_text => {},
         }
     }
 
@@ -264,22 +264,24 @@ test "classifyLiqLine distinguishes header trailer form and data" {
     try std.testing.expectEqual(parse.LiqLineKind.other, parse.classifyLiqLine("X"));
 }
 
-test "parseSnapshot mini liquidation fixture matches expected CSV" {
+test "parseDocument mini liquidation fixture matches expected CSV" {
     const allocator = std.testing.allocator;
-    var result = try snapshot.parseSnapshot(allocator, mini_liquidation);
+    var result = try document.parseDocument(allocator, mini_liquidation);
     defer result.deinit(allocator);
 
-    try std.testing.expectEqual(@as(i32, 8), result.companies);
-    try std.testing.expectEqual(@as(i32, 7), result.persons);
-    try std.testing.expectEqual(@as(i32, 3), result.disqualifications);
+    try std.testing.expectEqual(parse.FileType.liquidation, result.file_type);
+    try std.testing.expectEqual(@as(i32, 8), result.forms);
+    try std.testing.expectEqual(@as(i32, 7), result.practitioners);
+    try std.testing.expectEqual(@as(i32, 3), result.free_text);
+    try std.testing.expectEqual(@as(i32, 0), result.companies);
     try std.testing.expectEqual(@as(i32, 61), result.trailer_count);
 
-    try std.testing.expectEqualStrings(expected_liq_forms, result.companies_csv);
-    try std.testing.expectEqualStrings(expected_liq_practitioners, result.persons_csv);
-    try std.testing.expectEqualStrings(expected_liq_free_text, result.disqualifications_csv);
+    try std.testing.expectEqualStrings(expected_liq_forms, result.forms_csv);
+    try std.testing.expectEqualStrings(expected_liq_practitioners, result.practitioners_csv);
+    try std.testing.expectEqualStrings(expected_liq_free_text, result.free_text_csv);
 }
 
-test "stream matches snapshot on mini liquidation with tiny chunks" {
+test "stream matches document on mini liquidation with tiny chunks" {
     const allocator = std.testing.allocator;
     var s = stream_mod.Stream.init(allocator, .{ .batch_rows = 2, .batch_bytes = 64 });
     defer s.deinit();
@@ -300,16 +302,17 @@ test "stream matches snapshot on mini liquidation with tiny chunks" {
         var b = batch;
         defer b.deinit(allocator);
         switch (b.kind) {
-            .companies => try forms.appendSlice(allocator, b.data),
-            .persons => try prac.appendSlice(allocator, b.data),
-            .disqualifications => try free_t.appendSlice(allocator, b.data),
-            .exemptions, .variations => {},
+            .forms => try forms.appendSlice(allocator, b.data),
+            .practitioners => try prac.appendSlice(allocator, b.data),
+            .free_text => try free_t.appendSlice(allocator, b.data),
+            .companies, .persons, .disqualifications, .exemptions, .variations => {},
         }
     }
 
-    try std.testing.expectEqual(@as(i32, 8), s.companies.count);
-    try std.testing.expectEqual(@as(i32, 7), s.persons.count);
-    try std.testing.expectEqual(@as(i32, 3), s.disqualifications.count);
+    try std.testing.expectEqual(@as(i32, 8), s.forms.count);
+    try std.testing.expectEqual(@as(i32, 7), s.practitioners.count);
+    try std.testing.expectEqual(@as(i32, 3), s.free_text.count);
+    try std.testing.expectEqual(@as(i32, 0), s.companies.count);
     try std.testing.expectEqual(@as(i32, 61), s.trailer_count.?);
     try std.testing.expectEqual(@as(i32, 61), s.liq_data_records);
     try std.testing.expectEqualStrings(expected_liq_forms, forms.items);
@@ -325,15 +328,17 @@ test "stream accepts LIQNFORM magic" {
     try std.testing.expectEqual(parse.FileType.liquidation, s.file_type.?);
 }
 
-test "C ABI ch_parse_snapshot on mini fixture" {
+test "C ABI ch_parse on mini fixture" {
     var out: c_api.ChParseResult = .{};
-    const rc = c_api.ch_parse_snapshot(mini_snapshot.ptr, mini_snapshot.len, &out);
+    const rc = c_api.ch_parse(mini_snapshot.ptr, mini_snapshot.len, &out);
     defer c_api.ch_parse_result_free(&out);
 
     try std.testing.expectEqual(c_api.CH_OK, rc);
+    try std.testing.expectEqual(@as(i32, c_api.CH_FILE_OFFICERS_SNAPSHOT), out.file_type);
     try std.testing.expectEqual(@as(i32, 2), out.companies);
     try std.testing.expectEqual(@as(i32, 3), out.persons);
     try std.testing.expectEqual(@as(i32, 5), out.trailer_count);
+    try std.testing.expectEqual(@as(i32, 0), out.forms);
     try std.testing.expect(out.companies_csv.data != null);
     try std.testing.expect(out.persons_csv.data != null);
     try std.testing.expect(out.companies_csv.len > 0);
@@ -342,8 +347,8 @@ test "C ABI ch_parse_snapshot on mini fixture" {
 
 test "C ABI rejects null args" {
     var out: c_api.ChParseResult = .{};
-    try std.testing.expectEqual(c_api.CH_ERR_INVALID_ARG, c_api.ch_parse_snapshot(null, 10, &out));
-    try std.testing.expectEqual(c_api.CH_ERR_INVALID_ARG, c_api.ch_parse_snapshot(@as([*]const u8, @ptrCast("x")), 0, &out));
+    try std.testing.expectEqual(c_api.CH_ERR_INVALID_ARG, c_api.ch_parse(null, 10, &out));
+    try std.testing.expectEqual(c_api.CH_ERR_INVALID_ARG, c_api.ch_parse(@as([*]const u8, @ptrCast("x")), 0, &out));
 }
 
 test "stream matches snapshot on mini fixture with tiny chunks" {
@@ -368,7 +373,7 @@ test "stream matches snapshot on mini fixture with tiny chunks" {
         switch (b.kind) {
             .companies => try companies.appendSlice(allocator, b.data),
             .persons => try persons.appendSlice(allocator, b.data),
-            .disqualifications, .exemptions, .variations => {},
+            .disqualifications, .exemptions, .variations, .forms, .practitioners, .free_text => {},
         }
     }
 
@@ -431,7 +436,7 @@ test "stream matches snapshot on mini update with tiny chunks" {
         switch (b.kind) {
             .companies => try companies.appendSlice(allocator, b.data),
             .persons => try persons.appendSlice(allocator, b.data),
-            .disqualifications, .exemptions, .variations => {},
+            .disqualifications, .exemptions, .variations, .forms, .practitioners, .free_text => {},
         }
     }
 
@@ -459,13 +464,12 @@ test "C ABI stream feed/finish on mini fixture" {
     try std.testing.expectEqual(c_api.CH_OK, c_api.ch_stream_feed(s, mini_snapshot[mid..].ptr, mini_snapshot.len - mid));
     try std.testing.expectEqual(c_api.CH_OK, c_api.ch_stream_finish(s));
 
-    var companies: i32 = 0;
-    var persons: i32 = 0;
-    var trailer: i32 = 0;
-    c_api.ch_stream_stats(s, &companies, &persons, &trailer);
-    try std.testing.expectEqual(@as(i32, 2), companies);
-    try std.testing.expectEqual(@as(i32, 3), persons);
-    try std.testing.expectEqual(@as(i32, 5), trailer);
+    var stats: c_api.ChStreamStats = .{};
+    c_api.ch_stream_stats(s, &stats);
+    try std.testing.expectEqual(@as(i32, c_api.CH_FILE_OFFICERS_SNAPSHOT), stats.file_type);
+    try std.testing.expectEqual(@as(i32, 2), stats.companies);
+    try std.testing.expectEqual(@as(i32, 3), stats.persons);
+    try std.testing.expectEqual(@as(i32, 5), stats.trailer_count);
 
     var got_companies: usize = 0;
     var got_persons: usize = 0;
@@ -475,7 +479,11 @@ test "C ABI stream feed/finish on mini fixture" {
         if (n == 0) break;
         try std.testing.expectEqual(@as(c_int, 1), n);
         defer c_api.ch_csv_batch_free(&batch);
-        if (batch.kind == 0) got_companies += @intCast(batch.row_count) else got_persons += @intCast(batch.row_count);
+        if (batch.kind == c_api.CH_OUTPUT_COMPANIES) {
+            got_companies += @intCast(batch.row_count);
+        } else if (batch.kind == c_api.CH_OUTPUT_PERSONS) {
+            got_persons += @intCast(batch.row_count);
+        }
     }
     try std.testing.expectEqual(@as(usize, 2), got_companies);
     try std.testing.expectEqual(@as(usize, 3), got_persons);

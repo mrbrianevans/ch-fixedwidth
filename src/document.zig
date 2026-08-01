@@ -1,8 +1,9 @@
-//! In-memory fixed-width file → CSV conversion (no filesystem I/O).
+//! In-memory fixed-width document → named CSV outputs (no filesystem I/O).
 //! Used by the C ABI, WASM exports, and unit tests.
 //!
-//! Entry point `parseSnapshot` identifies the product from the header magic
-//! and dispatches to the matching body parser.
+//! Entry point `parseDocument` identifies the product from the header magic
+//! and dispatches to the matching body parser. Outputs use `OutputKind` names
+//! only — products never share a kind for unrelated tables.
 
 const std = @import("std");
 const parse = @import("parse.zig");
@@ -17,24 +18,31 @@ pub const ParseError = error{
 
 /// In-memory CSV outputs for a parsed bulk file.
 ///
-/// Officers products fill `companies_csv` + `persons_csv`.
-/// Prod 192 fills `persons_csv` (type 1), `disqualifications_csv` (type 2),
-/// `exemptions_csv` (type 3), `variations_csv` (type 4); `companies_csv` empty.
-/// Prod 197 fills `companies_csv` as forms, `persons_csv` as practitioners,
-/// `disqualifications_csv` as free text; other slots empty. Counts mirror those
-/// CSV row counts; trailer_count is the total raw data-record count.
+/// Unused kinds have empty CSV slices and zero row counts. Products map as:
+/// - Officers (195/216/198): companies + persons
+/// - Disqualifications (192): persons + disqualifications + exemptions + variations
+/// - Liquidation (197): forms + practitioners + free_text
 pub const ParseResult = struct {
+    file_type: parse.FileType,
+    trailer_count: i32,
+
     companies_csv: []u8,
     persons_csv: []u8,
     disqualifications_csv: []u8,
     exemptions_csv: []u8,
     variations_csv: []u8,
+    forms_csv: []u8,
+    practitioners_csv: []u8,
+    free_text_csv: []u8,
+
     companies: i32,
     persons: i32,
     disqualifications: i32,
     exemptions: i32,
     variations: i32,
-    trailer_count: i32,
+    forms: i32,
+    practitioners: i32,
+    free_text: i32,
 
     pub fn deinit(self: *ParseResult, allocator: std.mem.Allocator) void {
         allocator.free(self.companies_csv);
@@ -42,7 +50,36 @@ pub const ParseResult = struct {
         allocator.free(self.disqualifications_csv);
         allocator.free(self.exemptions_csv);
         allocator.free(self.variations_csv);
+        allocator.free(self.forms_csv);
+        allocator.free(self.practitioners_csv);
+        allocator.free(self.free_text_csv);
         self.* = undefined;
+    }
+
+    pub fn csv(self: *const ParseResult, kind: parse.OutputKind) []const u8 {
+        return switch (kind) {
+            .companies => self.companies_csv,
+            .persons => self.persons_csv,
+            .disqualifications => self.disqualifications_csv,
+            .exemptions => self.exemptions_csv,
+            .variations => self.variations_csv,
+            .forms => self.forms_csv,
+            .practitioners => self.practitioners_csv,
+            .free_text => self.free_text_csv,
+        };
+    }
+
+    pub fn rowCount(self: *const ParseResult, kind: parse.OutputKind) i32 {
+        return switch (kind) {
+            .companies => self.companies,
+            .persons => self.persons,
+            .disqualifications => self.disqualifications,
+            .exemptions => self.exemptions,
+            .variations => self.variations,
+            .forms => self.forms,
+            .practitioners => self.practitioners,
+            .free_text => self.free_text,
+        };
     }
 };
 
@@ -50,10 +87,34 @@ fn emptyOwned(allocator: std.mem.Allocator) ![]u8 {
     return try allocator.dupe(u8, "");
 }
 
-/// Parse a full fixed-width buffer into CSV outputs.
+fn emptyResult(file_type: parse.FileType, trailer_count: i32) ParseResult {
+    return .{
+        .file_type = file_type,
+        .trailer_count = trailer_count,
+        .companies_csv = undefined,
+        .persons_csv = undefined,
+        .disqualifications_csv = undefined,
+        .exemptions_csv = undefined,
+        .variations_csv = undefined,
+        .forms_csv = undefined,
+        .practitioners_csv = undefined,
+        .free_text_csv = undefined,
+        .companies = 0,
+        .persons = 0,
+        .disqualifications = 0,
+        .exemptions = 0,
+        .variations = 0,
+        .forms = 0,
+        .practitioners = 0,
+        .free_text = 0,
+    };
+}
+
+/// Parse a full fixed-width buffer into named CSV outputs.
 /// Caller owns the result and must call `deinit`.
-pub fn parseSnapshot(allocator: std.mem.Allocator, input: []const u8) ParseError!ParseResult {
+pub fn parseDocument(allocator: std.mem.Allocator, input: []const u8) ParseError!ParseResult {
     const file_type = try parse.identifyFileTypeFromInput(input);
+    try parse.requireImplemented(file_type);
     return switch (file_type) {
         .officers_snapshot => parseOfficersAppointments(allocator, input, .officers_snapshot),
         .officers_update => parseOfficersAppointments(allocator, input, .officers_update),
@@ -117,22 +178,27 @@ fn parseOfficersAppointments(
     }
 
     const tc = trailer_count orelse return error.MissingTrailer;
-    const total = companies_count + persons_count;
-    if (tc != total) return error.TrailerMismatch;
+    if (tc != companies_count + persons_count) return error.TrailerMismatch;
 
-    return .{
-        .companies_csv = try companies.toOwnedSlice(allocator),
-        .persons_csv = try persons.toOwnedSlice(allocator),
-        .disqualifications_csv = try emptyOwned(allocator),
-        .exemptions_csv = try emptyOwned(allocator),
-        .variations_csv = try emptyOwned(allocator),
-        .companies = companies_count,
-        .persons = persons_count,
-        .disqualifications = 0,
-        .exemptions = 0,
-        .variations = 0,
-        .trailer_count = tc,
-    };
+    var result = emptyResult(file_type, tc);
+    result.companies_csv = try companies.toOwnedSlice(allocator);
+    errdefer allocator.free(result.companies_csv);
+    result.persons_csv = try persons.toOwnedSlice(allocator);
+    errdefer allocator.free(result.persons_csv);
+    result.disqualifications_csv = try emptyOwned(allocator);
+    errdefer allocator.free(result.disqualifications_csv);
+    result.exemptions_csv = try emptyOwned(allocator);
+    errdefer allocator.free(result.exemptions_csv);
+    result.variations_csv = try emptyOwned(allocator);
+    errdefer allocator.free(result.variations_csv);
+    result.forms_csv = try emptyOwned(allocator);
+    errdefer allocator.free(result.forms_csv);
+    result.practitioners_csv = try emptyOwned(allocator);
+    errdefer allocator.free(result.practitioners_csv);
+    result.free_text_csv = try emptyOwned(allocator);
+    result.companies = companies_count;
+    result.persons = persons_count;
+    return result;
 }
 
 fn emitLiqForm(
@@ -242,19 +308,26 @@ fn parseLiquidation(allocator: std.mem.Allocator, input: []const u8) ParseError!
     const tc = trailer_count orelse return error.MissingTrailer;
     if (tc != data_records) return error.TrailerMismatch;
 
-    return .{
-        .companies_csv = try forms.toOwnedSlice(allocator),
-        .persons_csv = try practitioners.toOwnedSlice(allocator),
-        .disqualifications_csv = try free_texts.toOwnedSlice(allocator),
-        .exemptions_csv = try emptyOwned(allocator),
-        .variations_csv = try emptyOwned(allocator),
-        .companies = forms_count,
-        .persons = practitioners_count,
-        .disqualifications = free_text_count,
-        .exemptions = 0,
-        .variations = 0,
-        .trailer_count = tc,
-    };
+    var result = emptyResult(.liquidation, tc);
+    result.forms_csv = try forms.toOwnedSlice(allocator);
+    errdefer allocator.free(result.forms_csv);
+    result.practitioners_csv = try practitioners.toOwnedSlice(allocator);
+    errdefer allocator.free(result.practitioners_csv);
+    result.free_text_csv = try free_texts.toOwnedSlice(allocator);
+    errdefer allocator.free(result.free_text_csv);
+    result.companies_csv = try emptyOwned(allocator);
+    errdefer allocator.free(result.companies_csv);
+    result.persons_csv = try emptyOwned(allocator);
+    errdefer allocator.free(result.persons_csv);
+    result.disqualifications_csv = try emptyOwned(allocator);
+    errdefer allocator.free(result.disqualifications_csv);
+    result.exemptions_csv = try emptyOwned(allocator);
+    errdefer allocator.free(result.exemptions_csv);
+    result.variations_csv = try emptyOwned(allocator);
+    result.forms = forms_count;
+    result.practitioners = practitioners_count;
+    result.free_text = free_text_count;
+    return result;
 }
 
 fn parseDisqualifications(allocator: std.mem.Allocator, input: []const u8) ParseError!ParseResult {
@@ -327,17 +400,25 @@ fn parseDisqualifications(allocator: std.mem.Allocator, input: []const u8) Parse
     }
     if (tr.total != n1 + n2 + n3 + n4) return error.TrailerMismatch;
 
-    return .{
-        .companies_csv = try emptyOwned(allocator),
-        .persons_csv = try persons.toOwnedSlice(allocator),
-        .disqualifications_csv = try disquals.toOwnedSlice(allocator),
-        .exemptions_csv = try exemptions.toOwnedSlice(allocator),
-        .variations_csv = try variations.toOwnedSlice(allocator),
-        .companies = 0,
-        .persons = n1,
-        .disqualifications = n2,
-        .exemptions = n3,
-        .variations = n4,
-        .trailer_count = tr.total,
-    };
+    var result = emptyResult(.disqualifications, tr.total);
+    result.persons_csv = try persons.toOwnedSlice(allocator);
+    errdefer allocator.free(result.persons_csv);
+    result.disqualifications_csv = try disquals.toOwnedSlice(allocator);
+    errdefer allocator.free(result.disqualifications_csv);
+    result.exemptions_csv = try exemptions.toOwnedSlice(allocator);
+    errdefer allocator.free(result.exemptions_csv);
+    result.variations_csv = try variations.toOwnedSlice(allocator);
+    errdefer allocator.free(result.variations_csv);
+    result.companies_csv = try emptyOwned(allocator);
+    errdefer allocator.free(result.companies_csv);
+    result.forms_csv = try emptyOwned(allocator);
+    errdefer allocator.free(result.forms_csv);
+    result.practitioners_csv = try emptyOwned(allocator);
+    errdefer allocator.free(result.practitioners_csv);
+    result.free_text_csv = try emptyOwned(allocator);
+    result.persons = n1;
+    result.disqualifications = n2;
+    result.exemptions = n3;
+    result.variations = n4;
+    return result;
 }

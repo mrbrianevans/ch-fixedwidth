@@ -17,16 +17,74 @@ const unicode = std.unicode;
 /// Length of the product magic at the start of a header record / file.
 pub const header_identifier_len: usize = 8;
 
+/// Named CSV output channel. Products emit a subset of these kinds; kinds are
+/// never overloaded across products (e.g. liquidation forms are `.forms`, not
+/// `.companies`).
+pub const OutputKind = enum(i32) {
+    companies = 0,
+    persons = 1,
+    disqualifications = 2,
+    exemptions = 3,
+    variations = 4,
+    forms = 5,
+    practitioners = 6,
+    free_text = 7,
+
+    pub const all = [_]OutputKind{
+        .companies,
+        .persons,
+        .disqualifications,
+        .exemptions,
+        .variations,
+        .forms,
+        .practitioners,
+        .free_text,
+    };
+
+    /// Filename stem before `_<basename>.csv` (e.g. `companies_data`).
+    pub fn fileStem(self: OutputKind) []const u8 {
+        return switch (self) {
+            .companies => "companies_data",
+            .persons => "persons_data",
+            .disqualifications => "disqualifications_data",
+            .exemptions => "exemptions_data",
+            .variations => "variations_data",
+            .forms => "forms_data",
+            .practitioners => "practitioners_data",
+            .free_text => "free_text_data",
+        };
+    }
+
+    /// Short label for logs and UI.
+    pub fn displayName(self: OutputKind) []const u8 {
+        return switch (self) {
+            .companies => "companies",
+            .persons => "persons",
+            .disqualifications => "disqualifications",
+            .exemptions => "exemptions",
+            .variations => "variations",
+            .forms => "forms",
+            .practitioners => "practitioners",
+            .free_text => "free text",
+        };
+    }
+
+    pub fn fromInt(v: i32) ?OutputKind {
+        return std.meta.intToEnum(OutputKind, v) catch null;
+    }
+};
+
 /// Companies House bulk product identified from the header record magic.
-pub const FileType = enum {
+/// Integer values match the C ABI `CH_FILE_*` constants.
+pub const FileType = enum(i32) {
     /// Products 195 / 216 — company appointments snapshot.
-    officers_snapshot,
+    officers_snapshot = 0,
     /// Product 198 — company appointments update.
-    officers_update,
-    /// Product 192 — disqualified persons snapshot.
-    disqualifications,
+    officers_update = 1,
+    /// Product 192 — disqualified persons.
+    disqualifications = 2,
     /// Product 197 — liquidation daily updates (form groups).
-    liquidation,
+    liquidation = 3,
 
     /// 8-byte header identifier for this product.
     pub fn identifier(self: FileType) []const u8 {
@@ -49,20 +107,54 @@ pub const FileType = enum {
     }
 
     /// True when a full body parser exists for this product.
+    /// Keep returning false for future magics once they are recognised but not wired.
     pub fn isImplemented(self: FileType) bool {
         return switch (self) {
             .officers_snapshot, .officers_update, .disqualifications, .liquidation => true,
         };
     }
 
-    /// CSV header line for the persons (officer) output of officers products.
+    /// CSV output kinds produced by this product (stable order for writers).
+    pub fn outputKinds(self: FileType) []const OutputKind {
+        return switch (self) {
+            .officers_snapshot, .officers_update => &.{ .companies, .persons },
+            .disqualifications => &.{ .persons, .disqualifications, .exemptions, .variations },
+            .liquidation => &.{ .forms, .practitioners, .free_text },
+        };
+    }
+
+    /// True when this product emits `kind`.
+    pub fn hasOutput(self: FileType, kind: OutputKind) bool {
+        return std.mem.indexOfScalar(OutputKind, self.outputKinds(), kind) != null;
+    }
+
+    /// CSV header line for a `.persons` stream (officers or disqual type 1).
+    /// Liquidation does not emit `.persons` (use `.practitioners`).
     pub fn personsCsvHeader(self: FileType) []const u8 {
         return switch (self) {
             .officers_snapshot => persons_header,
             .officers_update => update_persons_header,
             .disqualifications => disqual_persons_header,
-            .liquidation => liq_practitioners_header,
+            .liquidation => persons_header, // unused for this product
         };
+    }
+
+    /// CSV header for a given output kind on this product (prefer `hasOutput` first).
+    pub fn csvHeader(self: FileType, kind: OutputKind) []const u8 {
+        return switch (kind) {
+            .companies => companies_header,
+            .persons => self.personsCsvHeader(),
+            .disqualifications => disqualifications_header,
+            .exemptions => exemptions_header,
+            .variations => variations_header,
+            .forms => liq_forms_header,
+            .practitioners => liq_practitioners_header,
+            .free_text => liq_free_text_header,
+        };
+    }
+
+    pub fn fromInt(v: i32) ?FileType {
+        return std.meta.intToEnum(FileType, v) catch null;
     }
 };
 

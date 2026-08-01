@@ -1,13 +1,13 @@
-//! C-compatible foreign function interface for snapshot parsing.
+//! C-compatible foreign function interface for multi-product parsing.
 //! Also used as the export surface for freestanding WASM builds.
 //!
 //! Two modes:
-//! - One-shot: `ch_parse_snapshot` (full document in / full CSVs out)
-//! - Streaming: `ch_stream_*` (chunked input, batched CSV pull)
+//! - One-shot: `ch_parse` (full document in / full named CSVs out)
+//! - Streaming: `ch_stream_*` (chunked input, batched CSV pull by OutputKind)
 
 const std = @import("std");
 const builtin = @import("builtin");
-const snapshot = @import("snapshot.zig");
+const document = @import("document.zig");
 const stream_mod = @import("stream.zig");
 
 /// Opaque heap buffer returned to C/WASM callers.
@@ -16,21 +16,44 @@ pub const ChBuffer = extern struct {
     len: usize = 0,
 };
 
+/// Product id; matches `parse.FileType` / `CH_FILE_*`. `-1` = unknown.
+pub const CH_FILE_UNKNOWN: i32 = -1;
+pub const CH_FILE_OFFICERS_SNAPSHOT: i32 = 0;
+pub const CH_FILE_OFFICERS_UPDATE: i32 = 1;
+pub const CH_FILE_DISQUALIFICATIONS: i32 = 2;
+pub const CH_FILE_LIQUIDATION: i32 = 3;
+
+/// Output kind; matches `parse.OutputKind` / `CH_OUTPUT_*`.
+pub const CH_OUTPUT_COMPANIES: i32 = 0;
+pub const CH_OUTPUT_PERSONS: i32 = 1;
+pub const CH_OUTPUT_DISQUALIFICATIONS: i32 = 2;
+pub const CH_OUTPUT_EXEMPTIONS: i32 = 3;
+pub const CH_OUTPUT_VARIATIONS: i32 = 4;
+pub const CH_OUTPUT_FORMS: i32 = 5;
+pub const CH_OUTPUT_PRACTITIONERS: i32 = 6;
+pub const CH_OUTPUT_FREE_TEXT: i32 = 7;
+
+/// One-shot parse result. Unused product outputs are empty buffers / zero counts.
+/// Layout: counts first (fixed), then CSV buffers (pointer-sized).
 pub const ChParseResult = extern struct {
-    companies_csv: ChBuffer = .{},
-    persons_csv: ChBuffer = .{},
+    file_type: i32 = CH_FILE_UNKNOWN,
+    trailer_count: i32 = 0,
     companies: i32 = 0,
     persons: i32 = 0,
-    trailer_count: i32 = 0,
-    /// Prod 192 type 2 (empty for officers products).
-    disqualifications_csv: ChBuffer = .{},
-    /// Prod 192 type 3 (empty for officers products).
-    exemptions_csv: ChBuffer = .{},
-    /// Prod 192 type 4 (empty for officers products).
-    variations_csv: ChBuffer = .{},
     disqualifications: i32 = 0,
     exemptions: i32 = 0,
     variations: i32 = 0,
+    forms: i32 = 0,
+    practitioners: i32 = 0,
+    free_text: i32 = 0,
+    companies_csv: ChBuffer = .{},
+    persons_csv: ChBuffer = .{},
+    disqualifications_csv: ChBuffer = .{},
+    exemptions_csv: ChBuffer = .{},
+    variations_csv: ChBuffer = .{},
+    forms_csv: ChBuffer = .{},
+    practitioners_csv: ChBuffer = .{},
+    free_text_csv: ChBuffer = .{},
 };
 
 pub const ChStreamConfig = extern struct {
@@ -44,8 +67,22 @@ pub const ChCsvBatch = extern struct {
     data: ?[*]u8 = null,
     len: usize = 0,
     row_count: i32 = 0,
-    /// 0 = companies, 1 = persons
+    /// `CH_OUTPUT_*` / `parse.OutputKind`.
     kind: i32 = 0,
+};
+
+/// Streaming row counts and product id after header is known.
+pub const ChStreamStats = extern struct {
+    file_type: i32 = CH_FILE_UNKNOWN,
+    trailer_count: i32 = 0,
+    companies: i32 = 0,
+    persons: i32 = 0,
+    disqualifications: i32 = 0,
+    exemptions: i32 = 0,
+    variations: i32 = 0,
+    forms: i32 = 0,
+    practitioners: i32 = 0,
+    free_text: i32 = 0,
 };
 
 // Error codes for C callers (stable ABI).
@@ -81,7 +118,6 @@ fn mapStreamErr(err: stream_mod.ParseError) c_int {
 
 fn freeBuffer(buf: *ChBuffer) void {
     if (buf.data) |ptr| {
-        // Free even for len==0 so empty owned slices from Zig are released.
         gpa().free(ptr[0..buf.len]);
         buf.data = null;
         buf.len = 0;
@@ -92,7 +128,7 @@ fn bufferFromSlice(s: []u8) ChBuffer {
     return .{ .data = s.ptr, .len = s.len };
 }
 
-/// Free a buffer previously filled by `ch_parse_snapshot`.
+/// Free a buffer previously filled by `ch_parse`.
 pub export fn ch_buffer_free(buf: ?*ChBuffer) void {
     if (buf) |b| freeBuffer(b);
 }
@@ -105,22 +141,18 @@ pub export fn ch_parse_result_free(result: ?*ChParseResult) void {
         freeBuffer(&r.disqualifications_csv);
         freeBuffer(&r.exemptions_csv);
         freeBuffer(&r.variations_csv);
-        r.companies = 0;
-        r.persons = 0;
-        r.trailer_count = 0;
-        r.disqualifications = 0;
-        r.exemptions = 0;
-        r.variations = 0;
+        freeBuffer(&r.forms_csv);
+        freeBuffer(&r.practitioners_csv);
+        freeBuffer(&r.free_text_csv);
+        r.* = .{};
     }
 }
 
-/// Parse an in-memory Companies House snapshot into two CSV documents.
+/// Parse an in-memory Companies House fixed-width document into named CSV outputs.
 ///
-/// On success (`CH_OK`), `out` owns two heap buffers; free with
-/// `ch_parse_result_free` or `ch_buffer_free` on each field.
-///
-/// Does not perform filesystem I/O. For multi-hundred-MB files prefer `ch_stream_*`.
-pub export fn ch_parse_snapshot(
+/// On success (`CH_OK`), free with `ch_parse_result_free`.
+/// Does not perform filesystem I/O. Prefer `ch_stream_*` for large files.
+pub export fn ch_parse(
     input: ?[*]const u8,
     input_len: usize,
     out: ?*ChParseResult,
@@ -130,11 +162,9 @@ pub export fn ch_parse_snapshot(
 
     const slice = input.?[0..input_len];
     const result = out.?;
-
-    // Clear any previous contents without freeing caller memory we don't own.
     result.* = .{};
 
-    const parsed = snapshot.parseSnapshot(gpa(), slice) catch |err| {
+    const parsed = document.parseDocument(gpa(), slice) catch |err| {
         return switch (err) {
             error.UnsupportedFileType => CH_ERR_UNSUPPORTED_HEADER,
             error.NotImplemented => CH_ERR_NOT_IMPLEMENTED,
@@ -144,17 +174,24 @@ pub export fn ch_parse_snapshot(
         };
     };
 
-    result.companies_csv = bufferFromSlice(parsed.companies_csv);
-    result.persons_csv = bufferFromSlice(parsed.persons_csv);
-    result.disqualifications_csv = bufferFromSlice(parsed.disqualifications_csv);
-    result.exemptions_csv = bufferFromSlice(parsed.exemptions_csv);
-    result.variations_csv = bufferFromSlice(parsed.variations_csv);
+    result.file_type = @intFromEnum(parsed.file_type);
+    result.trailer_count = parsed.trailer_count;
     result.companies = parsed.companies;
     result.persons = parsed.persons;
     result.disqualifications = parsed.disqualifications;
     result.exemptions = parsed.exemptions;
     result.variations = parsed.variations;
-    result.trailer_count = parsed.trailer_count;
+    result.forms = parsed.forms;
+    result.practitioners = parsed.practitioners;
+    result.free_text = parsed.free_text;
+    result.companies_csv = bufferFromSlice(parsed.companies_csv);
+    result.persons_csv = bufferFromSlice(parsed.persons_csv);
+    result.disqualifications_csv = bufferFromSlice(parsed.disqualifications_csv);
+    result.exemptions_csv = bufferFromSlice(parsed.exemptions_csv);
+    result.variations_csv = bufferFromSlice(parsed.variations_csv);
+    result.forms_csv = bufferFromSlice(parsed.forms_csv);
+    result.practitioners_csv = bufferFromSlice(parsed.practitioners_csv);
+    result.free_text_csv = bufferFromSlice(parsed.free_text_csv);
     return CH_OK;
 }
 
@@ -213,7 +250,7 @@ pub export fn ch_stream_finish(s: ?*stream_mod.Stream) c_int {
 }
 
 /// Pop one completed CSV batch into `out`.
-/// Returns 1 if a batch was written, 0 if none pending, or a negative error code.
+/// Returns 1 if a batch was written, 0 if none pending, or a positive `CH_ERR_*`.
 /// On 1, free with `ch_csv_batch_free`.
 pub export fn ch_stream_next_batch(s: ?*stream_mod.Stream, out: ?*ChCsvBatch) c_int {
     if (s == null or out == null) return CH_ERR_INVALID_ARG;
@@ -240,16 +277,21 @@ pub export fn ch_csv_batch_free(batch: ?*ChCsvBatch) void {
     }
 }
 
-/// Row counts. `trailer_count` is 0 until a trailer line has been seen.
-pub export fn ch_stream_stats(
-    s: ?*const stream_mod.Stream,
-    companies: ?*i32,
-    persons: ?*i32,
-    trailer_count: ?*i32,
-) void {
-    if (s == null) return;
+/// Fill `out` with cumulative row counts. `file_type` is `CH_FILE_UNKNOWN` until
+/// the 8-byte header magic is seen. `trailer_count` is 0 until a trailer is seen.
+pub export fn ch_stream_stats(s: ?*const stream_mod.Stream, out: ?*ChStreamStats) void {
+    if (s == null or out == null) return;
     const stream = s.?;
-    if (companies) |c| c.* = stream.companies.count;
-    if (persons) |p| p.* = stream.persons.count;
-    if (trailer_count) |t| t.* = stream.trailer_count orelse 0;
+    out.?.* = .{
+        .file_type = if (stream.file_type) |ft| @intFromEnum(ft) else CH_FILE_UNKNOWN,
+        .trailer_count = stream.trailer_count orelse 0,
+        .companies = stream.companies.count,
+        .persons = stream.persons.count,
+        .disqualifications = stream.disqualifications.count,
+        .exemptions = stream.exemptions.count,
+        .variations = stream.variations.count,
+        .forms = stream.forms.count,
+        .practitioners = stream.practitioners.count,
+        .free_text = stream.free_text.count,
+    };
 }

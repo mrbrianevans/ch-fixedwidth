@@ -8,6 +8,7 @@
 //!   not per line — avoids WASM↔host call overhead.
 //! - Host should drain batches after each `feed` / `finish` so peak memory
 //!   stays O(chunk + batch), not O(file).
+//! - Batch kinds are `parse.OutputKind` — product-specific names, never overloaded.
 
 const std = @import("std");
 const parse = @import("parse.zig");
@@ -22,13 +23,8 @@ pub const ParseError = error{
     FeedAfterTrailer,
 };
 
-pub const BatchKind = enum(i32) {
-    companies = 0,
-    persons = 1,
-    disqualifications = 2,
-    exemptions = 3,
-    variations = 4,
-};
+/// Streaming batch kind — same values as `parse.OutputKind` / C `CH_OUTPUT_*`.
+pub const BatchKind = parse.OutputKind;
 
 pub const CsvBatch = struct {
     data: []u8,
@@ -75,6 +71,9 @@ pub const Stream = struct {
     disqualifications: KindBuf = .{},
     exemptions: KindBuf = .{},
     variations: KindBuf = .{},
+    forms: KindBuf = .{},
+    practitioners: KindBuf = .{},
+    free_text: KindBuf = .{},
 
     ready: std.ArrayList(CsvBatch) = .empty,
 
@@ -108,9 +107,38 @@ pub const Stream = struct {
         self.disqualifications.buf.deinit(self.allocator);
         self.exemptions.buf.deinit(self.allocator);
         self.variations.buf.deinit(self.allocator);
+        self.forms.buf.deinit(self.allocator);
+        self.practitioners.buf.deinit(self.allocator);
+        self.free_text.buf.deinit(self.allocator);
         for (self.ready.items) |*b| b.deinit(self.allocator);
         self.ready.deinit(self.allocator);
         self.* = undefined;
+    }
+
+    pub fn kindBuf(self: *Stream, kind: BatchKind) *KindBuf {
+        return switch (kind) {
+            .companies => &self.companies,
+            .persons => &self.persons,
+            .disqualifications => &self.disqualifications,
+            .exemptions => &self.exemptions,
+            .variations => &self.variations,
+            .forms => &self.forms,
+            .practitioners => &self.practitioners,
+            .free_text => &self.free_text,
+        };
+    }
+
+    pub fn countOf(self: *const Stream, kind: BatchKind) i32 {
+        return switch (kind) {
+            .companies => self.companies.count,
+            .persons => self.persons.count,
+            .disqualifications => self.disqualifications.count,
+            .exemptions => self.exemptions.count,
+            .variations => self.variations.count,
+            .forms => self.forms.count,
+            .practitioners => self.practitioners.count,
+            .free_text => self.free_text.count,
+        };
     }
 
     /// Feed the next chunk of input bytes. Drain with `nextBatch` afterward.
@@ -176,31 +204,9 @@ pub const Stream = struct {
         }
 
         const ft = self.file_type.?;
-        switch (ft) {
-            .officers_snapshot, .officers_update => {
-                try self.ensureHeader(&self.companies, parse.companies_header);
-                try self.ensureHeader(&self.persons, ft.personsCsvHeader());
-                try self.flushKind(&self.companies, .companies, true);
-                try self.flushKind(&self.persons, .persons, true);
-            },
-            .disqualifications => {
-                try self.ensureHeader(&self.persons, parse.disqual_persons_header);
-                try self.ensureHeader(&self.disqualifications, parse.disqualifications_header);
-                try self.ensureHeader(&self.exemptions, parse.exemptions_header);
-                try self.ensureHeader(&self.variations, parse.variations_header);
-                try self.flushKind(&self.persons, .persons, true);
-                try self.flushKind(&self.disqualifications, .disqualifications, true);
-                try self.flushKind(&self.exemptions, .exemptions, true);
-                try self.flushKind(&self.variations, .variations, true);
-            },
-            .liquidation => {
-                try self.ensureHeader(&self.companies, parse.liq_forms_header);
-                try self.ensureHeader(&self.persons, parse.liq_practitioners_header);
-                try self.ensureHeader(&self.disqualifications, parse.liq_free_text_header);
-                try self.flushKind(&self.companies, .companies, true);
-                try self.flushKind(&self.persons, .persons, true);
-                try self.flushKind(&self.disqualifications, .disqualifications, true);
-            },
+        for (ft.outputKinds()) |kind| {
+            try self.ensureHeader(self.kindBuf(kind), ft.csvHeader(kind));
+            try self.flushKind(self.kindBuf(kind), kind, true);
         }
 
         self.finished = true;
@@ -306,31 +312,31 @@ pub const Stream = struct {
 
     fn emitLiqFormToBuffers(self: *Stream) ParseError!void {
         if (!self.liq_form.active) return;
-        try self.ensureHeader(&self.companies, parse.liq_forms_header);
-        try self.ensureHeader(&self.persons, parse.liq_practitioners_header);
-        try self.ensureHeader(&self.disqualifications, parse.liq_free_text_header);
+        try self.ensureHeader(&self.forms, parse.liq_forms_header);
+        try self.ensureHeader(&self.practitioners, parse.liq_practitioners_header);
+        try self.ensureHeader(&self.free_text, parse.liq_free_text_header);
 
         const n = parse.formatLiqFormRow(&self.row_buf, &self.liq_form);
-        try self.companies.buf.appendSlice(self.allocator, self.row_buf[0..n]);
-        self.companies.rows += 1;
-        self.companies.count += 1;
-        try self.flushKind(&self.companies, .companies, false);
+        try self.forms.buf.appendSlice(self.allocator, self.row_buf[0..n]);
+        self.forms.rows += 1;
+        self.forms.count += 1;
+        try self.flushKind(&self.forms, .forms, false);
 
         var i: usize = 0;
         while (i < self.liq_form.practitioner_count) : (i += 1) {
             const pn = parse.formatLiqPractitionerRow(&self.row_buf, &self.liq_form, i);
-            try self.persons.buf.appendSlice(self.allocator, self.row_buf[0..pn]);
-            self.persons.rows += 1;
-            self.persons.count += 1;
-            try self.flushKind(&self.persons, .persons, false);
+            try self.practitioners.buf.appendSlice(self.allocator, self.row_buf[0..pn]);
+            self.practitioners.rows += 1;
+            self.practitioners.count += 1;
+            try self.flushKind(&self.practitioners, .practitioners, false);
         }
         i = 0;
         while (i < self.liq_form.free_text_count) : (i += 1) {
             const fn_ = parse.formatLiqFreeTextRow(&self.row_buf, &self.liq_form, i);
-            try self.disqualifications.buf.appendSlice(self.allocator, self.row_buf[0..fn_]);
-            self.disqualifications.rows += 1;
-            self.disqualifications.count += 1;
-            try self.flushKind(&self.disqualifications, .disqualifications, false);
+            try self.free_text.buf.appendSlice(self.allocator, self.row_buf[0..fn_]);
+            self.free_text.rows += 1;
+            self.free_text.count += 1;
+            try self.flushKind(&self.free_text, .free_text, false);
         }
         self.liq_form.reset();
     }
@@ -341,9 +347,9 @@ pub const Stream = struct {
                 const info = parse.parseHeader(row) catch return error.UnsupportedFileType;
                 if (info.file_type != .liquidation) return error.UnsupportedFileType;
                 self.header_seen = true;
-                try self.ensureHeader(&self.companies, parse.liq_forms_header);
-                try self.ensureHeader(&self.persons, parse.liq_practitioners_header);
-                try self.ensureHeader(&self.disqualifications, parse.liq_free_text_header);
+                try self.ensureHeader(&self.forms, parse.liq_forms_header);
+                try self.ensureHeader(&self.practitioners, parse.liq_practitioners_header);
+                try self.ensureHeader(&self.free_text, parse.liq_free_text_header);
             },
             .trailer => {
                 try self.emitLiqFormToBuffers();

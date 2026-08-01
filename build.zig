@@ -84,7 +84,7 @@ pub fn build(b: *std.Build) void {
     wasm.rdynamic = true;
     // Export C ABI symbols for JS / host loaders.
     wasm.root_module.export_symbol_names = &.{
-        "ch_parse_snapshot",
+        "ch_parse",
         "ch_parse_result_free",
         "ch_buffer_free",
         "ch_alloc",

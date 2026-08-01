@@ -98,7 +98,7 @@ pub fn isRemoteUrl(s: []const u8) bool {
         std.ascii.startsWithIgnoreCase(s, "https://");
 }
 
-/// True when the CLI should read the snapshot from stdin (`-`).
+/// True when the CLI should read the input from stdin (`-`).
 pub fn isStdinInput(s: []const u8) bool {
     return std.mem.eql(u8, s, "-");
 }
@@ -873,7 +873,7 @@ fn processSingle(
     return processFromReader(io, arena, &file_reader.interface, output_folder, base_name);
 }
 
-/// Convert one local snapshot file (assumes `output_folder` already exists).
+/// Convert one local fixed-width file (assumes `output_folder` already exists).
 /// On multi-core native builds, officers products split the file across workers.
 /// Prod 192 / 197 always use the sequential path (multi-CSV / form-group state).
 fn processOneLocalFile(
@@ -913,11 +913,11 @@ fn processOneLocalFile(
     return processParallel(io, arena, input_path, output_folder, base_name, n_workers);
 }
 
-/// Convert one snapshot file on disk into CSV files under `output_folder`.
-/// Returns a process exit code (0 = success).
+/// Convert one local fixed-width file on disk into product-specific CSVs under
+/// `output_folder`. Returns a process exit code (0 = success).
 ///
 /// Prefer `processInput` when the argument may be a path, directory, URL, or stdin.
-pub fn processCompanyAppointmentsData(
+pub fn processLocalFile(
     io: Io,
     arena: std.mem.Allocator,
     input_path: []const u8,
@@ -988,7 +988,7 @@ pub fn processDirectory(
         return 1;
     }
 
-    std.debug.print("Found {d} snapshot file(s) in {s}\n", .{ files.len, dir_path });
+    std.debug.print("Found {d} .dat file(s) in {s}\n", .{ files.len, dir_path });
 
     var any_failed = false;
     for (files) |file_path| {
@@ -1076,7 +1076,7 @@ pub fn processFromRemoteUrl(
     return processFromReader(io, arena, body_reader, output_folder, base_name);
 }
 
-/// Stream-read a snapshot from process stdin and convert to CSV under `output_folder`.
+/// Stream-read a fixed-width file from process stdin and convert to CSV under `output_folder`.
 /// Same sequential `processFromReader` path as single-stream local and remote URL input.
 /// Output basenames use `stdin` (e.g. `companies_data_stdin.csv`).
 pub fn processFromStdin(
@@ -1090,7 +1090,7 @@ pub fn processFromStdin(
     };
 
     const base_name = baseInputName("-");
-    std.debug.print("Reading snapshot from stdin\n", .{});
+    std.debug.print("Reading from stdin\n", .{});
 
     const read_buf = try arena.alloc(u8, read_buffer_size);
     // Do not close stdin — process owns the standard handles.
@@ -1126,7 +1126,7 @@ pub fn processInput(
 
     return switch (kind) {
         .directory => processDirectory(io, arena, input, output_folder),
-        .file => processCompanyAppointmentsData(io, arena, input, output_folder),
+        .file => processLocalFile(io, arena, input, output_folder),
     };
 }
 
