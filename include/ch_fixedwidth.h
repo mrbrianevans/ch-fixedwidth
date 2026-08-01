@@ -67,6 +67,8 @@ typedef struct ChParseResult {
  *
  * Officers products fill companies_csv + persons_csv.
  * Prod 192 fills persons_csv + disqualifications_csv + exemptions_csv + variations_csv.
+ * Prod 197 fills companies_csv (forms), persons_csv (practitioners),
+ * disqualifications_csv (free text).
  *
  * On CH_OK, free the result with ch_parse_result_free().
  * For multi-hundred-MB / GB files, use the streaming API instead.

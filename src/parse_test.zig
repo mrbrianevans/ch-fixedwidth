@@ -28,12 +28,14 @@ test "identifyFileType maps known header magics" {
     try std.testing.expectEqual(parse.FileType.officers_snapshot, try parse.identifyFileType("DDDDSNAP"));
     try std.testing.expectEqual(parse.FileType.officers_update, try parse.identifyFileType("DDDDUPDT"));
     try std.testing.expectEqual(parse.FileType.disqualifications, try parse.identifyFileType("DISQUALS"));
+    try std.testing.expectEqual(parse.FileType.liquidation, try parse.identifyFileType("LIQNFORM"));
     try std.testing.expectError(error.UnsupportedFileType, parse.identifyFileType("NOTASNAP"));
     try std.testing.expectError(error.UnsupportedFileType, parse.identifyFileType("SHORT"));
     try std.testing.expectEqual(parse.FileType.officers_snapshot, try parse.identifyFileTypeFromInput("DDDDSNAP425720260706\n"));
     try std.testing.expect(parse.FileType.officers_snapshot.isImplemented());
     try std.testing.expect(parse.FileType.officers_update.isImplemented());
     try std.testing.expect(parse.FileType.disqualifications.isImplemented());
+    try std.testing.expect(parse.FileType.liquidation.isImplemented());
 }
 
 test "parseHeader extracts run and date for all known products" {
@@ -51,6 +53,11 @@ test "parseHeader extracts run and date for all known products" {
     try std.testing.expectEqual(parse.FileType.disqualifications, disq.file_type);
     try std.testing.expectEqualStrings("0001", disq.run_number);
     try std.testing.expectEqualStrings("20240501", disq.production_date);
+
+    const liq = try parse.parseHeader("LIQNFORM427620260731");
+    try std.testing.expectEqual(parse.FileType.liquidation, liq.file_type);
+    try std.testing.expectEqualStrings("4276", liq.run_number);
+    try std.testing.expectEqualStrings("20260731", liq.production_date);
 }
 
 test "parseHeader rejects bad header" {
@@ -241,6 +248,81 @@ test "classifyDisqualLine distinguishes header trailer and body types" {
     try std.testing.expectEqual(parse.DisqualLineKind.disqualification, parse.classifyDisqualLine("2000987800001"));
     try std.testing.expectEqual(parse.DisqualLineKind.exemption, parse.classifyDisqualLine("3054199360002"));
     try std.testing.expectEqual(parse.DisqualLineKind.variation, parse.classifyDisqualLine("4309153140001"));
+}
+
+const mini_liquidation = @embedFile("testdata/mini_liquidation.dat");
+const expected_liq_forms = @embedFile("testdata/expected_liq_forms.csv");
+const expected_liq_practitioners = @embedFile("testdata/expected_liq_practitioners.csv");
+const expected_liq_free_text = @embedFile("testdata/expected_liq_free_text.csv");
+
+test "classifyLiqLine distinguishes header trailer form and data" {
+    try std.testing.expectEqual(parse.LiqLineKind.header, parse.classifyLiqLine("LIQNFORM427620260731"));
+    try std.testing.expectEqual(parse.LiqLineKind.trailer, parse.classifyLiqLine("9999999900002215"));
+    try std.testing.expectEqual(parse.LiqLineKind.form, parse.classifyLiqLine("FM600       "));
+    try std.testing.expectEqual(parse.LiqLineKind.data, parse.classifyLiqLine("RNNI037932"));
+    try std.testing.expectEqual(parse.LiqLineKind.data, parse.classifyLiqLine("ID3535999865"));
+    try std.testing.expectEqual(parse.LiqLineKind.other, parse.classifyLiqLine("X"));
+}
+
+test "parseSnapshot mini liquidation fixture matches expected CSV" {
+    const allocator = std.testing.allocator;
+    var result = try snapshot.parseSnapshot(allocator, mini_liquidation);
+    defer result.deinit(allocator);
+
+    try std.testing.expectEqual(@as(i32, 8), result.companies);
+    try std.testing.expectEqual(@as(i32, 7), result.persons);
+    try std.testing.expectEqual(@as(i32, 3), result.disqualifications);
+    try std.testing.expectEqual(@as(i32, 61), result.trailer_count);
+
+    try std.testing.expectEqualStrings(expected_liq_forms, result.companies_csv);
+    try std.testing.expectEqualStrings(expected_liq_practitioners, result.persons_csv);
+    try std.testing.expectEqualStrings(expected_liq_free_text, result.disqualifications_csv);
+}
+
+test "stream matches snapshot on mini liquidation with tiny chunks" {
+    const allocator = std.testing.allocator;
+    var s = stream_mod.Stream.init(allocator, .{ .batch_rows = 2, .batch_bytes = 64 });
+    defer s.deinit();
+
+    for (mini_liquidation) |byte| {
+        try s.feed(&.{byte});
+    }
+    try s.finish();
+
+    var forms = std.ArrayList(u8).empty;
+    defer forms.deinit(allocator);
+    var prac = std.ArrayList(u8).empty;
+    defer prac.deinit(allocator);
+    var free_t = std.ArrayList(u8).empty;
+    defer free_t.deinit(allocator);
+
+    while (s.nextBatch()) |batch| {
+        var b = batch;
+        defer b.deinit(allocator);
+        switch (b.kind) {
+            .companies => try forms.appendSlice(allocator, b.data),
+            .persons => try prac.appendSlice(allocator, b.data),
+            .disqualifications => try free_t.appendSlice(allocator, b.data),
+            .exemptions, .variations => {},
+        }
+    }
+
+    try std.testing.expectEqual(@as(i32, 8), s.companies.count);
+    try std.testing.expectEqual(@as(i32, 7), s.persons.count);
+    try std.testing.expectEqual(@as(i32, 3), s.disqualifications.count);
+    try std.testing.expectEqual(@as(i32, 61), s.trailer_count.?);
+    try std.testing.expectEqual(@as(i32, 61), s.liq_data_records);
+    try std.testing.expectEqualStrings(expected_liq_forms, forms.items);
+    try std.testing.expectEqualStrings(expected_liq_practitioners, prac.items);
+    try std.testing.expectEqualStrings(expected_liq_free_text, free_t.items);
+}
+
+test "stream accepts LIQNFORM magic" {
+    const allocator = std.testing.allocator;
+    var s = stream_mod.Stream.init(allocator, .{});
+    defer s.deinit();
+    try s.feed("LIQNFORM4276");
+    try std.testing.expectEqual(parse.FileType.liquidation, s.file_type.?);
 }
 
 test "C ABI ch_parse_snapshot on mini fixture" {

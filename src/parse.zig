@@ -8,7 +8,8 @@
 //! File products share an 8-byte header identifier at the start of the first
 //! line. Callers identify the product from that magic, then branch to the
 //! matching body parser. Implemented: officers snapshot (`DDDDSNAP`), officers
-//! update (`DDDDUPDT`), and disqualified persons (`DISQUALS`).
+//! update (`DDDDUPDT`), disqualified persons (`DISQUALS`), and liquidation
+//! daily updates (`LIQNFORM`).
 
 const std = @import("std");
 const unicode = std.unicode;
@@ -24,6 +25,8 @@ pub const FileType = enum {
     officers_update,
     /// Product 192 — disqualified persons snapshot.
     disqualifications,
+    /// Product 197 — liquidation daily updates (form groups).
+    liquidation,
 
     /// 8-byte header identifier for this product.
     pub fn identifier(self: FileType) []const u8 {
@@ -31,6 +34,7 @@ pub const FileType = enum {
             .officers_snapshot => officers_snapshot_header_id,
             .officers_update => officers_update_header_id,
             .disqualifications => disqualifications_header_id,
+            .liquidation => liquidation_header_id,
         };
     }
 
@@ -40,13 +44,14 @@ pub const FileType = enum {
             .officers_snapshot => "officers snapshot (Prod 195/216)",
             .officers_update => "officers update (Prod 198)",
             .disqualifications => "disqualified persons (Prod 192)",
+            .liquidation => "liquidation daily updates (Prod 197)",
         };
     }
 
     /// True when a full body parser exists for this product.
     pub fn isImplemented(self: FileType) bool {
         return switch (self) {
-            .officers_snapshot, .officers_update, .disqualifications => true,
+            .officers_snapshot, .officers_update, .disqualifications, .liquidation => true,
         };
     }
 
@@ -56,6 +61,7 @@ pub const FileType = enum {
             .officers_snapshot => persons_header,
             .officers_update => update_persons_header,
             .disqualifications => disqual_persons_header,
+            .liquidation => liq_practitioners_header,
         };
     }
 };
@@ -63,6 +69,7 @@ pub const FileType = enum {
 pub const officers_snapshot_header_id = "DDDDSNAP";
 pub const officers_update_header_id = "DDDDUPDT";
 pub const disqualifications_header_id = "DISQUALS";
+pub const liquidation_header_id = "LIQNFORM";
 
 /// Alias retained for callers that only deal with the officers snapshot product.
 pub const snapshot_header_identifier = officers_snapshot_header_id;
@@ -94,6 +101,16 @@ pub const exemptions_header =
 pub const variations_header =
     "Person Number,Disqualification Type,Order/Undertaking Date,Variation Court Action Date,Variation Case Number,Variation Court Name\n";
 
+/// Prod 197 — one CSV row per form group (`FM` … next `FM` / trailer).
+pub const liq_forms_header =
+    "Form Number,Company Number,Company Name,Court Reference,Appointment Date,Date of Order,Date of Petition,Resolution Date,Final Meeting Date,Termination Date,Date Form Registered,Form Dated,New Dissolution Date,Transaction ID,Registered Office\n";
+/// Prod 197 — one CSV row per practitioner (`NP`) record.
+pub const liq_practitioners_header =
+    "Transaction ID,Form Number,Company Number,Sequence,Name,Address Line 1,Address Line 2,Address Line 3,Address Line 4,Address Line 5\n";
+/// Prod 197 — one CSV row per free-text (`FT`) record.
+pub const liq_free_text_header =
+    "Transaction ID,Form Number,Company Number,Sequence,Free Text\n";
+
 pub const LineKind = enum {
     header,
     company,
@@ -121,6 +138,202 @@ pub const DisqualTrailer = struct {
     type4: i32,
     total: i32,
 };
+
+/// Line kinds for Prod 197 (`LIQNFORM`) form-group files.
+pub const LiqLineKind = enum {
+    header,
+    trailer,
+    /// Starts a new form group (`FM…`).
+    form,
+    /// Any other tagged data record belonging to the current form group.
+    data,
+    other,
+};
+
+/// Capacity limits for one form group (live files stay well below these).
+pub const liq_max_practitioners: usize = 16;
+pub const liq_max_free_texts: usize = 8;
+pub const liq_field_cap: usize = 100;
+pub const liq_form_number_cap: usize = 10;
+pub const liq_company_number_cap: usize = 8;
+pub const liq_date_cap: usize = 8;
+pub const liq_id_cap: usize = 10;
+pub const liq_court_cap: usize = 13;
+pub const liq_ft_cap: usize = 40;
+
+/// Accumulator for one Prod 197 form group. Fields are owned copies so stream
+/// parsers can reuse input line buffers.
+pub const LiqForm = struct {
+    active: bool = false,
+    form_number: [liq_form_number_cap]u8 = undefined,
+    form_number_len: u8 = 0,
+    company_number: [liq_company_number_cap]u8 = undefined,
+    company_number_len: u8 = 0,
+    company_name: [liq_field_cap]u8 = undefined,
+    company_name_len: u8 = 0,
+    court_ref: [liq_court_cap]u8 = undefined,
+    court_ref_len: u8 = 0,
+    appointment_date: [liq_date_cap]u8 = undefined,
+    appointment_date_len: u8 = 0,
+    date_of_order: [liq_date_cap]u8 = undefined,
+    date_of_order_len: u8 = 0,
+    date_of_petition: [liq_date_cap]u8 = undefined,
+    date_of_petition_len: u8 = 0,
+    resolution_date: [liq_date_cap]u8 = undefined,
+    resolution_date_len: u8 = 0,
+    final_meeting_date: [liq_date_cap]u8 = undefined,
+    final_meeting_date_len: u8 = 0,
+    termination_date: [liq_date_cap]u8 = undefined,
+    termination_date_len: u8 = 0,
+    date_registered: [liq_date_cap]u8 = undefined,
+    date_registered_len: u8 = 0,
+    form_dated: [liq_date_cap]u8 = undefined,
+    form_dated_len: u8 = 0,
+    new_dissolution_date: [liq_date_cap]u8 = undefined,
+    new_dissolution_date_len: u8 = 0,
+    transaction_id: [liq_id_cap]u8 = undefined,
+    transaction_id_len: u8 = 0,
+    registered_office: [liq_field_cap]u8 = undefined,
+    registered_office_len: u8 = 0,
+    practitioners: [liq_max_practitioners][liq_field_cap]u8 = undefined,
+    practitioner_lens: [liq_max_practitioners]u8 = .{0} ** liq_max_practitioners,
+    practitioner_count: u8 = 0,
+    free_texts: [liq_max_free_texts][liq_ft_cap]u8 = undefined,
+    free_text_lens: [liq_max_free_texts]u8 = .{0} ** liq_max_free_texts,
+    free_text_count: u8 = 0,
+
+    pub fn reset(self: *LiqForm) void {
+        self.* = .{};
+    }
+
+    pub fn formNumber(self: *const LiqForm) []const u8 {
+        return self.form_number[0..self.form_number_len];
+    }
+    pub fn companyNumber(self: *const LiqForm) []const u8 {
+        return self.company_number[0..self.company_number_len];
+    }
+    pub fn companyName(self: *const LiqForm) []const u8 {
+        return self.company_name[0..self.company_name_len];
+    }
+    pub fn courtRef(self: *const LiqForm) []const u8 {
+        return self.court_ref[0..self.court_ref_len];
+    }
+    pub fn appointmentDate(self: *const LiqForm) []const u8 {
+        return self.appointment_date[0..self.appointment_date_len];
+    }
+    pub fn dateOfOrder(self: *const LiqForm) []const u8 {
+        return self.date_of_order[0..self.date_of_order_len];
+    }
+    pub fn dateOfPetition(self: *const LiqForm) []const u8 {
+        return self.date_of_petition[0..self.date_of_petition_len];
+    }
+    pub fn resolutionDate(self: *const LiqForm) []const u8 {
+        return self.resolution_date[0..self.resolution_date_len];
+    }
+    pub fn finalMeetingDate(self: *const LiqForm) []const u8 {
+        return self.final_meeting_date[0..self.final_meeting_date_len];
+    }
+    pub fn terminationDate(self: *const LiqForm) []const u8 {
+        return self.termination_date[0..self.termination_date_len];
+    }
+    pub fn dateRegistered(self: *const LiqForm) []const u8 {
+        return self.date_registered[0..self.date_registered_len];
+    }
+    pub fn formDated(self: *const LiqForm) []const u8 {
+        return self.form_dated[0..self.form_dated_len];
+    }
+    pub fn newDissolutionDate(self: *const LiqForm) []const u8 {
+        return self.new_dissolution_date[0..self.new_dissolution_date_len];
+    }
+    pub fn transactionId(self: *const LiqForm) []const u8 {
+        return self.transaction_id[0..self.transaction_id_len];
+    }
+    pub fn registeredOffice(self: *const LiqForm) []const u8 {
+        return self.registered_office[0..self.registered_office_len];
+    }
+    pub fn practitioner(self: *const LiqForm, i: usize) []const u8 {
+        return self.practitioners[i][0..self.practitioner_lens[i]];
+    }
+    pub fn freeText(self: *const LiqForm, i: usize) []const u8 {
+        return self.free_texts[i][0..self.free_text_lens[i]];
+    }
+
+    /// Apply one tagged data record to this form (including the opening `FM`).
+    pub fn applyRecord(self: *LiqForm, row: []const u8) void {
+        if (row.len < 2) return;
+        const tag = row[0..2];
+        const payload = if (row.len > 2) trimRightSpaces(row[2..]) else row[0..0];
+
+        if (std.mem.eql(u8, tag, "FM")) {
+            self.active = true;
+            setField(&self.form_number, &self.form_number_len, payload, liq_form_number_cap);
+            return;
+        }
+        if (!self.active) return;
+
+        if (std.mem.eql(u8, tag, "RN")) {
+            setField(&self.company_number, &self.company_number_len, payload, liq_company_number_cap);
+        } else if (std.mem.eql(u8, tag, "NA")) {
+            setField(&self.company_name, &self.company_name_len, payload, liq_field_cap);
+        } else if (std.mem.eql(u8, tag, "CO")) {
+            setField(&self.court_ref, &self.court_ref_len, payload, liq_court_cap);
+        } else if (std.mem.eql(u8, tag, "AD")) {
+            setField(&self.appointment_date, &self.appointment_date_len, payload, liq_date_cap);
+        } else if (std.mem.eql(u8, tag, "DO")) {
+            setField(&self.date_of_order, &self.date_of_order_len, payload, liq_date_cap);
+        } else if (std.mem.eql(u8, tag, "DP")) {
+            setField(&self.date_of_petition, &self.date_of_petition_len, payload, liq_date_cap);
+        } else if (std.mem.eql(u8, tag, "RD")) {
+            setField(&self.resolution_date, &self.resolution_date_len, payload, liq_date_cap);
+        } else if (std.mem.eql(u8, tag, "MD")) {
+            setField(&self.final_meeting_date, &self.final_meeting_date_len, payload, liq_date_cap);
+        } else if (std.mem.eql(u8, tag, "TD")) {
+            setField(&self.termination_date, &self.termination_date_len, payload, liq_date_cap);
+        } else if (std.mem.eql(u8, tag, "DR")) {
+            setField(&self.date_registered, &self.date_registered_len, payload, liq_date_cap);
+        } else if (std.mem.eql(u8, tag, "FD")) {
+            setField(&self.form_dated, &self.form_dated_len, payload, liq_date_cap);
+        } else if (std.mem.eql(u8, tag, "ND")) {
+            setField(&self.new_dissolution_date, &self.new_dissolution_date_len, payload, liq_date_cap);
+        } else if (std.mem.eql(u8, tag, "ID")) {
+            setField(&self.transaction_id, &self.transaction_id_len, payload, liq_id_cap);
+        } else if (std.mem.eql(u8, tag, "RE")) {
+            // Overflow RE records append with a space separator.
+            if (self.registered_office_len == 0) {
+                setField(&self.registered_office, &self.registered_office_len, payload, liq_field_cap);
+            } else if (self.registered_office_len < liq_field_cap) {
+                const space_at = self.registered_office_len;
+                if (space_at + 1 < liq_field_cap) {
+                    self.registered_office[space_at] = ' ';
+                    self.registered_office_len = @intCast(space_at + 1);
+                    const room = liq_field_cap - self.registered_office_len;
+                    const take = @min(payload.len, room);
+                    @memcpy(self.registered_office[self.registered_office_len..][0..take], payload[0..take]);
+                    self.registered_office_len += @intCast(take);
+                }
+            }
+        } else if (std.mem.eql(u8, tag, "NP")) {
+            if (self.practitioner_count < liq_max_practitioners) {
+                const i = self.practitioner_count;
+                setField(&self.practitioners[i], &self.practitioner_lens[i], payload, liq_field_cap);
+                self.practitioner_count += 1;
+            }
+        } else if (std.mem.eql(u8, tag, "FT")) {
+            if (self.free_text_count < liq_max_free_texts) {
+                const i = self.free_text_count;
+                setField(&self.free_texts[i], &self.free_text_lens[i], payload, liq_ft_cap);
+                self.free_text_count += 1;
+            }
+        }
+        // Unknown tags are ignored (forward-compatible with newer codes).
+    }
+};
+
+fn setField(buf: []u8, len_out: *u8, src: []const u8, cap: usize) void {
+    const take = @min(src.len, cap);
+    @memcpy(buf[0..take], src[0..take]);
+    len_out.* = @intCast(take);
+}
 
 pub const HeaderInfo = struct {
     file_type: FileType,
@@ -247,6 +460,7 @@ pub fn identifyFileType(header_id: []const u8) error{UnsupportedFileType}!FileTy
     if (std.mem.eql(u8, id, officers_snapshot_header_id)) return .officers_snapshot;
     if (std.mem.eql(u8, id, officers_update_header_id)) return .officers_update;
     if (std.mem.eql(u8, id, disqualifications_header_id)) return .disqualifications;
+    if (std.mem.eql(u8, id, liquidation_header_id)) return .liquidation;
     return error.UnsupportedFileType;
 }
 
@@ -308,6 +522,25 @@ pub fn classifyDisqualLine(row: []const u8) DisqualLineKind {
         '4' => .variation,
         else => .other,
     };
+}
+
+/// Classify a Prod 197 line. Header is `LIQNFORM…`; trailer is `99999999…`.
+/// Form groups start with `FM`; other 2-character tags are `.data`.
+pub fn classifyLiqLine(row: []const u8) LiqLineKind {
+    if (row.len >= header_identifier_len) {
+        if (std.mem.eql(u8, row[0..header_identifier_len], liquidation_header_id)) {
+            return .header;
+        }
+        if (std.mem.eql(u8, row[0..header_identifier_len], trailer_record_identifier)) {
+            return .trailer;
+        }
+    }
+    if (row.len < 2) return .other;
+    if (row[0] == 'F' and row[1] == 'M') return .form;
+    // Known / plausible two-letter tags count as data; unknown tags still count
+    // toward the trailer total when callers treat all non-header/trailer lines
+    // as records — classification as `.data` keeps them on the form path.
+    return .data;
 }
 
 /// True if `input` begins with the snapshot magic `DDDDSNAP`.
@@ -642,4 +875,66 @@ pub fn stripCr(row: []const u8) []const u8 {
         return row[0 .. row.len - 1];
     }
     return row;
+}
+
+/// Format one Prod 197 form group as a forms CSV row (including newline).
+pub fn formatLiqFormRow(dest: []u8, form: *const LiqForm) usize {
+    const fields = [_][]const u8{
+        form.formNumber(),
+        form.companyNumber(),
+        form.companyName(),
+        form.courtRef(),
+        form.appointmentDate(),
+        form.dateOfOrder(),
+        form.dateOfPetition(),
+        form.resolutionDate(),
+        form.finalMeetingDate(),
+        form.terminationDate(),
+        form.dateRegistered(),
+        form.formDated(),
+        form.newDissolutionDate(),
+        form.transactionId(),
+        form.registeredOffice(),
+    };
+    return writeCsvFields(dest, &fields, &.{});
+}
+
+/// Format one Prod 197 practitioner (`NP`) as a CSV row (including newline).
+/// `index` is 0-based into `form.practitioners`.
+pub fn formatLiqPractitionerRow(dest: []u8, form: *const LiqForm, index: usize) usize {
+    var parts: [6][]const u8 = .{ "", "", "", "", "", "" };
+    splitChevron(form.practitioner(index), parts[0..]);
+
+    var seq_buf: [12]u8 = undefined;
+    const seq_len = appendInt(seq_buf[0..], 0, @intCast(index + 1));
+
+    const fields = [_][]const u8{
+        form.transactionId(),
+        form.formNumber(),
+        form.companyNumber(),
+        seq_buf[0..seq_len],
+        parts[0],
+        parts[1],
+        parts[2],
+        parts[3],
+        parts[4],
+        parts[5],
+    };
+    return writeCsvFields(dest, &fields, &.{});
+}
+
+/// Format one Prod 197 free-text (`FT`) as a CSV row (including newline).
+/// `index` is 0-based into `form.free_texts`.
+pub fn formatLiqFreeTextRow(dest: []u8, form: *const LiqForm, index: usize) usize {
+    var seq_buf: [12]u8 = undefined;
+    const seq_len = appendInt(seq_buf[0..], 0, @intCast(index + 1));
+
+    const fields = [_][]const u8{
+        form.transactionId(),
+        form.formNumber(),
+        form.companyNumber(),
+        seq_buf[0..seq_len],
+        form.freeText(index),
+    };
+    return writeCsvFields(dest, &fields, &.{});
 }

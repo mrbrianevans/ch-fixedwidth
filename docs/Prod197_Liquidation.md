@@ -1,6 +1,6 @@
 # Companies House Product 197 – Liquidation Daily Updates
 
-> **Status: not implemented.** Header magic `LIQNFORM` is recognised for dispatch only; there is no body parser or CLI CSV emission yet. This document is a format reference for a future implementation.
+> **Status: implemented.** Library, CLI, and WASM accept `LIQNFORM` files and emit three CSVs: forms (one row per form group), practitioners (`NP` records), and free text (`FT` records). Trailer count is validated against the total number of data records (every non-header/non-trailer line).
 
 **File Format Specification (V4.6d, issued 25 April 2019)**  
 Source: Companies House Liquidation Database Bulk Data Products
@@ -258,16 +258,28 @@ Record-type mix on that same file (illustrative): `FM`/`RN`/`NA`/`DR`/`ID` alway
 
 ---
 
-## 6. Implementation notes (for a future parser)
+## 6. Implementation notes
 
-1. **Dispatch**: first 8 bytes `LIQNFORM` (same 8-byte header magic pattern as other products).
-2. **Not officers-shaped**: no company/person type digit at a fixed offset; walk 2-byte record tags until trailer `99999999`.
-3. **Line-oriented**: each record is one line (CRLF/LF); lengths above are character lengths of the payload line (excluding newline).
-4. **Form-group model**: emit one logical “form event” per `FM…` block, with typed child fields (`RN`, `NA`, `NP[]`, dates, `FT[]`, `ID`, court refs, etc.).
-5. **Chevrons**: split `NP` / `RE` on `<` into ordered elements; empty consecutive chevrons mean empty elements.
-6. **Trailer validation**: sum of all non-header/non-trailer records should equal the 8-digit trailer count.
-7. **CSV shape (TBD)**: likely multi-file or multi-entity output (e.g. forms + practitioners + free text), not the two-file officers layout. Final CLI CSV set should be chosen when implementing.
-8. **Spec vs live**: implement V4.6d sequences for known forms; log or soft-fail unknown `FM` codes rather than aborting the whole file if newer codes appear.
+1. **Dispatch**: first 8 bytes `LIQNFORM`.
+2. **Form-group model**: each `FM` starts a group; the previous group is flushed when the next `FM` or the trailer is seen.
+3. **Unknown tags**: ignored for field capture but still counted toward the trailer total.
+4. **Chevrons**: `NP` rows split on `<` into Name + up to five address lines; `RE` is kept as a single registered-office string (chevrons preserved).
+5. **Dates**: data-record dates are exported as in the file (`DDMMCCYY`); header production date remains `CCYYMMDD`.
+6. **Trailer validation**: every non-header/non-trailer line counts; total must match the trailer’s 8-digit count.
+7. **CLI sequential only** (form-group state cannot be split across workers like officers products).
+8. **CSV outputs** (CLI filenames; in-memory/C/WASM map forms→companies slot, practitioners→persons, free text→disqualifications):
+
+| CLI file | Content |
+|----------|---------|
+| `forms_data_*` | One row per form group |
+| `practitioners_data_*` | One row per `NP` |
+| `free_text_data_*` | One row per `FT` |
+
+**forms columns:** Form Number, Company Number, Company Name, Court Reference, Appointment Date, Date of Order, Date of Petition, Resolution Date, Final Meeting Date, Termination Date, Date Form Registered, Form Dated, New Dissolution Date, Transaction ID, Registered Office
+
+**practitioners columns:** Transaction ID, Form Number, Company Number, Sequence, Name, Address Line 1–5
+
+**free text columns:** Transaction ID, Form Number, Company Number, Sequence, Free Text
 
 ---
 

@@ -61,7 +61,7 @@ fn writePersonRow(out: *CsvOut, file_type: parse.FileType, row: []const u8) !voi
     const p = switch (file_type) {
         .officers_snapshot => parse.formatPersonRow(dest, row),
         .officers_update => parse.formatUpdatePersonRow(dest, row),
-        .disqualifications => return error.NotImplemented,
+        .disqualifications, .liquidation => return error.NotImplemented,
     };
     out.endRow(p);
 }
@@ -503,6 +503,7 @@ pub fn processFromReader(
     return switch (file_type) {
         .officers_snapshot, .officers_update => processOfficersFromReader(io, arena, reader, output_folder, base_name, file_type),
         .disqualifications => processDisqualFromReader(io, arena, reader, output_folder, base_name),
+        .liquidation => processLiqFromReader(io, arena, reader, output_folder, base_name),
     };
 }
 
@@ -721,6 +722,136 @@ fn processDisqualFromReader(
     return 1;
 }
 
+fn processLiqFromReader(
+    io: Io,
+    arena: std.mem.Allocator,
+    reader: *Io.Reader,
+    output_folder: []const u8,
+    base_name: []const u8,
+) !u8 {
+    const forms_filename = try std.fs.path.join(arena, &.{
+        output_folder,
+        try std.fmt.allocPrint(arena, "forms_data_{s}.csv", .{base_name}),
+    });
+    const prac_filename = try std.fs.path.join(arena, &.{
+        output_folder,
+        try std.fmt.allocPrint(arena, "practitioners_data_{s}.csv", .{base_name}),
+    });
+    const ft_filename = try std.fs.path.join(arena, &.{
+        output_folder,
+        try std.fmt.allocPrint(arena, "free_text_data_{s}.csv", .{base_name}),
+    });
+
+    std.debug.print("Saving forms data to {s}\n", .{forms_filename});
+    std.debug.print("Saving practitioners data to {s}\n", .{prac_filename});
+    std.debug.print("Saving free text data to {s}\n", .{ft_filename});
+
+    const b1 = try arena.alloc(u8, write_buffer_size);
+    const b2 = try arena.alloc(u8, write_buffer_size);
+    const b3 = try arena.alloc(u8, write_buffer_size);
+
+    var forms_out = CsvOut.create(io, forms_filename, parse.liq_forms_header, b1) catch |err| {
+        std.debug.print("Error opening forms file: {s}\n", .{@errorName(err)});
+        return 1;
+    };
+    defer forms_out.close();
+    var prac_out = CsvOut.create(io, prac_filename, parse.liq_practitioners_header, b2) catch |err| {
+        std.debug.print("Error opening practitioners file: {s}\n", .{@errorName(err)});
+        return 1;
+    };
+    defer prac_out.close();
+    var ft_out = CsvOut.create(io, ft_filename, parse.liq_free_text_header, b3) catch |err| {
+        std.debug.print("Error opening free text file: {s}\n", .{@errorName(err)});
+        return 1;
+    };
+    defer ft_out.close();
+
+    var form: parse.LiqForm = .{};
+    var forms_count: i32 = 0;
+    var prac_count: i32 = 0;
+    var ft_count: i32 = 0;
+    var data_records: i32 = 0;
+
+    const emit = struct {
+        fn go(
+            f: *parse.LiqForm,
+            forms: *CsvOut,
+            prac: *CsvOut,
+            free_t: *CsvOut,
+            fc: *i32,
+            pc: *i32,
+            ftc: *i32,
+        ) !void {
+            if (!f.active) return;
+            {
+                const dest = try forms.beginRow();
+                const n = parse.formatLiqFormRow(dest, f);
+                forms.endRow(n);
+                fc.* += 1;
+            }
+            var i: usize = 0;
+            while (i < f.practitioner_count) : (i += 1) {
+                const dest = try prac.beginRow();
+                const n = parse.formatLiqPractitionerRow(dest, f, i);
+                prac.endRow(n);
+                pc.* += 1;
+            }
+            i = 0;
+            while (i < f.free_text_count) : (i += 1) {
+                const dest = try free_t.beginRow();
+                const n = parse.formatLiqFreeTextRow(dest, f, i);
+                free_t.endRow(n);
+                ftc.* += 1;
+            }
+            f.reset();
+        }
+    }.go;
+
+    while (true) {
+        const maybe_line = reader.takeDelimiter('\n') catch |err| {
+            std.debug.print("Error reading input: {s}\n", .{@errorName(err)});
+            return 1;
+        };
+        const row = parse.stripCr(maybe_line orelse break);
+
+        switch (parse.classifyLiqLine(row)) {
+            .header => {}, // already consumed
+            .trailer => {
+                emit(&form, &forms_out, &prac_out, &ft_out, &forms_count, &prac_count, &ft_count) catch |err| {
+                    std.debug.print("Error writing liquidation rows: {s}\n", .{@errorName(err)});
+                    return 1;
+                };
+                const record_count = parse.parseTrailerCount(row);
+                if (record_count != data_records) {
+                    std.debug.print("ERROR: Processed {d} records out of {d}\n", .{ data_records, record_count });
+                    return 1;
+                }
+                std.debug.print(
+                    "Processed {d} records: {d} forms, {d} practitioners, {d} free text.\n",
+                    .{ data_records, forms_count, prac_count, ft_count },
+                );
+                return 0;
+            },
+            .form => {
+                emit(&form, &forms_out, &prac_out, &ft_out, &forms_count, &prac_count, &ft_count) catch |err| {
+                    std.debug.print("Error writing liquidation rows: {s}\n", .{@errorName(err)});
+                    return 1;
+                };
+                form.applyRecord(row);
+                data_records += 1;
+            },
+            .data => {
+                form.applyRecord(row);
+                data_records += 1;
+            },
+            .other => {},
+        }
+    }
+
+    std.debug.print("ERROR: No trailer record found.\n", .{});
+    return 1;
+}
+
 fn processSingle(
     io: Io,
     arena: std.mem.Allocator,
@@ -744,7 +875,7 @@ fn processSingle(
 
 /// Convert one local snapshot file (assumes `output_folder` already exists).
 /// On multi-core native builds, officers products split the file across workers.
-/// Prod 192 always uses the sequential path (four CSV outputs, different trailer).
+/// Prod 192 / 197 always use the sequential path (multi-CSV / form-group state).
 fn processOneLocalFile(
     io: Io,
     arena: std.mem.Allocator,
@@ -757,7 +888,7 @@ fn processOneLocalFile(
         return processSingle(io, arena, input_path, output_folder, base_name);
     }
 
-    // Probe product so disqualifications skip the officers-oriented parallel split.
+    // Probe product so multi-CSV / form-group products skip officers parallel split.
     const probe_buf = try arena.alloc(u8, 64 * 1024);
     const probed = blk: {
         const f = Io.Dir.cwd().openFile(io, input_path, .{}) catch break :blk null;
@@ -768,7 +899,7 @@ fn processOneLocalFile(
         break :blk parse.parseHeader(row) catch null;
     };
     if (probed) |h| {
-        if (h.file_type == .disqualifications) {
+        if (h.file_type == .disqualifications or h.file_type == .liquidation) {
             return processSingle(io, arena, input_path, output_folder, base_name);
         }
     }

@@ -81,6 +81,9 @@ pub const Stream = struct {
     trailer_count: ?i32 = null,
     /// Prod 192 per-type trailer expectations (set when trailer seen).
     disqual_trailer: ?parse.DisqualTrailer = null,
+    /// Prod 197: count of raw data records (every non-header/trailer line).
+    liq_data_records: i32 = 0,
+    liq_form: parse.LiqForm = .{},
     header_seen: bool = false,
     finished: bool = false,
     saw_trailer: bool = false,
@@ -190,6 +193,14 @@ pub const Stream = struct {
                 try self.flushKind(&self.exemptions, .exemptions, true);
                 try self.flushKind(&self.variations, .variations, true);
             },
+            .liquidation => {
+                try self.ensureHeader(&self.companies, parse.liq_forms_header);
+                try self.ensureHeader(&self.persons, parse.liq_practitioners_header);
+                try self.ensureHeader(&self.disqualifications, parse.liq_free_text_header);
+                try self.flushKind(&self.companies, .companies, true);
+                try self.flushKind(&self.persons, .persons, true);
+                try self.flushKind(&self.disqualifications, .disqualifications, true);
+            },
         }
 
         self.finished = true;
@@ -214,6 +225,9 @@ pub const Stream = struct {
                 {
                     return error.TrailerMismatch;
                 }
+            },
+            .liquidation => {
+                if (tc != self.liq_data_records) return error.TrailerMismatch;
             },
         }
     }
@@ -249,6 +263,7 @@ pub const Stream = struct {
         switch (file_type) {
             .officers_snapshot, .officers_update => try self.handleOfficersLine(row, file_type),
             .disqualifications => try self.handleDisqualLine(row),
+            .liquidation => try self.handleLiqLine(row),
         }
     }
 
@@ -278,12 +293,71 @@ pub const Stream = struct {
                 const n = switch (file_type) {
                     .officers_snapshot => parse.formatPersonRow(&self.row_buf, row),
                     .officers_update => parse.formatUpdatePersonRow(&self.row_buf, row),
-                    .disqualifications => unreachable,
+                    .disqualifications, .liquidation => unreachable,
                 };
                 try self.persons.buf.appendSlice(self.allocator, self.row_buf[0..n]);
                 self.persons.rows += 1;
                 self.persons.count += 1;
                 try self.flushKind(&self.persons, .persons, false);
+            },
+            .other => {},
+        }
+    }
+
+    fn emitLiqFormToBuffers(self: *Stream) ParseError!void {
+        if (!self.liq_form.active) return;
+        try self.ensureHeader(&self.companies, parse.liq_forms_header);
+        try self.ensureHeader(&self.persons, parse.liq_practitioners_header);
+        try self.ensureHeader(&self.disqualifications, parse.liq_free_text_header);
+
+        const n = parse.formatLiqFormRow(&self.row_buf, &self.liq_form);
+        try self.companies.buf.appendSlice(self.allocator, self.row_buf[0..n]);
+        self.companies.rows += 1;
+        self.companies.count += 1;
+        try self.flushKind(&self.companies, .companies, false);
+
+        var i: usize = 0;
+        while (i < self.liq_form.practitioner_count) : (i += 1) {
+            const pn = parse.formatLiqPractitionerRow(&self.row_buf, &self.liq_form, i);
+            try self.persons.buf.appendSlice(self.allocator, self.row_buf[0..pn]);
+            self.persons.rows += 1;
+            self.persons.count += 1;
+            try self.flushKind(&self.persons, .persons, false);
+        }
+        i = 0;
+        while (i < self.liq_form.free_text_count) : (i += 1) {
+            const fn_ = parse.formatLiqFreeTextRow(&self.row_buf, &self.liq_form, i);
+            try self.disqualifications.buf.appendSlice(self.allocator, self.row_buf[0..fn_]);
+            self.disqualifications.rows += 1;
+            self.disqualifications.count += 1;
+            try self.flushKind(&self.disqualifications, .disqualifications, false);
+        }
+        self.liq_form.reset();
+    }
+
+    fn handleLiqLine(self: *Stream, row: []const u8) ParseError!void {
+        switch (parse.classifyLiqLine(row)) {
+            .header => {
+                const info = parse.parseHeader(row) catch return error.UnsupportedFileType;
+                if (info.file_type != .liquidation) return error.UnsupportedFileType;
+                self.header_seen = true;
+                try self.ensureHeader(&self.companies, parse.liq_forms_header);
+                try self.ensureHeader(&self.persons, parse.liq_practitioners_header);
+                try self.ensureHeader(&self.disqualifications, parse.liq_free_text_header);
+            },
+            .trailer => {
+                try self.emitLiqFormToBuffers();
+                self.trailer_count = parse.parseTrailerCount(row);
+                self.saw_trailer = true;
+            },
+            .form => {
+                try self.emitLiqFormToBuffers();
+                self.liq_form.applyRecord(row);
+                self.liq_data_records += 1;
+            },
+            .data => {
+                self.liq_form.applyRecord(row);
+                self.liq_data_records += 1;
             },
             .other => {},
         }

@@ -46,23 +46,24 @@ export type SnapshotInput = Uint8Array | ArrayBuffer | string;
  * Successful in-memory parse result.
  * CSV strings include the header row and trailing newlines on data rows.
  * Prod 192 fills the disqualification fields; officers products leave them empty.
+ * Prod 197 maps forms→companiesCsv, practitioners→personsCsv, free text→disqualificationsCsv.
  */
 export interface ParseResult {
-  /** Full companies CSV document (header + rows). Empty for Prod 192. */
+  /** Full companies CSV (or Prod 197 forms CSV). Empty for Prod 192. */
   companiesCsv: string;
-  /** Full persons CSV document (header + rows). */
+  /** Full persons CSV (or Prod 197 practitioners CSV). */
   personsCsv: string;
-  /** Number of company data rows written. */
+  /** Number of company / form data rows written. */
   companies: number;
-  /** Number of person data rows written. */
+  /** Number of person / practitioner data rows written. */
   persons: number;
   /** Trailer total record count from the input. */
   trailerCount: number;
-  /** Prod 192 type 2 disqualifications CSV (empty string for officers). */
+  /** Prod 192 type 2, or Prod 197 free text CSV (empty string for officers). */
   disqualificationsCsv: string;
-  /** Prod 192 type 3 exemptions CSV (empty string for officers). */
+  /** Prod 192 type 3 exemptions CSV (empty string for officers / Prod 197). */
   exemptionsCsv: string;
-  /** Prod 192 type 4 variations CSV (empty string for officers). */
+  /** Prod 192 type 4 variations CSV (empty string for officers / Prod 197). */
   variationsCsv: string;
   disqualifications: number;
   exemptions: number;

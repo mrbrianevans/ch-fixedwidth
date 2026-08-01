@@ -86,7 +86,7 @@ parser from that magic (`parse.identifyFileType` → product-specific path).
 | 195 / 216 (appointments snapshot) | `DDDDSNAP` | Implemented — companies + persons CSVs |
 | 198 (appointments update) | `DDDDUPDT` | Implemented — companies + persons CSVs — [Prod198_Update.md](Prod198_Update.md) |
 | 192 (disqualified persons) | `DISQUALS` | Implemented — persons, disqualifications, exemptions, variations CSVs — [Prod192_Disqualifications.md](Prod192_Disqualifications.md) |
-| 197 (liquidation daily updates) | `LIQNFORM` | Not implemented — format notes only — [Prod197_Liquidation.md](Prod197_Liquidation.md) |
+| 197 (liquidation daily updates) | `LIQNFORM` | Implemented — forms + practitioners + free text CSVs — [Prod197_Liquidation.md](Prod197_Liquidation.md) |
 
 Unknown magics return `UnsupportedFileType` / `CH_ERR_UNSUPPORTED_HEADER`.
 

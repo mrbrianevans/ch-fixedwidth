@@ -19,8 +19,10 @@ pub const ParseError = error{
 ///
 /// Officers products fill `companies_csv` + `persons_csv`.
 /// Prod 192 fills `persons_csv` (type 1), `disqualifications_csv` (type 2),
-/// `exemptions_csv` (type 3), `variations_csv` (type 4); `companies_csv` is an
-/// empty document (header-only companies layout is not used — empty string).
+/// `exemptions_csv` (type 3), `variations_csv` (type 4); `companies_csv` empty.
+/// Prod 197 fills `companies_csv` as forms, `persons_csv` as practitioners,
+/// `disqualifications_csv` as free text; other slots empty. Counts mirror those
+/// CSV row counts; trailer_count is the total raw data-record count.
 pub const ParseResult = struct {
     companies_csv: []u8,
     persons_csv: []u8,
@@ -56,6 +58,7 @@ pub fn parseSnapshot(allocator: std.mem.Allocator, input: []const u8) ParseError
         .officers_snapshot => parseOfficersAppointments(allocator, input, .officers_snapshot),
         .officers_update => parseOfficersAppointments(allocator, input, .officers_update),
         .disqualifications => parseDisqualifications(allocator, input),
+        .liquidation => parseLiquidation(allocator, input),
     };
 }
 
@@ -104,7 +107,7 @@ fn parseOfficersAppointments(
                 const n = switch (file_type) {
                     .officers_snapshot => parse.formatPersonRow(&row_buf, row),
                     .officers_update => parse.formatUpdatePersonRow(&row_buf, row),
-                    .disqualifications => unreachable,
+                    .disqualifications, .liquidation => unreachable,
                 };
                 try persons.appendSlice(allocator, row_buf[0..n]);
                 persons_count += 1;
@@ -126,6 +129,128 @@ fn parseOfficersAppointments(
         .companies = companies_count,
         .persons = persons_count,
         .disqualifications = 0,
+        .exemptions = 0,
+        .variations = 0,
+        .trailer_count = tc,
+    };
+}
+
+fn emitLiqForm(
+    allocator: std.mem.Allocator,
+    form: *const parse.LiqForm,
+    forms: *std.ArrayList(u8),
+    practitioners: *std.ArrayList(u8),
+    free_texts: *std.ArrayList(u8),
+    forms_count: *i32,
+    practitioners_count: *i32,
+    free_text_count: *i32,
+    row_buf: *[parse.max_csv_row_bytes]u8,
+) ParseError!void {
+    if (!form.active) return;
+    const n = parse.formatLiqFormRow(row_buf, form);
+    try forms.appendSlice(allocator, row_buf[0..n]);
+    forms_count.* += 1;
+
+    var i: usize = 0;
+    while (i < form.practitioner_count) : (i += 1) {
+        const pn = parse.formatLiqPractitionerRow(row_buf, form, i);
+        try practitioners.appendSlice(allocator, row_buf[0..pn]);
+        practitioners_count.* += 1;
+    }
+    i = 0;
+    while (i < form.free_text_count) : (i += 1) {
+        const fn_ = parse.formatLiqFreeTextRow(row_buf, form, i);
+        try free_texts.appendSlice(allocator, row_buf[0..fn_]);
+        free_text_count.* += 1;
+    }
+}
+
+fn parseLiquidation(allocator: std.mem.Allocator, input: []const u8) ParseError!ParseResult {
+    var forms = std.ArrayList(u8).empty;
+    errdefer forms.deinit(allocator);
+    var practitioners = std.ArrayList(u8).empty;
+    errdefer practitioners.deinit(allocator);
+    var free_texts = std.ArrayList(u8).empty;
+    errdefer free_texts.deinit(allocator);
+
+    try forms.appendSlice(allocator, parse.liq_forms_header);
+    try practitioners.appendSlice(allocator, parse.liq_practitioners_header);
+    try free_texts.appendSlice(allocator, parse.liq_free_text_header);
+
+    var forms_count: i32 = 0;
+    var practitioners_count: i32 = 0;
+    var free_text_count: i32 = 0;
+    var data_records: i32 = 0;
+    var trailer_count: ?i32 = null;
+    var form: parse.LiqForm = .{};
+    var row_buf: [parse.max_csv_row_bytes]u8 = undefined;
+
+    var rest = input;
+    while (rest.len > 0) {
+        const nl = std.mem.indexOfScalar(u8, rest, '\n');
+        const line_raw = if (nl) |i| rest[0..i] else rest;
+        rest = if (nl) |i| rest[i + 1 ..] else rest[rest.len..];
+
+        const row = parse.stripCr(line_raw);
+        if (row.len == 0 and rest.len == 0) break;
+
+        switch (parse.classifyLiqLine(row)) {
+            .header => {
+                const info = parse.parseHeader(row) catch return error.UnsupportedFileType;
+                if (info.file_type != .liquidation) return error.UnsupportedFileType;
+            },
+            .trailer => {
+                try emitLiqForm(
+                    allocator,
+                    &form,
+                    &forms,
+                    &practitioners,
+                    &free_texts,
+                    &forms_count,
+                    &practitioners_count,
+                    &free_text_count,
+                    &row_buf,
+                );
+                form.reset();
+                trailer_count = parse.parseTrailerCount(row);
+                break;
+            },
+            .form => {
+                try emitLiqForm(
+                    allocator,
+                    &form,
+                    &forms,
+                    &practitioners,
+                    &free_texts,
+                    &forms_count,
+                    &practitioners_count,
+                    &free_text_count,
+                    &row_buf,
+                );
+                form.reset();
+                form.applyRecord(row);
+                data_records += 1;
+            },
+            .data => {
+                form.applyRecord(row);
+                data_records += 1;
+            },
+            .other => {},
+        }
+    }
+
+    const tc = trailer_count orelse return error.MissingTrailer;
+    if (tc != data_records) return error.TrailerMismatch;
+
+    return .{
+        .companies_csv = try forms.toOwnedSlice(allocator),
+        .persons_csv = try practitioners.toOwnedSlice(allocator),
+        .disqualifications_csv = try free_texts.toOwnedSlice(allocator),
+        .exemptions_csv = try emptyOwned(allocator),
+        .variations_csv = try emptyOwned(allocator),
+        .companies = forms_count,
+        .persons = practitioners_count,
+        .disqualifications = free_text_count,
         .exemptions = 0,
         .variations = 0,
         .trailer_count = tc,
