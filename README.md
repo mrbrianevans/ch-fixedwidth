@@ -45,21 +45,24 @@ chmod +x parser-linux-x86_64
 ## Run
 
 ```bash
-./parser <input.dat> <output_folder>
+./parser <input.dat|http(s)://.../file.dat> <output_folder>
 ```
 
 | Argument | Description |
 |----------|-------------|
-| `input.dat` | Path to a single snapshot file |
+| Input | Path to a single snapshot file **or** an `http://` / `https://` URL of a hosted `.dat` |
 | `output_folder` | Directory for CSV output (created if missing) |
 
-Example:
+Examples:
 
 ```bash
 ./parser Prod216_4257_ew_6.dat ./output
+./parser https://example.com/data/Prod216_4257_ew_6.dat ./output
 ```
 
-Exit code `0` on success (trailer record count matches rows written); non-zero on header/trailer mismatch or I/O errors.
+Remote URLs are downloaded and converted in a **streaming pipeline** (response body is parsed as it arrives; the full file is not buffered to disk first). Output CSV names and contents match a local-file run with the same basename.
+
+Exit code `0` on success (trailer record count matches rows written); non-zero on header/trailer mismatch, HTTP errors, or I/O errors.
 
 ## Output
 
@@ -88,7 +91,7 @@ Requires [Zig](https://ziglang.org/) 0.16+.
 
 ```bash
 zig build -Doptimize=ReleaseFast
-./zig-out/bin/parser <input.dat> <output_folder>
+./zig-out/bin/parser <input.dat|http(s)://.../file.dat> <output_folder>
 ```
 
 ### Development
