@@ -1,10 +1,12 @@
 //! File-based conversion: streaming I/O, optional multithreading.
 //! Uses pure formatters from `parse.zig` for record → CSV.
+//! Native CLI also supports streaming HTTP(S) download of remote `.dat` URLs.
 
 const std = @import("std");
 const builtin = @import("builtin");
 const Io = std.Io;
 const Thread = std.Thread;
+const http = std.http;
 const parse = @import("parse.zig");
 
 // Smaller buffers under single-threaded (wasm32-wasi) to stay within linear memory
@@ -519,8 +521,7 @@ fn processSingle(
 /// Convert one snapshot file on disk into CSV files under `output_folder`.
 /// Returns a process exit code (0 = success).
 ///
-/// For remote HTTP(S) URLs use `processFromRemoteUrl` instead (single-stream pipeline;
-/// parallel seek is not available over HTTP).
+/// Prefer `processInput` when the argument may be either a local path or HTTP(S) URL.
 pub fn processCompanyAppointmentsData(
     io: Io,
     arena: std.mem.Allocator,
@@ -545,6 +546,92 @@ pub fn processCompanyAppointmentsData(
         return processSingle(io, arena, input_path, output_folder, base_name);
     }
     return processParallel(io, arena, input_path, output_folder, base_name, n_workers);
+}
+
+/// Stream-download `url` over HTTP(S) and convert to CSV under `output_folder`.
+/// Uses a single sequential pipeline (no parallel seeks). Output matches a local-file run
+/// with the same basename.
+pub fn processFromRemoteUrl(
+    io: Io,
+    arena: std.mem.Allocator,
+    url: []const u8,
+    output_folder: []const u8,
+) !u8 {
+    Io.Dir.cwd().createDirPath(io, output_folder) catch |err| {
+        std.debug.print("Error creating output directory: {s}\n", .{@errorName(err)});
+        return 1;
+    };
+
+    const uri = std.Uri.parse(url) catch |err| {
+        std.debug.print("Error: invalid URL '{s}': {s}\n", .{ url, @errorName(err) });
+        return 1;
+    };
+
+    const base_name = baseInputName(url);
+    std.debug.print("Downloading and streaming {s}\n", .{url});
+
+    // Client allocations must outlive the request; page allocator is thread-safe.
+    var client: http.Client = .{
+        .allocator = std.heap.page_allocator,
+        .io = io,
+    };
+    defer client.deinit();
+
+    // Prefer identity so large snapshots are not recompressed on the wire when avoidable.
+    var req = client.request(.GET, uri, .{
+        .headers = .{
+            .accept_encoding = .{ .override = "identity" },
+            .user_agent = .{ .override = "ch-fixedwidth-parser" },
+        },
+        .keep_alive = false,
+    }) catch |err| {
+        std.debug.print("Error connecting to URL: {s}\n", .{@errorName(err)});
+        return 1;
+    };
+    defer req.deinit();
+
+    req.sendBodiless() catch |err| {
+        std.debug.print("Error sending HTTP request: {s}\n", .{@errorName(err)});
+        return 1;
+    };
+
+    var redirect_buf: [8 * 1024]u8 = undefined;
+    var response = req.receiveHead(&redirect_buf) catch |err| {
+        std.debug.print("Error receiving HTTP headers: {s}\n", .{@errorName(err)});
+        return 1;
+    };
+
+    if (response.head.status.class() != .success) {
+        std.debug.print(
+            "Error: HTTP {d} {s} for {s}\n",
+            .{
+                @intFromEnum(response.head.status),
+                response.head.status.phrase() orelse "",
+                url,
+            },
+        );
+        return 1;
+    }
+
+    // Transfer buffer doubles as the Io.Reader buffer for line-delimited parsing.
+    const transfer_buf = try arena.alloc(u8, read_buffer_size);
+    const body_reader = response.reader(transfer_buf);
+
+    return processFromReader(io, arena, body_reader, output_folder, base_name);
+}
+
+/// Convert a local path or HTTP(S) URL into CSV files under `output_folder`.
+/// Returns a process exit code (0 = success).
+pub fn processInput(
+    io: Io,
+    arena: std.mem.Allocator,
+    input: []const u8,
+    output_folder: []const u8,
+) !u8 {
+    if (isRemoteUrl(input)) {
+        return processFromRemoteUrl(io, arena, input, output_folder);
+    }
+    return processCompanyAppointmentsData(io, arena, input, output_folder);
 }
 
 test "isRemoteUrl detects http and https" {
