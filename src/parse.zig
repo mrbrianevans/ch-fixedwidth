@@ -493,6 +493,27 @@ pub fn sliceChars(s: []const u8, start: usize, end: usize) []const u8 {
     return s[0..0];
 }
 
+/// Row view that resolves character offsets once: byte indexing for pure ASCII
+/// (hot path), UTF-8 character walking otherwise. Formatters use one layout.
+pub const FieldView = struct {
+    row: []const u8,
+    ascii: bool,
+
+    pub fn init(row: []const u8) FieldView {
+        return .{ .row = row, .ascii = isAscii(row) };
+    }
+
+    /// Slice covering character range [start, end).
+    pub fn get(self: FieldView, start: usize, end: usize) []const u8 {
+        if (self.ascii) return clamp(self.row, start, end);
+        return sliceChars(self.row, start, end);
+    }
+
+    pub fn atoi(self: FieldView, start: usize, end: usize) i32 {
+        return fastAtoi(self.get(start, end));
+    }
+};
+
 fn csvNeedsQuote(s: []const u8) bool {
     for (s) |c| {
         if (c == ',' or c == '"' or c == '\n' or c == '\r') return true;
@@ -686,47 +707,26 @@ pub fn parseDisqualTrailer(row: []const u8) error{MissingTrailer}!DisqualTrailer
 /// Format a company record as one CSV line (including trailing newline).
 /// `dest` must be at least `max_csv_row_bytes`.
 pub fn formatCompanyRow(dest: []u8, row: []const u8) usize {
-    var p: usize = 0;
-
-    if (isAscii(row)) {
-        const name_length: usize = @intCast(fastAtoi(clamp(row, 36, 40)));
-        var name = clamp(row, 40, 40 + name_length -| 1);
-        if (name.len > 0 and name[name.len - 1] == ' ') {
-            name = trimRightSpaces(name);
-        }
-        p = appendField(dest, p, clamp(row, 0, 8));
-        dest[p] = ',';
-        p += 1;
-        p = appendField(dest, p, clamp(row, 9, 10));
-        dest[p] = ',';
-        p += 1;
-        p = appendInt(dest, p, fastAtoi(clamp(row, 32, 36)));
-        dest[p] = ',';
-        p += 1;
-        p = appendField(dest, p, name);
-        dest[p] = '\n';
-        p += 1;
-    } else {
-        const name_length: usize = @intCast(fastAtoi(sliceChars(row, 36, 40)));
-        var name = sliceChars(row, 40, 40 + name_length -| 1);
-        if (name.len > 0 and name[name.len - 1] == ' ') {
-            name = trimRightSpaces(name);
-        }
-        p = appendField(dest, p, sliceChars(row, 0, 8));
-        dest[p] = ',';
-        p += 1;
-        p = appendField(dest, p, sliceChars(row, 9, 10));
-        dest[p] = ',';
-        p += 1;
-        p = appendInt(dest, p, fastAtoi(sliceChars(row, 32, 36)));
-        dest[p] = ',';
-        p += 1;
-        p = appendField(dest, p, name);
-        dest[p] = '\n';
-        p += 1;
+    const v = FieldView.init(row);
+    const name_length: usize = @intCast(v.atoi(36, 40));
+    var name = v.get(40, 40 + name_length -| 1);
+    if (name.len > 0 and name[name.len - 1] == ' ') {
+        name = trimRightSpaces(name);
     }
 
-    return p;
+    var p: usize = 0;
+    p = appendField(dest, p, v.get(0, 8));
+    dest[p] = ',';
+    p += 1;
+    p = appendField(dest, p, v.get(9, 10));
+    dest[p] = ',';
+    p += 1;
+    p = appendInt(dest, p, v.atoi(32, 36));
+    dest[p] = ',';
+    p += 1;
+    p = appendField(dest, p, name);
+    dest[p] = '\n';
+    return p + 1;
 }
 
 fn splitChevron(s: []const u8, dst: [][]const u8) void {
@@ -747,40 +747,27 @@ fn splitChevron(s: []const u8, dst: [][]const u8) void {
     }
 }
 
+/// Fill `out` from character ranges `[start, end)` on `v`.
+fn fillFixed(v: FieldView, ranges: []const [2]usize, out: [][]const u8) void {
+    std.debug.assert(ranges.len == out.len);
+    for (ranges, out) |r, *slot| {
+        slot.* = v.get(r[0], r[1]);
+    }
+}
+
 /// Format a snapshot person record (Prod 195/216) as one CSV line (incl. newline).
 /// `dest` must be at least `max_csv_row_bytes`.
 pub fn formatPersonRow(dest: []u8, row: []const u8) usize {
-    var fixed: [10][]const u8 = undefined;
+    const v = FieldView.init(row);
+    const ranges = [_][2]usize{
+        .{ 0, 8 },   .{ 9, 10 },  .{ 10, 12 }, .{ 12, 24 }, .{ 24, 25 },
+        .{ 32, 40 }, .{ 40, 48 }, .{ 48, 56 }, .{ 56, 64 }, .{ 64, 72 },
+    };
+    var fixed: [ranges.len][]const u8 = undefined;
+    fillFixed(v, &ranges, &fixed);
     var var_parts: [14][]const u8 = undefined;
-
-    if (isAscii(row)) {
-        fixed[0] = clamp(row, 0, 8);
-        fixed[1] = clamp(row, 9, 10);
-        fixed[2] = clamp(row, 10, 12);
-        fixed[3] = clamp(row, 12, 24);
-        fixed[4] = clamp(row, 24, 25);
-        fixed[5] = clamp(row, 32, 40);
-        fixed[6] = clamp(row, 40, 48);
-        fixed[7] = clamp(row, 48, 56);
-        fixed[8] = clamp(row, 56, 64);
-        fixed[9] = clamp(row, 64, 72);
-        const var_len: usize = @intCast(fastAtoi(clamp(row, 72, 76)));
-        splitChevron(clamp(row, 76, 76 + var_len), var_parts[0..]);
-    } else {
-        fixed[0] = sliceChars(row, 0, 8);
-        fixed[1] = sliceChars(row, 9, 10);
-        fixed[2] = sliceChars(row, 10, 12);
-        fixed[3] = sliceChars(row, 12, 24);
-        fixed[4] = sliceChars(row, 24, 25);
-        fixed[5] = sliceChars(row, 32, 40);
-        fixed[6] = sliceChars(row, 40, 48);
-        fixed[7] = sliceChars(row, 48, 56);
-        fixed[8] = sliceChars(row, 56, 64);
-        fixed[9] = sliceChars(row, 64, 72);
-        const var_len: usize = @intCast(fastAtoi(sliceChars(row, 72, 76)));
-        splitChevron(sliceChars(row, 76, 76 + var_len), var_parts[0..]);
-    }
-
+    const var_len: usize = @intCast(v.atoi(72, 76));
+    splitChevron(v.get(76, 76 + var_len), var_parts[0..]);
     return writeCsvFields(dest, &fixed, &var_parts);
 }
 
@@ -789,52 +776,32 @@ pub fn formatPersonRow(dest: []u8, row: []const u8) usize {
 /// which the first 14 named fields are exported (trailing fillers omitted).
 /// `dest` must be at least `max_csv_row_bytes`.
 pub fn formatUpdatePersonRow(dest: []u8, row: []const u8) usize {
-    var fixed: [17][]const u8 = undefined;
+    const v = FieldView.init(row);
+    // 0-based character positions from the Prod 198 person update layout.
+    const ranges = [_][2]usize{
+        .{ 0, 8 }, // Company Number
+        .{ 9, 10 }, // App Date Origin
+        .{ 10, 11 }, // Res Date Origin
+        .{ 11, 12 }, // Correction Indicator
+        .{ 12, 13 }, // Corporate Indicator
+        .{ 15, 17 }, // Old Appointment Type
+        .{ 17, 19 }, // New Appointment Type
+        .{ 19, 31 }, // Old Person Number
+        .{ 31, 43 }, // New Person Number
+        .{ 43, 51 }, // Partial DOB
+        .{ 51, 59 }, // Full DOB
+        .{ 59, 67 }, // Old Person Postcode
+        .{ 67, 75 }, // New Person Postcode
+        .{ 75, 83 }, // Appointment Date
+        .{ 83, 91 }, // Resignation Date
+        .{ 91, 99 }, // Change Date
+        .{ 99, 107 }, // Update Date
+    };
+    var fixed: [ranges.len][]const u8 = undefined;
+    fillFixed(v, &ranges, &fixed);
     var var_parts: [14][]const u8 = undefined;
-
-    if (isAscii(row)) {
-        // 0-based character positions from the Prod 198 person update layout.
-        fixed[0] = clamp(row, 0, 8); // Company Number
-        fixed[1] = clamp(row, 9, 10); // App Date Origin
-        fixed[2] = clamp(row, 10, 11); // Res Date Origin
-        fixed[3] = clamp(row, 11, 12); // Correction Indicator
-        fixed[4] = clamp(row, 12, 13); // Corporate Indicator
-        fixed[5] = clamp(row, 15, 17); // Old Appointment Type
-        fixed[6] = clamp(row, 17, 19); // New Appointment Type
-        fixed[7] = clamp(row, 19, 31); // Old Person Number
-        fixed[8] = clamp(row, 31, 43); // New Person Number
-        fixed[9] = clamp(row, 43, 51); // Partial DOB
-        fixed[10] = clamp(row, 51, 59); // Full DOB
-        fixed[11] = clamp(row, 59, 67); // Old Person Postcode
-        fixed[12] = clamp(row, 67, 75); // New Person Postcode
-        fixed[13] = clamp(row, 75, 83); // Appointment Date
-        fixed[14] = clamp(row, 83, 91); // Resignation Date
-        fixed[15] = clamp(row, 91, 99); // Change Date
-        fixed[16] = clamp(row, 99, 107); // Update Date
-        const var_len: usize = @intCast(fastAtoi(clamp(row, 107, 111)));
-        splitChevron(clamp(row, 111, 111 + var_len), var_parts[0..]);
-    } else {
-        fixed[0] = sliceChars(row, 0, 8);
-        fixed[1] = sliceChars(row, 9, 10);
-        fixed[2] = sliceChars(row, 10, 11);
-        fixed[3] = sliceChars(row, 11, 12);
-        fixed[4] = sliceChars(row, 12, 13);
-        fixed[5] = sliceChars(row, 15, 17);
-        fixed[6] = sliceChars(row, 17, 19);
-        fixed[7] = sliceChars(row, 19, 31);
-        fixed[8] = sliceChars(row, 31, 43);
-        fixed[9] = sliceChars(row, 43, 51);
-        fixed[10] = sliceChars(row, 51, 59);
-        fixed[11] = sliceChars(row, 59, 67);
-        fixed[12] = sliceChars(row, 67, 75);
-        fixed[13] = sliceChars(row, 75, 83);
-        fixed[14] = sliceChars(row, 83, 91);
-        fixed[15] = sliceChars(row, 91, 99);
-        fixed[16] = sliceChars(row, 99, 107);
-        const var_len: usize = @intCast(fastAtoi(sliceChars(row, 107, 111)));
-        splitChevron(sliceChars(row, 111, 111 + var_len), var_parts[0..]);
-    }
-
+    const var_len: usize = @intCast(v.atoi(107, 111));
+    splitChevron(v.get(111, 111 + var_len), var_parts[0..]);
     return writeCsvFields(dest, &fixed, &var_parts);
 }
 
@@ -859,22 +826,13 @@ fn writeCsvFields(dest: []u8, fixed: []const []const u8, var_parts: []const []co
 
 /// Prod 192 type 1 — person. Variable details: 12 chevron fields.
 pub fn formatDisqualPersonRow(dest: []u8, row: []const u8) usize {
-    var fixed: [3][]const u8 = undefined;
+    const v = FieldView.init(row);
+    const ranges = [_][2]usize{ .{ 1, 13 }, .{ 13, 21 }, .{ 21, 29 } };
+    var fixed: [ranges.len][]const u8 = undefined;
+    fillFixed(v, &ranges, &fixed);
     var var_parts: [12][]const u8 = undefined;
-
-    if (isAscii(row)) {
-        fixed[0] = clamp(row, 1, 13); // Person Number
-        fixed[1] = clamp(row, 13, 21); // DOB
-        fixed[2] = clamp(row, 21, 29); // Postcode
-        const var_len: usize = @intCast(fastAtoi(clamp(row, 29, 33)));
-        splitChevron(clamp(row, 33, 33 + var_len), var_parts[0..]);
-    } else {
-        fixed[0] = sliceChars(row, 1, 13);
-        fixed[1] = sliceChars(row, 13, 21);
-        fixed[2] = sliceChars(row, 21, 29);
-        const var_len: usize = @intCast(fastAtoi(sliceChars(row, 29, 33)));
-        splitChevron(sliceChars(row, 33, 33 + var_len), var_parts[0..]);
-    }
+    const var_len: usize = @intCast(v.atoi(29, 33));
+    splitChevron(v.get(33, 33 + var_len), var_parts[0..]);
     return writeCsvFields(dest, &fixed, &var_parts);
 }
 
@@ -883,81 +841,45 @@ pub fn formatDisqualPersonRow(dest: []u8, row: []const u8) usize {
 /// from DISQUALIFICATION-TYPE onward: dtype begins at 0-based 49, company at 117,
 /// court-name length at 277).
 pub fn formatDisqualificationRow(dest: []u8, row: []const u8) usize {
+    const v = FieldView.init(row);
     var fields: [9][]const u8 = undefined;
-
-    if (isAscii(row)) {
-        fields[0] = clamp(row, 1, 13); // Person Number
-        fields[1] = clamp(row, 13, 21); // Start
-        fields[2] = clamp(row, 21, 29); // End
-        fields[3] = clamp(row, 29, 49); // Section
-        fields[4] = clamp(row, 49, 79); // Type
-        fields[5] = clamp(row, 79, 87); // Order/undertaking date
-        fields[6] = clamp(row, 87, 117); // Case number
-        var company = clamp(row, 117, 277);
-        company = trimRightSpaces(company);
-        fields[7] = company;
-        const court_len: usize = @intCast(fastAtoi(clamp(row, 277, 281)));
-        fields[8] = clamp(row, 281, 281 + court_len);
-    } else {
-        fields[0] = sliceChars(row, 1, 13);
-        fields[1] = sliceChars(row, 13, 21);
-        fields[2] = sliceChars(row, 21, 29);
-        fields[3] = sliceChars(row, 29, 49);
-        fields[4] = sliceChars(row, 49, 79);
-        fields[5] = sliceChars(row, 79, 87);
-        fields[6] = sliceChars(row, 87, 117);
-        var company = sliceChars(row, 117, 277);
-        company = trimRightSpaces(company);
-        fields[7] = company;
-        const court_len: usize = @intCast(fastAtoi(sliceChars(row, 277, 281)));
-        fields[8] = sliceChars(row, 281, 281 + court_len);
-    }
-    return writeCsvFields(dest, &fields, &.{} );
+    fields[0] = v.get(1, 13); // Person Number
+    fields[1] = v.get(13, 21); // Start
+    fields[2] = v.get(21, 29); // End
+    fields[3] = v.get(29, 49); // Section
+    fields[4] = v.get(49, 79); // Type
+    fields[5] = v.get(79, 87); // Order/undertaking date
+    fields[6] = v.get(87, 117); // Case number
+    fields[7] = trimRightSpaces(v.get(117, 277));
+    const court_len: usize = @intCast(v.atoi(277, 281));
+    fields[8] = v.get(281, 281 + court_len);
+    return writeCsvFields(dest, &fields, &.{});
 }
 
 /// Prod 192 type 3 — exemption.
 pub fn formatExemptionRow(dest: []u8, row: []const u8) usize {
+    const v = FieldView.init(row);
     var fields: [5][]const u8 = undefined;
-
-    if (isAscii(row)) {
-        fields[0] = clamp(row, 1, 13);
-        fields[1] = clamp(row, 13, 21);
-        fields[2] = clamp(row, 21, 29);
-        fields[3] = clamp(row, 29, 39);
-        const name_len: usize = @intCast(fastAtoi(clamp(row, 39, 43)));
-        fields[4] = clamp(row, 43, 43 + name_len);
-    } else {
-        fields[0] = sliceChars(row, 1, 13);
-        fields[1] = sliceChars(row, 13, 21);
-        fields[2] = sliceChars(row, 21, 29);
-        fields[3] = sliceChars(row, 29, 39);
-        const name_len: usize = @intCast(fastAtoi(sliceChars(row, 39, 43)));
-        fields[4] = sliceChars(row, 43, 43 + name_len);
-    }
+    fields[0] = v.get(1, 13);
+    fields[1] = v.get(13, 21);
+    fields[2] = v.get(21, 29);
+    fields[3] = v.get(29, 39);
+    const name_len: usize = @intCast(v.atoi(39, 43));
+    fields[4] = v.get(43, 43 + name_len);
     return writeCsvFields(dest, &fields, &.{});
 }
 
 /// Prod 192 type 4 — variation.
 pub fn formatVariationRow(dest: []u8, row: []const u8) usize {
+    const v = FieldView.init(row);
     var fields: [6][]const u8 = undefined;
-
-    if (isAscii(row)) {
-        fields[0] = clamp(row, 1, 13);
-        fields[1] = clamp(row, 13, 43);
-        fields[2] = clamp(row, 43, 51);
-        fields[3] = clamp(row, 51, 59);
-        fields[4] = clamp(row, 59, 89);
-        const court_len: usize = @intCast(fastAtoi(clamp(row, 89, 93)));
-        fields[5] = clamp(row, 93, 93 + court_len);
-    } else {
-        fields[0] = sliceChars(row, 1, 13);
-        fields[1] = sliceChars(row, 13, 43);
-        fields[2] = sliceChars(row, 43, 51);
-        fields[3] = sliceChars(row, 51, 59);
-        fields[4] = sliceChars(row, 59, 89);
-        const court_len: usize = @intCast(fastAtoi(sliceChars(row, 89, 93)));
-        fields[5] = sliceChars(row, 93, 93 + court_len);
-    }
+    fields[0] = v.get(1, 13);
+    fields[1] = v.get(13, 43);
+    fields[2] = v.get(43, 51);
+    fields[3] = v.get(51, 59);
+    fields[4] = v.get(59, 89);
+    const court_len: usize = @intCast(v.atoi(89, 93));
+    fields[5] = v.get(93, 93 + court_len);
     return writeCsvFields(dest, &fields, &.{});
 }
 
