@@ -5,7 +5,7 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## [0.0.2] — 2026-08-01
 
 ### Added
 
@@ -40,4 +40,5 @@ Initial production-oriented release of the Zig Companies House fixed-width parse
 - Prefer the native CLI or the streaming C/WASM API for multi-hundred-MB and larger files
 - Product **198** (`DDDDUPDT`) remains a documented future format
 
+[0.0.2]: https://github.com/mrbrianevans/ch-fixedwidth/releases/tag/v0.0.2
 [0.0.1]: https://github.com/mrbrianevans/ch-fixedwidth/releases/tag/v0.0.1
