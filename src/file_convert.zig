@@ -79,15 +79,21 @@ pub fn isRemoteUrl(s: []const u8) bool {
         std.ascii.startsWithIgnoreCase(s, "https://");
 }
 
+/// True when the CLI should read the snapshot from stdin (`-`).
+pub fn isStdinInput(s: []const u8) bool {
+    return std.mem.eql(u8, s, "-");
+}
+
 fn stripExtension(base: []const u8) []const u8 {
     const ext = std.fs.path.extension(base);
     if (ext.len == 0) return base;
     return base[0 .. base.len - ext.len];
 }
 
-/// Basename without extension for local paths or remote URLs.
+/// Basename without extension for local paths, remote URLs, or stdin (`-` → `stdin`).
 /// For URLs, uses the last path segment (query/fragment ignored).
 pub fn baseInputName(input_path: []const u8) []const u8 {
+    if (isStdinInput(input_path)) return "stdin";
     if (isRemoteUrl(input_path)) {
         const uri = std.Uri.parse(input_path) catch {
             return "download";
@@ -620,7 +626,30 @@ pub fn processFromRemoteUrl(
     return processFromReader(io, arena, body_reader, output_folder, base_name);
 }
 
-/// Convert a local path or HTTP(S) URL into CSV files under `output_folder`.
+/// Stream-read a snapshot from process stdin and convert to CSV under `output_folder`.
+/// Same sequential `processFromReader` path as single-stream local and remote URL input.
+/// Output basenames use `stdin` (e.g. `companies_data_stdin.csv`).
+pub fn processFromStdin(
+    io: Io,
+    arena: std.mem.Allocator,
+    output_folder: []const u8,
+) !u8 {
+    Io.Dir.cwd().createDirPath(io, output_folder) catch |err| {
+        std.debug.print("Error creating output directory: {s}\n", .{@errorName(err)});
+        return 1;
+    };
+
+    const base_name = baseInputName("-");
+    std.debug.print("Reading snapshot from stdin\n", .{});
+
+    const read_buf = try arena.alloc(u8, read_buffer_size);
+    // Do not close stdin — process owns the standard handles.
+    const stdin_file = Io.File.stdin();
+    var file_reader = Io.File.Reader.initStreaming(stdin_file, io, read_buf);
+    return processFromReader(io, arena, &file_reader.interface, output_folder, base_name);
+}
+
+/// Convert a local path, HTTP(S) URL, or stdin (`-`) into CSV files under `output_folder`.
 /// Returns a process exit code (0 = success).
 pub fn processInput(
     io: Io,
@@ -628,6 +657,9 @@ pub fn processInput(
     input: []const u8,
     output_folder: []const u8,
 ) !u8 {
+    if (isStdinInput(input)) {
+        return processFromStdin(io, arena, output_folder);
+    }
     if (isRemoteUrl(input)) {
         return processFromRemoteUrl(io, arena, input, output_folder);
     }
