@@ -285,13 +285,13 @@ pub export fn ch_stream_stats(s: ?*const stream_mod.Stream, out: ?*ChStreamStats
     out.?.* = .{
         .file_type = if (stream.file_type) |ft| @intFromEnum(ft) else CH_FILE_UNKNOWN,
         .trailer_count = stream.trailer_count orelse 0,
-        .companies = stream.companies.count,
-        .persons = stream.persons.count,
-        .disqualifications = stream.disqualifications.count,
-        .exemptions = stream.exemptions.count,
-        .variations = stream.variations.count,
-        .forms = stream.forms.count,
-        .practitioners = stream.practitioners.count,
-        .free_text = stream.free_text.count,
+        .companies = stream.countOf(.companies),
+        .persons = stream.countOf(.persons),
+        .disqualifications = stream.countOf(.disqualifications),
+        .exemptions = stream.countOf(.exemptions),
+        .variations = stream.countOf(.variations),
+        .forms = stream.countOf(.forms),
+        .practitioners = stream.countOf(.practitioners),
+        .free_text = stream.countOf(.free_text),
     };
 }

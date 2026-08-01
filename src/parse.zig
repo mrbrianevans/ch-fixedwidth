@@ -72,6 +72,11 @@ pub const OutputKind = enum(i32) {
     pub fn fromInt(v: i32) ?OutputKind {
         return std.meta.intToEnum(OutputKind, v) catch null;
     }
+
+    /// Dense index into `all` / per-kind arrays (0 .. all.len).
+    pub fn index(self: OutputKind) usize {
+        return @intCast(@intFromEnum(self));
+    }
 };
 
 /// Companies House bulk product identified from the header record magic.

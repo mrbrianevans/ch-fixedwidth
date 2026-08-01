@@ -136,8 +136,9 @@ Work roughly top-down. Zig `switch` exhaustiveness will force most call sites to
 ### Phase C — `src/stream.zig` (body parser — required)
 
 1. Branch in `handleLine` (and `finish` trailer checks) for the product.
-2. Use dedicated `KindBuf`s for each output kind (already present for all current kinds; add fields if you added kinds).
+2. Per-kind buffers are `Stream.kinds[OutputKind.index()]` — when adding a new `OutputKind`, extend the enum/`all` array; no new named fields on `Stream`.
 3. On `finish`, flush headers for `file_type.outputKinds()` and validate trailer counts.
+4. Emit rows via `appendFormattedRow` (or the same kindBuf/flush pattern).
 
 ### Phase D — `src/document.zig` (one-shot)
 

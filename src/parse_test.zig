@@ -230,10 +230,10 @@ test "stream matches snapshot on mini disqual with tiny chunks" {
         }
     }
 
-    try std.testing.expectEqual(@as(i32, 3), s.persons.count);
-    try std.testing.expectEqual(@as(i32, 3), s.disqualifications.count);
-    try std.testing.expectEqual(@as(i32, 2), s.exemptions.count);
-    try std.testing.expectEqual(@as(i32, 1), s.variations.count);
+    try std.testing.expectEqual(@as(i32, 3), s.countOf(.persons));
+    try std.testing.expectEqual(@as(i32, 3), s.countOf(.disqualifications));
+    try std.testing.expectEqual(@as(i32, 2), s.countOf(.exemptions));
+    try std.testing.expectEqual(@as(i32, 1), s.countOf(.variations));
     try std.testing.expectEqual(@as(i32, 9), s.trailer_count.?);
     try std.testing.expectEqualStrings(expected_disqual_persons, persons.items);
     try std.testing.expectEqualStrings(expected_disqualifications, disq.items);
@@ -309,10 +309,10 @@ test "stream matches document on mini liquidation with tiny chunks" {
         }
     }
 
-    try std.testing.expectEqual(@as(i32, 8), s.forms.count);
-    try std.testing.expectEqual(@as(i32, 7), s.practitioners.count);
-    try std.testing.expectEqual(@as(i32, 3), s.free_text.count);
-    try std.testing.expectEqual(@as(i32, 0), s.companies.count);
+    try std.testing.expectEqual(@as(i32, 8), s.countOf(.forms));
+    try std.testing.expectEqual(@as(i32, 7), s.countOf(.practitioners));
+    try std.testing.expectEqual(@as(i32, 3), s.countOf(.free_text));
+    try std.testing.expectEqual(@as(i32, 0), s.countOf(.companies));
     try std.testing.expectEqual(@as(i32, 61), s.trailer_count.?);
     try std.testing.expectEqual(@as(i32, 61), s.liq_data_records);
     try std.testing.expectEqualStrings(expected_liq_forms, forms.items);
@@ -377,8 +377,8 @@ test "stream matches snapshot on mini fixture with tiny chunks" {
         }
     }
 
-    try std.testing.expectEqual(@as(i32, 2), s.companies.count);
-    try std.testing.expectEqual(@as(i32, 3), s.persons.count);
+    try std.testing.expectEqual(@as(i32, 2), s.countOf(.companies));
+    try std.testing.expectEqual(@as(i32, 3), s.countOf(.persons));
     try std.testing.expectEqual(@as(i32, 5), s.trailer_count.?);
     try std.testing.expectEqualStrings(expected_companies, companies.items);
     try std.testing.expectEqualStrings(expected_persons, persons.items);
@@ -440,8 +440,8 @@ test "stream matches snapshot on mini update with tiny chunks" {
         }
     }
 
-    try std.testing.expectEqual(@as(i32, 4), s.companies.count);
-    try std.testing.expectEqual(@as(i32, 9), s.persons.count);
+    try std.testing.expectEqual(@as(i32, 4), s.countOf(.companies));
+    try std.testing.expectEqual(@as(i32, 9), s.countOf(.persons));
     try std.testing.expectEqual(@as(i32, 13), s.trailer_count.?);
     try std.testing.expectEqualStrings(expected_update_companies, companies.items);
     try std.testing.expectEqualStrings(expected_update_persons, persons.items);

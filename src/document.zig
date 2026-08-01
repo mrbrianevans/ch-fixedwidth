@@ -96,16 +96,12 @@ fn mapStreamErr(err: stream_mod.ParseError) ParseError {
     };
 }
 
-fn kindIndex(kind: parse.OutputKind) usize {
-    return @intCast(@intFromEnum(kind));
-}
-
 fn csvOf(slices: *const [parse.OutputKind.all.len][]u8, kind: parse.OutputKind) []u8 {
-    return slices[kindIndex(kind)];
+    return slices[kind.index()];
 }
 
 fn countOf(counts: *const [parse.OutputKind.all.len]i32, kind: parse.OutputKind) i32 {
-    return counts[kindIndex(kind)];
+    return counts[kind.index()];
 }
 
 /// Parse a full fixed-width buffer into named CSV outputs.
@@ -133,8 +129,7 @@ pub fn parseDocument(allocator: std.mem.Allocator, input: []const u8) ParseError
     while (s.nextBatch()) |batch| {
         var b = batch;
         defer b.deinit(allocator);
-        const idx: usize = @intCast(@intFromEnum(b.kind));
-        try acc[idx].appendSlice(allocator, b.data);
+        try acc[b.kind.index()].appendSlice(allocator, b.data);
     }
 
     var slices: [parse.OutputKind.all.len][]u8 = undefined;
@@ -152,7 +147,7 @@ pub fn parseDocument(allocator: std.mem.Allocator, input: []const u8) ParseError
 
     var counts: [parse.OutputKind.all.len]i32 = undefined;
     for (parse.OutputKind.all) |kind| {
-        counts[kindIndex(kind)] = s.countOf(kind);
+        counts[kind.index()] = s.countOf(kind);
     }
 
     // Ownership of slices moves into the result; cancel slice errdefer.

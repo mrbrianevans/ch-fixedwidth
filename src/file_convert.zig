@@ -494,7 +494,7 @@ fn drainStreamBatches(
     while (s.nextBatch()) |batch| {
         var b = batch;
         defer b.deinit(s.allocator);
-        const idx: usize = @intCast(@intFromEnum(b.kind));
+        const idx = b.kind.index();
         if (outs[idx] == null) {
             const filename = try std.fs.path.join(arena, &.{
                 output_folder,
