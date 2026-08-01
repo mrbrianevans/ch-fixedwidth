@@ -5,6 +5,14 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.2] — 2026-08-01
+
+### Added
+
+- Native CLI accepts HTTP(S) URLs as the input argument and streams the response body through the same conversion pipeline as a local file (same CSV basenames and contents)
+- Native CLI accepts `-` as the input argument to stream a snapshot from stdin (`companies_data_stdin.csv` / `persons_data_stdin.csv`)
+- Native CLI accepts a **directory** of `.dat` files: each snapshot yields its own company and person CSVs; files are processed one at a time with within-file multi-threading (see [docs/DDR-directory-parallelism.md](docs/DDR-directory-parallelism.md))
+
 ## [0.0.1] — 2026-07-21
 
 Initial production-oriented release of the Zig Companies House fixed-width parser.
@@ -33,4 +41,5 @@ Initial production-oriented release of the Zig Companies House fixed-width parse
 - Prefer the native CLI or the streaming C/WASM API for multi-hundred-MB and larger files
 - Product **198** (`DDDDUPDT`) remains a documented future format
 
+[0.0.2]: https://github.com/mrbrianevans/ch-fixedwidth/releases/tag/v0.0.2
 [0.0.1]: https://github.com/mrbrianevans/ch-fixedwidth/releases/tag/v0.0.1

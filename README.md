@@ -6,8 +6,6 @@ High-performance parser for [Companies House](https://www.gov.uk/government/orga
 
 It is designed for speed and can exceed **5 million records per second** on modern laptops.
 
-**Version:** 0.0.1 — see [CHANGELOG.md](CHANGELOG.md).
-
 ## Source format
 
 Plain-text snapshot files (`DDDDSNAP` header) containing company and officer (person) records in a fixed-width layout, with variable-length name and address fields separated by chevrons (`<`).
@@ -45,28 +43,39 @@ chmod +x parser-linux-x86_64
 ## Run
 
 ```bash
-./parser <input.dat> <output_folder>
+./parser <input.dat|input_dir/|http(s)://.../file.dat|-> <output_folder>
 ```
 
 | Argument | Description |
 |----------|-------------|
-| `input.dat` | Path to a single snapshot file |
+| Input | Path to a single snapshot `.dat`, a **directory** of `.dat` files, an `http://` / `https://` URL of a hosted `.dat`, or `-` to read from **stdin** |
 | `output_folder` | Directory for CSV output (created if missing) |
 
-Example:
+**Local path detection:** a path ending in `.dat` is treated as a file; a path ending in `/` (or with no `.dat` extension) is more likely a directory. The filesystem is always checked to confirm file vs directory before processing.
+
+Examples:
 
 ```bash
 ./parser Prod216_4257_ew_6.dat ./output
+./parser ./snapshots/ ./output
+./parser https://example.com/data/Prod216_4257_ew_6.dat ./output
+./parser - ./output < Prod216_4257_ew_6.dat
 ```
 
-Exit code `0` on success (trailer record count matches rows written); non-zero on header/trailer mismatch or I/O errors.
+Remote URLs and stdin are converted in a **streaming pipeline** (bytes are parsed as they arrive; the full file is not buffered to disk first). Output CSV names and contents match a local-file run with the same basename (stdin uses basename `stdin`).
+
+For a **directory** input, every top-level `.dat` file is converted (non-recursive), **one file at a time**. On multi-core systems each file uses the same within-file parallel split as a single-file run (better for mixed ~200 MB–2 GB snapshots). Each input file still produces its own company and person CSVs in the shared output folder. Design rationale: [docs/DDR-directory-parallelism.md](docs/DDR-directory-parallelism.md).
+
+Exit code `0` on success (trailer record count matches rows written for every file); non-zero on header/trailer mismatch, HTTP errors, missing `.dat` files in a directory, or I/O errors.
 
 ## Output
 
-One input file produces two CSVs in the output directory:
+Each input file produces two CSVs in the output directory:
 
 - `companies_data_<basename>.csv`
 - `persons_data_<basename>.csv`
+
+So five `.dat` files in a directory yield ten CSV files (one company and one person file per input).
 
 **Companies header:**
 
@@ -88,7 +97,7 @@ Requires [Zig](https://ziglang.org/) 0.16+.
 
 ```bash
 zig build -Doptimize=ReleaseFast
-./zig-out/bin/parser <input.dat> <output_folder>
+./zig-out/bin/parser <input.dat|input_dir/|http(s)://.../file.dat|-> <output_folder>
 ```
 
 ### Development

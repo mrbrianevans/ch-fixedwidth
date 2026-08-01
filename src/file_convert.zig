@@ -1,10 +1,13 @@
 //! File-based conversion: streaming I/O, optional multithreading.
 //! Uses pure formatters from `parse.zig` for record → CSV.
+//! Native CLI also supports streaming HTTP(S) download of remote `.dat` URLs,
+//! stdin (`-`), and a directory of local `.dat` files.
 
 const std = @import("std");
 const builtin = @import("builtin");
 const Io = std.Io;
 const Thread = std.Thread;
+const http = std.http;
 const parse = @import("parse.zig");
 
 // Smaller buffers under single-threaded (wasm32-wasi) to stay within linear memory
@@ -71,11 +74,84 @@ fn processHeaderRow(row: []const u8) !void {
     });
 }
 
-fn baseInputName(input_path: []const u8) []const u8 {
-    const base = std.fs.path.basename(input_path);
+/// True when `s` is an HTTP(S) URL (case-insensitive scheme).
+pub fn isRemoteUrl(s: []const u8) bool {
+    return std.ascii.startsWithIgnoreCase(s, "http://") or
+        std.ascii.startsWithIgnoreCase(s, "https://");
+}
+
+/// True when the CLI should read the snapshot from stdin (`-`).
+pub fn isStdinInput(s: []const u8) bool {
+    return std.mem.eql(u8, s, "-");
+}
+
+/// True when `name` has a `.dat` extension (ASCII case-insensitive).
+pub fn hasDatExtension(name: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(std.fs.path.extension(name), ".dat");
+}
+
+/// True when `path` ends with a path separator (`/` or `\`).
+pub fn pathEndsWithSep(path: []const u8) bool {
+    if (path.len == 0) return false;
+    const c = path[path.len - 1];
+    return c == '/' or c == '\\';
+}
+
+/// Heuristic path kind before filesystem confirmation.
+/// `.dat` → file; trailing separator or no `.dat` extension → directory.
+pub fn looksLikeDirectoryInput(path: []const u8) bool {
+    if (path.len == 0) return false;
+    if (pathEndsWithSep(path)) return true;
+    return !hasDatExtension(std.fs.path.basename(path));
+}
+
+pub const LocalInputKind = enum { file, directory };
+
+/// Resolve whether a local path is a single file or a directory.
+/// Filesystem `stat` is authoritative when the path exists; on failure the
+/// path-shape heuristic is used only to shape error messages elsewhere.
+pub fn resolveLocalInputKind(io: Io, path: []const u8) !LocalInputKind {
+    const st = try Io.Dir.cwd().statFile(io, path, .{});
+    return switch (st.kind) {
+        .directory => .directory,
+        else => .file,
+    };
+}
+
+fn stripExtension(base: []const u8) []const u8 {
     const ext = std.fs.path.extension(base);
     if (ext.len == 0) return base;
     return base[0 .. base.len - ext.len];
+}
+
+/// Basename without extension for local paths, remote URLs, or stdin (`-` → `stdin`).
+/// For URLs, uses the last path segment (query/fragment ignored).
+pub fn baseInputName(input_path: []const u8) []const u8 {
+    if (isStdinInput(input_path)) return "stdin";
+    if (isRemoteUrl(input_path)) {
+        const uri = std.Uri.parse(input_path) catch {
+            return "download";
+        };
+        const path_raw = switch (uri.path) {
+            .raw => |p| p,
+            .percent_encoded => |p| p,
+        };
+        // Drop query-like junk if parse left it in path (defensive).
+        const path_no_q = if (std.mem.indexOfScalar(u8, path_raw, '?')) |q|
+            path_raw[0..q]
+        else
+            path_raw;
+        var base = std.fs.path.basename(path_no_q);
+        if (base.len == 0 or std.mem.eql(u8, base, "/") or std.mem.eql(u8, base, "\\")) {
+            return "download";
+        }
+        // Percent-encoded basename is fine for filesystem names on modern OSes;
+        // still strip a trailing slash if present.
+        if (base[base.len - 1] == '/') base = base[0 .. base.len - 1];
+        if (base.len == 0) return "download";
+        return stripExtension(base);
+    }
+    return stripExtension(std.fs.path.basename(input_path));
 }
 
 const WorkerResult = struct {
@@ -368,10 +444,12 @@ fn processParallel(
     return 0;
 }
 
-fn processSingle(
+/// Stream lines from `reader` into company/person CSVs under `output_folder`.
+/// Caller must ensure `output_folder` exists. Same output layout as a local file run.
+pub fn processFromReader(
     io: Io,
     arena: std.mem.Allocator,
-    input_path: []const u8,
+    reader: *Io.Reader,
     output_folder: []const u8,
     base_name: []const u8,
 ) !u8 {
@@ -389,7 +467,6 @@ fn processSingle(
 
     const companies_buf = try arena.alloc(u8, write_buffer_size);
     const persons_buf = try arena.alloc(u8, write_buffer_size);
-    const read_buf = try arena.alloc(u8, read_buffer_size);
 
     var companies_out = CsvOut.create(io, companies_filename, parse.companies_header, companies_buf) catch |err| {
         std.debug.print("Error opening companies file: {s}\n", .{@errorName(err)});
@@ -403,24 +480,13 @@ fn processSingle(
     };
     defer persons_out.close();
 
-    const input_file = Io.Dir.cwd().openFile(io, input_path, .{}) catch |err| {
-        std.debug.print("Error opening input file: {s}\n", .{@errorName(err)});
-        return 1;
-    };
-    defer input_file.close(io);
-
-    // Streaming mode: positional pread is unreliable under some WASI hosts (Bun)
-    // once total bytes read exceed the buffer size.
-    var file_reader = Io.File.Reader.initStreaming(input_file, io, read_buf);
-    const reader = &file_reader.interface;
-
     var companies_processed: i32 = 0;
     var persons_processed: i32 = 0;
     var row_num: usize = 0;
 
     while (true) {
         const maybe_line = reader.takeDelimiter('\n') catch |err| {
-            std.debug.print("Error reading file: {s}\n", .{@errorName(err)});
+            std.debug.print("Error reading input: {s}\n", .{@errorName(err)});
             return 1;
         };
         const row = parse.stripCr(maybe_line orelse break);
@@ -471,19 +537,35 @@ fn processSingle(
     return 1;
 }
 
-/// Convert one snapshot file on disk into CSV files under `output_folder`.
-/// Returns a process exit code (0 = success).
-pub fn processCompanyAppointmentsData(
+fn processSingle(
+    io: Io,
+    arena: std.mem.Allocator,
+    input_path: []const u8,
+    output_folder: []const u8,
+    base_name: []const u8,
+) !u8 {
+    const read_buf = try arena.alloc(u8, read_buffer_size);
+
+    const input_file = Io.Dir.cwd().openFile(io, input_path, .{}) catch |err| {
+        std.debug.print("Error opening input file: {s}\n", .{@errorName(err)});
+        return 1;
+    };
+    defer input_file.close(io);
+
+    // Streaming mode: positional pread is unreliable under some WASI hosts (Bun)
+    // once total bytes read exceed the buffer size.
+    var file_reader = Io.File.Reader.initStreaming(input_file, io, read_buf);
+    return processFromReader(io, arena, &file_reader.interface, output_folder, base_name);
+}
+
+/// Convert one local snapshot file (assumes `output_folder` already exists).
+/// On multi-core native builds, splits the file across worker threads.
+fn processOneLocalFile(
     io: Io,
     arena: std.mem.Allocator,
     input_path: []const u8,
     output_folder: []const u8,
 ) !u8 {
-    Io.Dir.cwd().createDirPath(io, output_folder) catch |err| {
-        std.debug.print("Error creating output directory: {s}\n", .{@errorName(err)});
-        return 1;
-    };
-
     const base_name = baseInputName(input_path);
 
     if (comptime builtin.single_threaded) {
@@ -497,4 +579,432 @@ pub fn processCompanyAppointmentsData(
         return processSingle(io, arena, input_path, output_folder, base_name);
     }
     return processParallel(io, arena, input_path, output_folder, base_name, n_workers);
+}
+
+/// Convert one snapshot file on disk into CSV files under `output_folder`.
+/// Returns a process exit code (0 = success).
+///
+/// Prefer `processInput` when the argument may be a path, directory, URL, or stdin.
+pub fn processCompanyAppointmentsData(
+    io: Io,
+    arena: std.mem.Allocator,
+    input_path: []const u8,
+    output_folder: []const u8,
+) !u8 {
+    Io.Dir.cwd().createDirPath(io, output_folder) catch |err| {
+        std.debug.print("Error creating output directory: {s}\n", .{@errorName(err)});
+        return 1;
+    };
+    return processOneLocalFile(io, arena, input_path, output_folder);
+}
+
+/// List non-directory entries under `dir_path` whose names end with `.dat`
+/// (case-insensitive). Paths are joined with `dir_path` and sorted.
+pub fn listDatFilesInDir(
+    io: Io,
+    arena: std.mem.Allocator,
+    dir_path: []const u8,
+) ![]const []const u8 {
+    var dir = Io.Dir.cwd().openDir(io, dir_path, .{ .iterate = true }) catch |err| {
+        std.debug.print("Error opening input directory '{s}': {s}\n", .{ dir_path, @errorName(err) });
+        return err;
+    };
+    defer dir.close(io);
+
+    var list: std.ArrayList([]const u8) = .empty;
+    var it = dir.iterate();
+    while (it.next(io) catch |err| {
+        std.debug.print("Error reading input directory '{s}': {s}\n", .{ dir_path, @errorName(err) });
+        return err;
+    }) |entry| {
+        if (entry.kind == .directory) continue;
+        if (!hasDatExtension(entry.name)) continue;
+        const full = try std.fs.path.join(arena, &.{ dir_path, entry.name });
+        try list.append(arena, full);
+    }
+
+    std.mem.sort([]const u8, list.items, {}, struct {
+        fn less(_: void, a: []const u8, b: []const u8) bool {
+            return std.mem.order(u8, a, b) == .lt;
+        }
+    }.less);
+
+    return try list.toOwnedSlice(arena);
+}
+
+/// Convert every `.dat` file in `dir_path` into CSVs under `output_folder`.
+/// Each input file yields `companies_data_<basename>.csv` and
+/// `persons_data_<basename>.csv`.
+///
+/// Files are processed **one at a time**. On multi-core native builds each file
+/// uses the same within-file seek split as a single-file CLI argument (option B).
+/// See `docs/DDR-directory-parallelism.md`.
+pub fn processDirectory(
+    io: Io,
+    arena: std.mem.Allocator,
+    dir_path: []const u8,
+    output_folder: []const u8,
+) !u8 {
+    Io.Dir.cwd().createDirPath(io, output_folder) catch |err| {
+        std.debug.print("Error creating output directory: {s}\n", .{@errorName(err)});
+        return 1;
+    };
+
+    const files = listDatFilesInDir(io, arena, dir_path) catch return 1;
+    if (files.len == 0) {
+        std.debug.print("Error: no .dat files found in directory '{s}'\n", .{dir_path});
+        return 1;
+    }
+
+    std.debug.print("Found {d} snapshot file(s) in {s}\n", .{ files.len, dir_path });
+
+    var any_failed = false;
+    for (files) |file_path| {
+        std.debug.print("Processing {s}\n", .{file_path});
+        // One file at a time with full within-file multi-threading (same as lone file input).
+        const code = processOneLocalFile(io, arena, file_path, output_folder) catch |err| {
+            std.debug.print("Fatal error processing {s}: {s}\n", .{ file_path, @errorName(err) });
+            any_failed = true;
+            continue;
+        };
+        if (code != 0) any_failed = true;
+    }
+    return if (any_failed) 1 else 0;
+}
+
+/// Stream-download `url` over HTTP(S) and convert to CSV under `output_folder`.
+/// Uses a single sequential pipeline (no parallel seeks). Output matches a local-file run
+/// with the same basename.
+pub fn processFromRemoteUrl(
+    io: Io,
+    arena: std.mem.Allocator,
+    url: []const u8,
+    output_folder: []const u8,
+) !u8 {
+    Io.Dir.cwd().createDirPath(io, output_folder) catch |err| {
+        std.debug.print("Error creating output directory: {s}\n", .{@errorName(err)});
+        return 1;
+    };
+
+    const uri = std.Uri.parse(url) catch |err| {
+        std.debug.print("Error: invalid URL '{s}': {s}\n", .{ url, @errorName(err) });
+        return 1;
+    };
+
+    const base_name = baseInputName(url);
+    std.debug.print("Downloading and streaming {s}\n", .{url});
+
+    // Client allocations must outlive the request; page allocator is thread-safe.
+    var client: http.Client = .{
+        .allocator = std.heap.page_allocator,
+        .io = io,
+    };
+    defer client.deinit();
+
+    // Prefer identity so large snapshots are not recompressed on the wire when avoidable.
+    var req = client.request(.GET, uri, .{
+        .headers = .{
+            .accept_encoding = .{ .override = "identity" },
+            .user_agent = .{ .override = "ch-fixedwidth-parser" },
+        },
+        .keep_alive = false,
+    }) catch |err| {
+        std.debug.print("Error connecting to URL: {s}\n", .{@errorName(err)});
+        return 1;
+    };
+    defer req.deinit();
+
+    req.sendBodiless() catch |err| {
+        std.debug.print("Error sending HTTP request: {s}\n", .{@errorName(err)});
+        return 1;
+    };
+
+    var redirect_buf: [8 * 1024]u8 = undefined;
+    var response = req.receiveHead(&redirect_buf) catch |err| {
+        std.debug.print("Error receiving HTTP headers: {s}\n", .{@errorName(err)});
+        return 1;
+    };
+
+    if (response.head.status.class() != .success) {
+        std.debug.print(
+            "Error: HTTP {d} {s} for {s}\n",
+            .{
+                @intFromEnum(response.head.status),
+                response.head.status.phrase() orelse "",
+                url,
+            },
+        );
+        return 1;
+    }
+
+    // Transfer buffer doubles as the Io.Reader buffer for line-delimited parsing.
+    const transfer_buf = try arena.alloc(u8, read_buffer_size);
+    const body_reader = response.reader(transfer_buf);
+
+    return processFromReader(io, arena, body_reader, output_folder, base_name);
+}
+
+/// Stream-read a snapshot from process stdin and convert to CSV under `output_folder`.
+/// Same sequential `processFromReader` path as single-stream local and remote URL input.
+/// Output basenames use `stdin` (e.g. `companies_data_stdin.csv`).
+pub fn processFromStdin(
+    io: Io,
+    arena: std.mem.Allocator,
+    output_folder: []const u8,
+) !u8 {
+    Io.Dir.cwd().createDirPath(io, output_folder) catch |err| {
+        std.debug.print("Error creating output directory: {s}\n", .{@errorName(err)});
+        return 1;
+    };
+
+    const base_name = baseInputName("-");
+    std.debug.print("Reading snapshot from stdin\n", .{});
+
+    const read_buf = try arena.alloc(u8, read_buffer_size);
+    // Do not close stdin — process owns the standard handles.
+    const stdin_file = Io.File.stdin();
+    var file_reader = Io.File.Reader.initStreaming(stdin_file, io, read_buf);
+    return processFromReader(io, arena, &file_reader.interface, output_folder, base_name);
+}
+
+/// Convert a local file path, directory of `.dat` files, HTTP(S) URL, or stdin (`-`)
+/// into CSV files under `output_folder`. Returns a process exit code (0 = success).
+pub fn processInput(
+    io: Io,
+    arena: std.mem.Allocator,
+    input: []const u8,
+    output_folder: []const u8,
+) !u8 {
+    if (isStdinInput(input)) {
+        return processFromStdin(io, arena, output_folder);
+    }
+    if (isRemoteUrl(input)) {
+        return processFromRemoteUrl(io, arena, input, output_folder);
+    }
+
+    const kind = resolveLocalInputKind(io, input) catch |err| {
+        // Path missing or unreadable — prefer a clear message; fall back to open-as-file errors.
+        if (looksLikeDirectoryInput(input)) {
+            std.debug.print("Error accessing input directory '{s}': {s}\n", .{ input, @errorName(err) });
+            return 1;
+        }
+        std.debug.print("Error accessing input '{s}': {s}\n", .{ input, @errorName(err) });
+        return 1;
+    };
+
+    return switch (kind) {
+        .directory => processDirectory(io, arena, input, output_folder),
+        .file => processCompanyAppointmentsData(io, arena, input, output_folder),
+    };
+}
+
+test "isRemoteUrl detects http and https" {
+    try std.testing.expect(isRemoteUrl("http://example.com/a.dat"));
+    try std.testing.expect(isRemoteUrl("https://example.com/a.dat"));
+    try std.testing.expect(isRemoteUrl("HTTP://EXAMPLE.COM/a.dat"));
+    try std.testing.expect(isRemoteUrl("HTTPS://EXAMPLE.COM/a.dat"));
+    try std.testing.expect(!isRemoteUrl("file:///tmp/a.dat"));
+    try std.testing.expect(!isRemoteUrl("Prod216_4257_ew_6.dat"));
+    try std.testing.expect(!isRemoteUrl("./http://not-a-url.dat"));
+    try std.testing.expect(!isRemoteUrl(""));
+    try std.testing.expect(!isRemoteUrl("-"));
+}
+
+test "isStdinInput only matches dash" {
+    try std.testing.expect(isStdinInput("-"));
+    try std.testing.expect(!isStdinInput(""));
+    try std.testing.expect(!isStdinInput("--"));
+    try std.testing.expect(!isStdinInput("-.dat"));
+    try std.testing.expect(!isStdinInput("./-"));
+    try std.testing.expect(!isStdinInput("stdin"));
+    try std.testing.expect(!isStdinInput("http://example.com/-"));
+}
+
+test "hasDatExtension and looksLikeDirectoryInput heuristics" {
+    try std.testing.expect(hasDatExtension("file.dat"));
+    try std.testing.expect(hasDatExtension("file.DAT"));
+    try std.testing.expect(hasDatExtension("path/to/file.Dat"));
+    try std.testing.expect(!hasDatExtension("file.csv"));
+    try std.testing.expect(!hasDatExtension("file.dat.bak"));
+    try std.testing.expect(!hasDatExtension("dat"));
+    try std.testing.expect(!hasDatExtension(""));
+
+    try std.testing.expect(pathEndsWithSep("dir/"));
+    try std.testing.expect(pathEndsWithSep("dir\\"));
+    try std.testing.expect(!pathEndsWithSep("dir"));
+    try std.testing.expect(!pathEndsWithSep("file.dat"));
+
+    try std.testing.expect(!looksLikeDirectoryInput("file.dat"));
+    try std.testing.expect(!looksLikeDirectoryInput("path/to/file.DAT"));
+    try std.testing.expect(looksLikeDirectoryInput("snapshots/"));
+    try std.testing.expect(looksLikeDirectoryInput("snapshots\\"));
+    try std.testing.expect(looksLikeDirectoryInput("snapshots"));
+    try std.testing.expect(looksLikeDirectoryInput("path/to/dir"));
+}
+
+test "baseInputName for local paths, URLs, and stdin" {
+    try std.testing.expectEqualStrings("mini_snapshot", baseInputName("src/testdata/mini_snapshot.dat"));
+    try std.testing.expectEqualStrings("mini_snapshot", baseInputName("mini_snapshot.dat"));
+    try std.testing.expectEqualStrings("mini_snapshot", baseInputName("http://localhost:8765/mini_snapshot.dat"));
+    try std.testing.expectEqualStrings("mini_snapshot", baseInputName("https://cdn.example.com/path/to/mini_snapshot.dat?token=abc"));
+    try std.testing.expectEqualStrings("download", baseInputName("http://localhost:8765/"));
+    try std.testing.expectEqualStrings("stdin", baseInputName("-"));
+}
+
+const mini_snapshot_fixture = @embedFile("testdata/mini_snapshot.dat");
+const expected_companies_fixture = @embedFile("testdata/expected_companies.csv");
+const expected_persons_fixture = @embedFile("testdata/expected_persons.csv");
+
+fn readFileAlloc(io: Io, allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    const file = try Io.Dir.cwd().openFile(io, path, .{});
+    defer file.close(io);
+    const size = (try file.stat(io)).size;
+    const buf = try allocator.alloc(u8, @intCast(size));
+    errdefer allocator.free(buf);
+    var read_buf: [64 * 1024]u8 = undefined;
+    var file_reader = Io.File.Reader.initStreaming(file, io, &read_buf);
+    try file_reader.interface.readSliceAll(buf);
+    return buf;
+}
+
+test "processFromReader streams fixture like stdin and remote" {
+    // Same sequential pipeline used by processFromStdin / processFromRemoteUrl /
+    // processSingle: an Io.Reader of snapshot bytes → CSV under output_folder.
+    const io = std.testing.io;
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const out_rel = try std.fmt.allocPrint(arena, ".zig-cache/tmp/{s}/out", .{tmp.sub_path});
+    try Io.Dir.cwd().createDirPath(io, out_rel);
+
+    var reader = Io.Reader.fixed(mini_snapshot_fixture);
+    const code = try processFromReader(io, arena, &reader, out_rel, "stdin");
+    try std.testing.expectEqual(@as(u8, 0), code);
+
+    const companies_path = try std.fmt.allocPrint(arena, "{s}/companies_data_stdin.csv", .{out_rel});
+    const persons_path = try std.fmt.allocPrint(arena, "{s}/persons_data_stdin.csv", .{out_rel});
+
+    const companies = try readFileAlloc(io, arena, companies_path);
+    const persons = try readFileAlloc(io, arena, persons_path);
+    try std.testing.expectEqualStrings(expected_companies_fixture, companies);
+    try std.testing.expectEqualStrings(expected_persons_fixture, persons);
+}
+
+test "resolveLocalInputKind distinguishes file and directory" {
+    const io = std.testing.io;
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(io, .{ .sub_path = "one.dat", .data = mini_snapshot_fixture });
+    const base = try std.fmt.allocPrint(arena, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    const file_path = try std.fmt.allocPrint(arena, "{s}/one.dat", .{base});
+    const dir_path = base;
+    const dir_with_sep = try std.fmt.allocPrint(arena, "{s}/", .{base});
+
+    try std.testing.expectEqual(LocalInputKind.file, try resolveLocalInputKind(io, file_path));
+    try std.testing.expectEqual(LocalInputKind.directory, try resolveLocalInputKind(io, dir_path));
+    try std.testing.expectEqual(LocalInputKind.directory, try resolveLocalInputKind(io, dir_with_sep));
+}
+
+test "listDatFilesInDir finds only .dat files sorted" {
+    const io = std.testing.io;
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(io, .{ .sub_path = "b_second.dat", .data = "b" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "a_first.dat", .data = "a" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "skip.csv", .data = "x" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "readme.txt", .data = "y" });
+
+    const dir_path = try std.fmt.allocPrint(arena, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    const files = try listDatFilesInDir(io, arena, dir_path);
+    try std.testing.expectEqual(@as(usize, 2), files.len);
+    try std.testing.expect(std.mem.endsWith(u8, files[0], "a_first.dat"));
+    try std.testing.expect(std.mem.endsWith(u8, files[1], "b_second.dat"));
+}
+
+test "processDirectory converts each .dat to company and person CSVs" {
+    const io = std.testing.io;
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(io, .{ .sub_path = "snap_a.dat", .data = mini_snapshot_fixture });
+    try tmp.dir.writeFile(io, .{ .sub_path = "snap_b.dat", .data = mini_snapshot_fixture });
+    try tmp.dir.writeFile(io, .{ .sub_path = "notes.txt", .data = "ignore me" });
+
+    const base = try std.fmt.allocPrint(arena, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    const in_dir = base;
+    const out_dir = try std.fmt.allocPrint(arena, "{s}/out", .{base});
+
+    const code = try processDirectory(io, arena, in_dir, out_dir);
+    try std.testing.expectEqual(@as(u8, 0), code);
+
+    const names = [_][]const u8{ "snap_a", "snap_b" };
+    for (names) |name| {
+        const companies_path = try std.fmt.allocPrint(arena, "{s}/companies_data_{s}.csv", .{ out_dir, name });
+        const persons_path = try std.fmt.allocPrint(arena, "{s}/persons_data_{s}.csv", .{ out_dir, name });
+        const companies = try readFileAlloc(io, arena, companies_path);
+        const persons = try readFileAlloc(io, arena, persons_path);
+        try std.testing.expectEqualStrings(expected_companies_fixture, companies);
+        try std.testing.expectEqualStrings(expected_persons_fixture, persons);
+    }
+}
+
+test "processInput routes directory path to multi-file conversion" {
+    const io = std.testing.io;
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(io, .{ .sub_path = "batch1.dat", .data = mini_snapshot_fixture });
+    try tmp.dir.writeFile(io, .{ .sub_path = "batch2.dat", .data = mini_snapshot_fixture });
+
+    const base = try std.fmt.allocPrint(arena, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    const out_dir = try std.fmt.allocPrint(arena, "{s}/csv", .{base});
+
+    // Trailing separator is accepted and still resolves as a directory.
+    const in_dir = try std.fmt.allocPrint(arena, "{s}/", .{base});
+    const code = try processInput(io, arena, in_dir, out_dir);
+    try std.testing.expectEqual(@as(u8, 0), code);
+
+    const c1 = try readFileAlloc(io, arena, try std.fmt.allocPrint(arena, "{s}/companies_data_batch1.csv", .{out_dir}));
+    const c2 = try readFileAlloc(io, arena, try std.fmt.allocPrint(arena, "{s}/companies_data_batch2.csv", .{out_dir}));
+    try std.testing.expectEqualStrings(expected_companies_fixture, c1);
+    try std.testing.expectEqualStrings(expected_companies_fixture, c2);
+}
+
+test "processDirectory returns error when no .dat files present" {
+    const io = std.testing.io;
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(io, .{ .sub_path = "only.txt", .data = "nope" });
+    const base = try std.fmt.allocPrint(arena, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    const out_dir = try std.fmt.allocPrint(arena, "{s}/out", .{base});
+
+    const code = try processDirectory(io, arena, base, out_dir);
+    try std.testing.expectEqual(@as(u8, 1), code);
 }
