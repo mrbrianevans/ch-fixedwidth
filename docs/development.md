@@ -22,18 +22,21 @@ zig fmt --check .
 
 CLI binary: `./zig-out/bin/parser` (or `parser.exe` on Windows).
 
-### Remote URL input (CLI only)
+### Remote URL and stdin input (CLI only)
 
-The native CLI accepts either a local path or an `http://` / `https://` URL. Remote inputs use sequential streaming (HTTP body → line parse → CSV) via `processFromRemoteUrl`; they do not use the multithreaded seek path. WASM and the C ABI are unchanged (no network I/O).
+The native CLI accepts a local path, an `http://` / `https://` URL, or `-` (stdin). Remote and stdin inputs use sequential streaming via `processFromReader` (HTTP body or stdin → line parse → CSV); they do not use the multithreaded seek path. WASM and the C ABI are unchanged (no network I/O).
 
-For a local smoke test, serve fixtures and point the CLI at localhost:
+Smoke tests:
 
 ```bash
-# from repo root (Bun)
+# Remote URL — serve fixtures and point the CLI at localhost (Bun)
 bun scripts/serve-testdata.ts
 # other terminal
 zig build -Doptimize=ReleaseFast
 ./zig-out/bin/parser http://127.0.0.1:8765/mini_snapshot.dat ./output/remote_test
+
+# Stdin stream
+./zig-out/bin/parser - ./output/stdin_test < src/testdata/mini_snapshot.dat
 ```
 
 ## Library API
@@ -46,7 +49,7 @@ Parsing is separate from CLI I/O so the same logic can be embedded:
 | C ABI | `include/ch_fixedwidth.h`, `libch_fixedwidth` | `ch_parse_snapshot` (one-shot) + `ch_stream_*` (batched streaming) |
 | WASM | `zig build wasm` → `ch_fixedwidth.wasm` | Same C-style exports, no filesystem I/O |
 | TypeScript host | [`wasm-ts/`](../wasm-ts/) | Publish-ready package: `ChFixedWidthStream` + `ChFixedWidthParser`; Bun CLI under `wasm-ts/local/` |
-| CLI | `src/main.zig` + `src/file_convert.zig` | Multithreaded local files; streaming HTTP(S) URL input (single pipeline) |
+| CLI | `src/main.zig` + `src/file_convert.zig` | Multithreaded local files; streaming HTTP(S) URL or stdin (`-`) (single pipeline) |
 
 ### Large files (WASM / C)
 
