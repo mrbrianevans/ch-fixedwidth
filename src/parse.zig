@@ -7,9 +7,9 @@
 //!
 //! File products share an 8-byte header identifier at the start of the first
 //! line. Callers identify the product from that magic, then branch to the
-//! matching body parser. Only officers snapshot (`DDDDSNAP`) is implemented
-//! today; update (`DDDDUPDT`) and disqualifications (`DISQUALS`) are recognised
-//! so they can be wired later.
+//! matching body parser. Implemented today: officers snapshot (`DDDDSNAP`) and
+//! officers update (`DDDDUPDT`). Disqualifications (`DISQUALS`) is recognised
+//! for future work.
 
 const std = @import("std");
 const unicode = std.unicode;
@@ -21,7 +21,7 @@ pub const header_identifier_len: usize = 8;
 pub const FileType = enum {
     /// Products 195 / 216 — company appointments snapshot.
     officers_snapshot,
-    /// Product 198 — company appointments update (not implemented yet).
+    /// Product 198 — company appointments update.
     officers_update,
     /// Product 192 — disqualified persons snapshot (not implemented yet).
     disqualifications,
@@ -46,7 +46,16 @@ pub const FileType = enum {
 
     /// True when a full body parser exists for this product.
     pub fn isImplemented(self: FileType) bool {
-        return self == .officers_snapshot;
+        return self == .officers_snapshot or self == .officers_update;
+    }
+
+    /// CSV header line for the persons (officer) output of this product.
+    pub fn personsCsvHeader(self: FileType) []const u8 {
+        return switch (self) {
+            .officers_snapshot => persons_header,
+            .officers_update => update_persons_header,
+            .disqualifications => persons_header, // unused until implemented
+        };
     }
 };
 
@@ -67,6 +76,9 @@ pub const companies_header =
     "Company Number,Company Status,Number of Officers,Company Name\n";
 pub const persons_header =
     "Company Number,App Date Origin,Appointment Type,Person number,Corporate indicator,Appointment Date,Resignation Date,Person Postcode,Partial Date of Birth,Full Date of Birth,Title,Forenames,Surname,Honours,Care_of,PO_box,Address line 1,Address line 2,Post_town,County,Country,Occupation,Nationality,Resident Country\n";
+/// Prod 198 update person row CSV header (fixed fields + 14 named chevron fields).
+pub const update_persons_header =
+    "Company Number,App Date Origin,Res Date Origin,Correction Indicator,Corporate Indicator,Old Appointment Type,New Appointment Type,Old Person Number,New Person Number,Partial Date of Birth,Full Date of Birth,Old Person Postcode,New Person Postcode,Appointment Date,Resignation Date,Change Date,Update Date,New Title,New Forenames,New Surname,New Honours,Care Of,PO Box,New Address Line 1,New Address Line 2,New Post Town,New County,New Country,Occupation,New Nationality,New Residential Country\n";
 
 pub const LineKind = enum {
     header,
@@ -309,7 +321,7 @@ pub fn formatCompanyRow(dest: []u8, row: []const u8) usize {
     return p;
 }
 
-fn splitChevron(s: []const u8, dst: *[14][]const u8) void {
+fn splitChevron(s: []const u8, dst: [][]const u8) void {
     for (dst) |*d| d.* = s[0..0];
     if (s.len == 0) return;
     var start: usize = 0;
@@ -327,7 +339,7 @@ fn splitChevron(s: []const u8, dst: *[14][]const u8) void {
     }
 }
 
-/// Format a person record as one CSV line (including trailing newline).
+/// Format a snapshot person record (Prod 195/216) as one CSV line (incl. newline).
 /// `dest` must be at least `max_csv_row_bytes`.
 pub fn formatPersonRow(dest: []u8, row: []const u8) usize {
     var fixed: [10][]const u8 = undefined;
@@ -345,7 +357,7 @@ pub fn formatPersonRow(dest: []u8, row: []const u8) usize {
         fixed[8] = clamp(row, 56, 64);
         fixed[9] = clamp(row, 64, 72);
         const var_len: usize = @intCast(fastAtoi(clamp(row, 72, 76)));
-        splitChevron(clamp(row, 76, 76 + var_len), &var_parts);
+        splitChevron(clamp(row, 76, 76 + var_len), var_parts[0..]);
     } else {
         fixed[0] = sliceChars(row, 0, 8);
         fixed[1] = sliceChars(row, 9, 10);
@@ -358,11 +370,68 @@ pub fn formatPersonRow(dest: []u8, row: []const u8) usize {
         fixed[8] = sliceChars(row, 56, 64);
         fixed[9] = sliceChars(row, 64, 72);
         const var_len: usize = @intCast(fastAtoi(sliceChars(row, 72, 76)));
-        splitChevron(sliceChars(row, 76, 76 + var_len), &var_parts);
+        splitChevron(sliceChars(row, 76, 76 + var_len), var_parts[0..]);
     }
 
-    var p: usize = 0;
+    return writeCsvFields(dest, &fixed, &var_parts);
+}
 
+/// Format an update person record (Prod 198 / `DDDDUPDT`) as one CSV line.
+/// Fixed layout per docs/Prod198_Update.md; variable data has 27 chevrons of
+/// which the first 14 named fields are exported (trailing fillers omitted).
+/// `dest` must be at least `max_csv_row_bytes`.
+pub fn formatUpdatePersonRow(dest: []u8, row: []const u8) usize {
+    var fixed: [17][]const u8 = undefined;
+    var var_parts: [14][]const u8 = undefined;
+
+    if (isAscii(row)) {
+        // 0-based character positions from the Prod 198 person update layout.
+        fixed[0] = clamp(row, 0, 8); // Company Number
+        fixed[1] = clamp(row, 9, 10); // App Date Origin
+        fixed[2] = clamp(row, 10, 11); // Res Date Origin
+        fixed[3] = clamp(row, 11, 12); // Correction Indicator
+        fixed[4] = clamp(row, 12, 13); // Corporate Indicator
+        fixed[5] = clamp(row, 15, 17); // Old Appointment Type
+        fixed[6] = clamp(row, 17, 19); // New Appointment Type
+        fixed[7] = clamp(row, 19, 31); // Old Person Number
+        fixed[8] = clamp(row, 31, 43); // New Person Number
+        fixed[9] = clamp(row, 43, 51); // Partial DOB
+        fixed[10] = clamp(row, 51, 59); // Full DOB
+        fixed[11] = clamp(row, 59, 67); // Old Person Postcode
+        fixed[12] = clamp(row, 67, 75); // New Person Postcode
+        fixed[13] = clamp(row, 75, 83); // Appointment Date
+        fixed[14] = clamp(row, 83, 91); // Resignation Date
+        fixed[15] = clamp(row, 91, 99); // Change Date
+        fixed[16] = clamp(row, 99, 107); // Update Date
+        const var_len: usize = @intCast(fastAtoi(clamp(row, 107, 111)));
+        splitChevron(clamp(row, 111, 111 + var_len), var_parts[0..]);
+    } else {
+        fixed[0] = sliceChars(row, 0, 8);
+        fixed[1] = sliceChars(row, 9, 10);
+        fixed[2] = sliceChars(row, 10, 11);
+        fixed[3] = sliceChars(row, 11, 12);
+        fixed[4] = sliceChars(row, 12, 13);
+        fixed[5] = sliceChars(row, 15, 17);
+        fixed[6] = sliceChars(row, 17, 19);
+        fixed[7] = sliceChars(row, 19, 31);
+        fixed[8] = sliceChars(row, 31, 43);
+        fixed[9] = sliceChars(row, 43, 51);
+        fixed[10] = sliceChars(row, 51, 59);
+        fixed[11] = sliceChars(row, 59, 67);
+        fixed[12] = sliceChars(row, 67, 75);
+        fixed[13] = sliceChars(row, 75, 83);
+        fixed[14] = sliceChars(row, 83, 91);
+        fixed[15] = sliceChars(row, 91, 99);
+        fixed[16] = sliceChars(row, 99, 107);
+        const var_len: usize = @intCast(fastAtoi(sliceChars(row, 107, 111)));
+        splitChevron(sliceChars(row, 111, 111 + var_len), var_parts[0..]);
+    }
+
+    return writeCsvFields(dest, &fixed, &var_parts);
+}
+
+fn writeCsvFields(dest: []u8, fixed: []const []const u8, var_parts: []const []const u8) usize {
+    var p: usize = 0;
     for (fixed, 0..) |f, i| {
         if (i > 0) {
             dest[p] = ',';
@@ -377,7 +446,6 @@ pub fn formatPersonRow(dest: []u8, row: []const u8) usize {
     }
     dest[p] = '\n';
     p += 1;
-
     return p;
 }
 

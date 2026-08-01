@@ -84,7 +84,7 @@ parser from that magic (`parse.identifyFileType` → product-specific path).
 | Product | Header | Status |
 |---------|--------|--------|
 | 195 / 216 (appointments snapshot) | `DDDDSNAP` | Implemented |
-| 198 (appointments update) | `DDDDUPDT` | Recognised; body parser not implemented — [Prod198_Update.md](Prod198_Update.md) |
+| 198 (appointments update) | `DDDDUPDT` | Implemented — [Prod198_Update.md](Prod198_Update.md) |
 | 192 (disqualified persons) | `DISQUALS` | Recognised; body parser not implemented — [Prod192_Disqualifications.md](Prod192_Disqualifications.md) |
 
 Unknown magics return `UnsupportedFileType` / `CH_ERR_UNSUPPORTED_HEADER`.

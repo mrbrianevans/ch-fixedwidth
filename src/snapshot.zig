@@ -2,8 +2,7 @@
 //! Used by the C ABI, WASM exports, and unit tests.
 //!
 //! Entry point `parseSnapshot` identifies the product from the header magic
-//! and dispatches to the matching body parser. Only officers snapshot
-//! (`DDDDSNAP`) is implemented today.
+//! and dispatches to the matching body parser.
 
 const std = @import("std");
 const parse = @import("parse.zig");
@@ -35,25 +34,32 @@ pub const ParseResult = struct {
 ///
 /// Dispatches on the 8-byte header identifier:
 /// - `DDDDSNAP` → officers snapshot (implemented)
-/// - `DDDDUPDT` / `DISQUALS` → `error.NotImplemented`
+/// - `DDDDUPDT` → officers update (implemented)
+/// - `DISQUALS` → `error.NotImplemented`
 /// - anything else → `error.UnsupportedFileType`
 pub fn parseSnapshot(allocator: std.mem.Allocator, input: []const u8) ParseError!ParseResult {
     const file_type = try parse.identifyFileTypeFromInput(input);
     return switch (file_type) {
-        .officers_snapshot => parseOfficersSnapshot(allocator, input),
-        .officers_update, .disqualifications => error.NotImplemented,
+        .officers_snapshot => parseOfficersAppointments(allocator, input, .officers_snapshot),
+        .officers_update => parseOfficersAppointments(allocator, input, .officers_update),
+        .disqualifications => error.NotImplemented,
     };
 }
 
-/// Officers appointments snapshot (Prod 195/216): companies + persons CSV.
-fn parseOfficersSnapshot(allocator: std.mem.Allocator, input: []const u8) ParseError!ParseResult {
+/// Shared company + person CSV path for Prod 195/216 snapshot and Prod 198 update.
+/// Company records share a layout; person fixed fields differ by product.
+fn parseOfficersAppointments(
+    allocator: std.mem.Allocator,
+    input: []const u8,
+    file_type: parse.FileType,
+) ParseError!ParseResult {
     var companies = std.ArrayList(u8).empty;
     errdefer companies.deinit(allocator);
     var persons = std.ArrayList(u8).empty;
     errdefer persons.deinit(allocator);
 
     try companies.appendSlice(allocator, parse.companies_header);
-    try persons.appendSlice(allocator, parse.persons_header);
+    try persons.appendSlice(allocator, file_type.personsCsvHeader());
 
     var companies_count: i32 = 0;
     var persons_count: i32 = 0;
@@ -72,7 +78,7 @@ fn parseOfficersSnapshot(allocator: std.mem.Allocator, input: []const u8) ParseE
         switch (parse.classifyLine(row)) {
             .header => {
                 const info = parse.parseHeader(row) catch return error.UnsupportedFileType;
-                if (info.file_type != .officers_snapshot) return error.UnsupportedFileType;
+                if (info.file_type != file_type) return error.UnsupportedFileType;
             },
             .trailer => {
                 trailer_count = parse.parseTrailerCount(row);
@@ -84,7 +90,11 @@ fn parseOfficersSnapshot(allocator: std.mem.Allocator, input: []const u8) ParseE
                 companies_count += 1;
             },
             .person => {
-                const n = parse.formatPersonRow(&row_buf, row);
+                const n = switch (file_type) {
+                    .officers_snapshot => parse.formatPersonRow(&row_buf, row),
+                    .officers_update => parse.formatUpdatePersonRow(&row_buf, row),
+                    .disqualifications => unreachable,
+                };
                 try persons.appendSlice(allocator, row_buf[0..n]);
                 persons_count += 1;
             },

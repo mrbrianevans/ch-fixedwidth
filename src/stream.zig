@@ -210,19 +210,18 @@ pub const Stream = struct {
         const row = parse.stripCr(line_raw);
         if (row.len == 0) return;
 
-        // Body parsing is product-specific; only officers snapshot is wired.
         const file_type = self.file_type orelse return error.UnsupportedFileType;
         switch (file_type) {
-            .officers_snapshot => try self.handleOfficersSnapshotLine(row),
-            .officers_update, .disqualifications => return error.NotImplemented,
+            .officers_snapshot, .officers_update => try self.handleOfficersLine(row, file_type),
+            .disqualifications => return error.NotImplemented,
         }
     }
 
-    fn handleOfficersSnapshotLine(self: *Stream, row: []const u8) ParseError!void {
+    fn handleOfficersLine(self: *Stream, row: []const u8, file_type: parse.FileType) ParseError!void {
         switch (parse.classifyLine(row)) {
             .header => {
                 const info = parse.parseHeader(row) catch return error.UnsupportedFileType;
-                if (info.file_type != .officers_snapshot) return error.UnsupportedFileType;
+                if (info.file_type != file_type) return error.UnsupportedFileType;
                 self.header_seen = true;
                 try self.ensureCompaniesHeader();
                 try self.ensurePersonsHeader();
@@ -241,7 +240,11 @@ pub const Stream = struct {
             },
             .person => {
                 try self.ensurePersonsHeader();
-                const n = parse.formatPersonRow(&self.row_buf, row);
+                const n = switch (file_type) {
+                    .officers_snapshot => parse.formatPersonRow(&self.row_buf, row),
+                    .officers_update => parse.formatUpdatePersonRow(&self.row_buf, row),
+                    .disqualifications => unreachable,
+                };
                 try self.persons_buf.appendSlice(self.allocator, self.row_buf[0..n]);
                 self.persons_rows += 1;
                 self.persons += 1;
@@ -259,7 +262,8 @@ pub const Stream = struct {
 
     fn ensurePersonsHeader(self: *Stream) ParseError!void {
         if (self.persons_header_written) return;
-        try self.persons_buf.appendSlice(self.allocator, parse.persons_header);
+        const hdr = if (self.file_type) |ft| ft.personsCsvHeader() else parse.persons_header;
+        try self.persons_buf.appendSlice(self.allocator, hdr);
         self.persons_header_written = true;
     }
 

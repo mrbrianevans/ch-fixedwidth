@@ -10,6 +10,9 @@ const c_api = @import("c_api.zig");
 const mini_snapshot = @embedFile("testdata/mini_snapshot.dat");
 const expected_companies = @embedFile("testdata/expected_companies.csv");
 const expected_persons = @embedFile("testdata/expected_persons.csv");
+const mini_update = @embedFile("testdata/mini_update.dat");
+const expected_update_companies = @embedFile("testdata/expected_update_companies.csv");
+const expected_update_persons = @embedFile("testdata/expected_update_persons.csv");
 
 test "classifyLine header company person trailer" {
     try std.testing.expectEqual(parse.LineKind.header, parse.classifyLine("DDDDSNAP425720260706"));
@@ -29,7 +32,7 @@ test "identifyFileType maps known header magics" {
     try std.testing.expectError(error.UnsupportedFileType, parse.identifyFileType("SHORT"));
     try std.testing.expectEqual(parse.FileType.officers_snapshot, try parse.identifyFileTypeFromInput("DDDDSNAP425720260706\n"));
     try std.testing.expect(parse.FileType.officers_snapshot.isImplemented());
-    try std.testing.expect(!parse.FileType.officers_update.isImplemented());
+    try std.testing.expect(parse.FileType.officers_update.isImplemented());
     try std.testing.expect(!parse.FileType.disqualifications.isImplemented());
 }
 
@@ -140,15 +143,33 @@ test "parseSnapshot rejects non-snapshot prefix" {
     try std.testing.expectError(error.UnsupportedFileType, snapshot.parseSnapshot(std.testing.allocator, "random csv,data\n"));
 }
 
-test "parseSnapshot dispatches known-but-unimplemented headers" {
-    const update =
-        \\DDDDUPDT172420161018
-        \\019742101                       00070030WEST MIDLANDS ARTS TRUST(THE)<
-        \\9999999900000001
-        \\
-    ;
-    try std.testing.expectError(error.NotImplemented, snapshot.parseSnapshot(std.testing.allocator, update));
+test "parseSnapshot mini update fixture matches expected CSV" {
+    const allocator = std.testing.allocator;
+    var result = try snapshot.parseSnapshot(allocator, mini_update);
+    defer result.deinit(allocator);
 
+    try std.testing.expectEqual(@as(i32, 4), result.companies);
+    try std.testing.expectEqual(@as(i32, 9), result.persons);
+    try std.testing.expectEqual(@as(i32, 13), result.trailer_count);
+
+    try std.testing.expectEqualStrings(expected_update_companies, result.companies_csv);
+    try std.testing.expectEqualStrings(expected_update_persons, result.persons_csv);
+}
+
+test "formatUpdatePersonRow extracts fixed and chevron fields" {
+    const row = "0426797621     0101186084280001186084280003196906                  TR27 5ET20100329        20260724202607240146MR<WARREN ALAN<DIXON<<<<C/O CALLOOSE CARAVAN PARK 16 CALLOOSE LANE W<LEEDSTOWN<HAYLE<CORNWALL<ENGLAND<MANAGER<BRITISH<UNITED KINGDOM<<<<<<<<<<<<<<";
+    var dest: [parse.max_csv_row_bytes]u8 = undefined;
+    const n = parse.formatUpdatePersonRow(&dest, row);
+    const csv = dest[0..n];
+    try std.testing.expect(std.mem.startsWith(u8, csv, "04267976,1, , , ,01,01,186084280001,186084280003,196906  ,"));
+    try std.testing.expect(std.mem.indexOf(u8, csv, "TR27 5ET") != null);
+    try std.testing.expect(std.mem.indexOf(u8, csv, "WARREN ALAN") != null);
+    try std.testing.expect(std.mem.indexOf(u8, csv, "DIXON") != null);
+    try std.testing.expect(std.mem.indexOf(u8, csv, "MANAGER") != null);
+    try std.testing.expect(csv[csv.len - 1] == '\n');
+}
+
+test "parseSnapshot rejects known-but-unimplemented DISQUALS header" {
     const disq =
         \\DISQUALS000120240501
         \\1...
@@ -228,15 +249,48 @@ test "stream rejects wrong prefix across tiny chunks" {
     try std.testing.expectError(error.UnsupportedFileType, s.feed("SNAP!!!!"));
 }
 
-test "stream rejects known-but-unimplemented product headers" {
+test "stream accepts DDDDUPDT magic and rejects DISQUALS" {
     const allocator = std.testing.allocator;
     var s = stream_mod.Stream.init(allocator, .{});
     defer s.deinit();
-    try std.testing.expectError(error.NotImplemented, s.feed("DDDDUPDT1724"));
+    // Magic only — full document still needs trailer for finish().
+    try s.feed("DDDDUPDT1724");
+    try std.testing.expectEqual(parse.FileType.officers_update, s.file_type.?);
 
     var s2 = stream_mod.Stream.init(allocator, .{});
     defer s2.deinit();
     try std.testing.expectError(error.NotImplemented, s2.feed("DISQUALS0001"));
+}
+
+test "stream matches snapshot on mini update with tiny chunks" {
+    const allocator = std.testing.allocator;
+    var s = stream_mod.Stream.init(allocator, .{ .batch_rows = 2, .batch_bytes = 64 });
+    defer s.deinit();
+
+    for (mini_update) |byte| {
+        try s.feed(&.{byte});
+    }
+    try s.finish();
+
+    var companies = std.ArrayList(u8).empty;
+    defer companies.deinit(allocator);
+    var persons = std.ArrayList(u8).empty;
+    defer persons.deinit(allocator);
+
+    while (s.nextBatch()) |batch| {
+        var b = batch;
+        defer b.deinit(allocator);
+        switch (b.kind) {
+            .companies => try companies.appendSlice(allocator, b.data),
+            .persons => try persons.appendSlice(allocator, b.data),
+        }
+    }
+
+    try std.testing.expectEqual(@as(i32, 4), s.companies);
+    try std.testing.expectEqual(@as(i32, 9), s.persons);
+    try std.testing.expectEqual(@as(i32, 13), s.trailer_count.?);
+    try std.testing.expectEqualStrings(expected_update_companies, companies.items);
+    try std.testing.expectEqualStrings(expected_update_persons, persons.items);
 }
 
 test "stream finish rejects empty input" {

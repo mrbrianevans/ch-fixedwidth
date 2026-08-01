@@ -9,7 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Header-based product dispatch: the first 8-byte header identifier selects the body parser (`DDDDSNAP` implemented; `DDDDUPDT` and `DISQUALS` recognised and rejected with `NotImplemented` / `CH_ERR_NOT_IMPLEMENTED` until their parsers land)
+- Header-based product dispatch: the first 8-byte header identifier selects the body parser
+- **Product 198** (`DDDDUPDT`) officers update parser: full fixed person fields + 14 named chevron fields; company layout shared with the snapshot product
+- `DISQUALS` remains recognised and rejected with `NotImplemented` / `CH_ERR_NOT_IMPLEMENTED` until implemented
 
 ## [0.0.2] — 2026-08-01
 

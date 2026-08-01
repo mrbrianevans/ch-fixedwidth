@@ -2,23 +2,30 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-High-performance parser for [Companies House](https://www.gov.uk/government/organisations/companies-house) bulk appointment data (products **195** / **216**). Converts proprietary fixed-width + chevron snapshot files into CSV.
+High-performance parser for [Companies House](https://www.gov.uk/government/organisations/companies-house) bulk appointment data (products **195** / **216** snapshot and **198** update). Converts proprietary fixed-width + chevron files into CSV.
 
 It is designed for speed and can exceed **5 million records per second** on modern laptops.
 
 ## Source format
 
-Plain-text snapshot files (`DDDDSNAP` header) containing company and officer (person) records in a fixed-width layout, with variable-length name and address fields separated by chevrons (`<`).
+Plain-text `.dat` files identified by an 8-byte header magic:
 
-Full field layouts: [docs/Prod195_Snapshot.md](docs/Prod195_Snapshot.md).
+| Header | Product | Docs |
+|--------|---------|------|
+| `DDDDSNAP` | Appointments snapshot (195 / 216) | [Prod195_Snapshot.md](docs/Prod195_Snapshot.md) |
+| `DDDDUPDT` | Appointments update (198) | [Prod198_Update.md](docs/Prod198_Update.md) |
+
+Company and officer (person) records use a fixed-width layout with variable-length name and address fields separated by chevrons (`<`). Update person rows include old/new appointment types, person numbers, postcodes, change/update dates, and the full named variable-field set.
 
 ## Available data
 
 Each input file yields company rows and officer (person) rows.
 
-**Companies** — company number, status, officer count, and company name.
+**Companies** — company number, status, officer count, and company name (same columns for snapshot and update).
 
-**Officers** — company number; appointment type, dates, and origin; person number and corporate indicator; name parts (title, forenames, surname, honours); dates of birth; address fields; occupation, nationality, and country of residence.
+**Officers (snapshot)** — company number; appointment type, dates, and origin; person number and corporate indicator; name parts (title, forenames, surname, honours); dates of birth; address fields; occupation, nationality, and country of residence.
+
+**Officers (update)** — company number; app/res date origins; correction and corporate indicators; old/new appointment type and person number; partial/full DOB; old/new postcode; appointment, resignation, change, and update dates; plus new title/forenames/surname/honours, care-of, PO box, address lines, occupation, nationality, and residential country.
 
 ## Install
 

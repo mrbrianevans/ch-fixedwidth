@@ -56,9 +56,13 @@ fn writeCompanyRow(out: *CsvOut, row: []const u8) !void {
     out.endRow(p);
 }
 
-fn writePersonRow(out: *CsvOut, row: []const u8) !void {
+fn writePersonRow(out: *CsvOut, file_type: parse.FileType, row: []const u8) !void {
     const dest = try out.beginRow();
-    const p = parse.formatPersonRow(dest, row);
+    const p = switch (file_type) {
+        .officers_snapshot => parse.formatPersonRow(dest, row),
+        .officers_update => parse.formatUpdatePersonRow(dest, row),
+        .disqualifications => return error.NotImplemented,
+    };
     out.endRow(p);
 }
 
@@ -180,11 +184,12 @@ const WorkerCtx = struct {
     input_path: []const u8,
     companies_path: []const u8,
     persons_path: []const u8,
+    file_type: parse.FileType,
     /// Inclusive start file offset (first byte of first line to process).
     start_off: u64,
     /// Exclusive end file offset (do not process lines starting at or after this).
     end_off: u64,
-    /// If true, first line in range is the snapshot header.
+    /// If true, first line in range is the product header (already validated).
     handle_header: bool,
     /// If true, write CSV headers.
     write_headers: bool,
@@ -222,7 +227,7 @@ fn runWorker(ctx: *WorkerCtx) !WorkerResult {
     var persons_out = try CsvOut.create(
         ctx.io,
         ctx.persons_path,
-        if (ctx.write_headers) parse.persons_header else null,
+        if (ctx.write_headers) ctx.file_type.personsCsvHeader() else null,
         ctx.persons_buf,
     );
     defer persons_out.close();
@@ -236,9 +241,7 @@ fn runWorker(ctx: *WorkerCtx) !WorkerResult {
         const row = parse.stripCr(maybe_line orelse break);
 
         if (first and ctx.handle_header) {
-            const header = try processHeaderRow(row);
-            // Body workers assume officers-snapshot layout; reject other products early.
-            if (header.file_type != .officers_snapshot) return error.NotImplemented;
+            // Header already validated by the parent before workers spawn.
             first = false;
             continue;
         }
@@ -253,14 +256,14 @@ fn runWorker(ctx: *WorkerCtx) !WorkerResult {
 
         if (row.len <= 8) continue;
 
-        // Officers snapshot body (Prod 195/216).
+        // Officers snapshot / update body (record type at byte 8).
         switch (row[8]) {
             parse.company_record_type => {
                 try writeCompanyRow(&companies_out, row);
                 result.companies += 1;
             },
             parse.person_record_type => {
-                try writePersonRow(&persons_out, row);
+                try writePersonRow(&persons_out, ctx.file_type, row);
                 result.persons += 1;
             },
             else => {},
@@ -327,6 +330,20 @@ fn processParallel(
 
     const probe_buf = try arena.alloc(u8, 1024 * 1024);
 
+    // Identify product from the header before splitting so every worker uses
+    // the correct person formatter / CSV header.
+    const header_info = blk: {
+        const f = try Io.Dir.cwd().openFile(io, input_path, .{});
+        defer f.close(io);
+        var fr = Io.File.Reader.init(f, io, probe_buf);
+        const maybe = try fr.interface.takeDelimiter('\n');
+        const row = parse.stripCr(maybe orelse {
+            std.debug.print("ERROR: empty input\n", .{});
+            return 1;
+        });
+        break :blk processHeaderRow(row) catch return 1;
+    };
+
     var starts: [max_workers + 1]u64 = undefined;
     starts[0] = 0;
     starts[workers] = file_size;
@@ -381,6 +398,7 @@ fn processParallel(
             .input_path = input_path,
             .companies_path = co,
             .persons_path = pe,
+            .file_type = header_info.file_type,
             .start_off = ranges[r].start,
             .end_off = ranges[r].end,
             .handle_header = (r == 0),
@@ -479,6 +497,18 @@ pub fn processFromReader(
         try std.fmt.allocPrint(arena, "persons_data_{s}.csv", .{base_name}),
     });
 
+    // Read header first so persons CSV uses the product-specific column set.
+    const first_line = reader.takeDelimiter('\n') catch |err| {
+        std.debug.print("Error reading input: {s}\n", .{@errorName(err)});
+        return 1;
+    };
+    const header_row = parse.stripCr(first_line orelse {
+        std.debug.print("ERROR: empty input\n", .{});
+        return 1;
+    });
+    const header = processHeaderRow(header_row) catch return 1;
+    const file_type = header.file_type;
+
     std.debug.print("Saving companies data to {s}\n", .{companies_filename});
     std.debug.print("Saving persons data to {s}\n", .{persons_filename});
 
@@ -491,7 +521,7 @@ pub fn processFromReader(
     };
     defer companies_out.close();
 
-    var persons_out = CsvOut.create(io, persons_filename, parse.persons_header, persons_buf) catch |err| {
+    var persons_out = CsvOut.create(io, persons_filename, file_type.personsCsvHeader(), persons_buf) catch |err| {
         std.debug.print("Error opening persons file: {s}\n", .{@errorName(err)});
         return 1;
     };
@@ -499,8 +529,6 @@ pub fn processFromReader(
 
     var companies_processed: i32 = 0;
     var persons_processed: i32 = 0;
-    var row_num: usize = 0;
-    var file_type: ?parse.FileType = null;
 
     while (true) {
         const maybe_line = reader.takeDelimiter('\n') catch |err| {
@@ -509,16 +537,8 @@ pub fn processFromReader(
         };
         const row = parse.stripCr(maybe_line orelse break);
 
-        if (row_num == 0) {
-            const header = processHeaderRow(row) catch return 1;
-            file_type = header.file_type;
-            row_num += 1;
-            continue;
-        }
-
-        // Branch on header identifier once body parsing is multi-product.
-        switch (file_type orelse return 1) {
-            .officers_snapshot => {
+        switch (file_type) {
+            .officers_snapshot, .officers_update => {
                 if (row.len >= 8 and std.mem.eql(u8, row[0..8], parse.trailer_record_identifier)) {
                     const record_count = parse.parseTrailerCount(row);
                     const total = companies_processed + persons_processed;
@@ -530,10 +550,7 @@ pub fn processFromReader(
                     return 0;
                 }
 
-                if (row.len <= 8) {
-                    row_num += 1;
-                    continue;
-                }
+                if (row.len <= 8) continue;
 
                 switch (row[8]) {
                     parse.company_record_type => {
@@ -544,7 +561,7 @@ pub fn processFromReader(
                         companies_processed += 1;
                     },
                     parse.person_record_type => {
-                        writePersonRow(&persons_out, row) catch |err| {
+                        writePersonRow(&persons_out, file_type, row) catch |err| {
                             std.debug.print("Error writing person row: {s}\n", .{@errorName(err)});
                             return 1;
                         };
@@ -553,13 +570,11 @@ pub fn processFromReader(
                     else => {},
                 }
             },
-            .officers_update, .disqualifications => {
-                // processHeaderRow already rejects these; keep switch exhaustive.
+            .disqualifications => {
                 std.debug.print("Error: body parser not implemented for this file type\n", .{});
                 return 1;
             },
         }
-        row_num += 1;
     }
 
     std.debug.print("ERROR: No trailer record found.\n", .{});
