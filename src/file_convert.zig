@@ -71,11 +71,45 @@ fn processHeaderRow(row: []const u8) !void {
     });
 }
 
-fn baseInputName(input_path: []const u8) []const u8 {
-    const base = std.fs.path.basename(input_path);
+/// True when `s` is an HTTP(S) URL (case-insensitive scheme).
+pub fn isRemoteUrl(s: []const u8) bool {
+    return std.ascii.startsWithIgnoreCase(s, "http://") or
+        std.ascii.startsWithIgnoreCase(s, "https://");
+}
+
+fn stripExtension(base: []const u8) []const u8 {
     const ext = std.fs.path.extension(base);
     if (ext.len == 0) return base;
     return base[0 .. base.len - ext.len];
+}
+
+/// Basename without extension for local paths or remote URLs.
+/// For URLs, uses the last path segment (query/fragment ignored).
+pub fn baseInputName(input_path: []const u8) []const u8 {
+    if (isRemoteUrl(input_path)) {
+        const uri = std.Uri.parse(input_path) catch {
+            return "download";
+        };
+        const path_raw = switch (uri.path) {
+            .raw => |p| p,
+            .percent_encoded => |p| p,
+        };
+        // Drop query-like junk if parse left it in path (defensive).
+        const path_no_q = if (std.mem.indexOfScalar(u8, path_raw, '?')) |q|
+            path_raw[0..q]
+        else
+            path_raw;
+        var base = std.fs.path.basename(path_no_q);
+        if (base.len == 0 or std.mem.eql(u8, base, "/") or std.mem.eql(u8, base, "\\")) {
+            return "download";
+        }
+        // Percent-encoded basename is fine for filesystem names on modern OSes;
+        // still strip a trailing slash if present.
+        if (base[base.len - 1] == '/') base = base[0 .. base.len - 1];
+        if (base.len == 0) return "download";
+        return stripExtension(base);
+    }
+    return stripExtension(std.fs.path.basename(input_path));
 }
 
 const WorkerResult = struct {
@@ -368,10 +402,12 @@ fn processParallel(
     return 0;
 }
 
-fn processSingle(
+/// Stream lines from `reader` into company/person CSVs under `output_folder`.
+/// Caller must ensure `output_folder` exists. Same output layout as a local file run.
+pub fn processFromReader(
     io: Io,
     arena: std.mem.Allocator,
-    input_path: []const u8,
+    reader: *Io.Reader,
     output_folder: []const u8,
     base_name: []const u8,
 ) !u8 {
@@ -389,7 +425,6 @@ fn processSingle(
 
     const companies_buf = try arena.alloc(u8, write_buffer_size);
     const persons_buf = try arena.alloc(u8, write_buffer_size);
-    const read_buf = try arena.alloc(u8, read_buffer_size);
 
     var companies_out = CsvOut.create(io, companies_filename, parse.companies_header, companies_buf) catch |err| {
         std.debug.print("Error opening companies file: {s}\n", .{@errorName(err)});
@@ -403,24 +438,13 @@ fn processSingle(
     };
     defer persons_out.close();
 
-    const input_file = Io.Dir.cwd().openFile(io, input_path, .{}) catch |err| {
-        std.debug.print("Error opening input file: {s}\n", .{@errorName(err)});
-        return 1;
-    };
-    defer input_file.close(io);
-
-    // Streaming mode: positional pread is unreliable under some WASI hosts (Bun)
-    // once total bytes read exceed the buffer size.
-    var file_reader = Io.File.Reader.initStreaming(input_file, io, read_buf);
-    const reader = &file_reader.interface;
-
     var companies_processed: i32 = 0;
     var persons_processed: i32 = 0;
     var row_num: usize = 0;
 
     while (true) {
         const maybe_line = reader.takeDelimiter('\n') catch |err| {
-            std.debug.print("Error reading file: {s}\n", .{@errorName(err)});
+            std.debug.print("Error reading input: {s}\n", .{@errorName(err)});
             return 1;
         };
         const row = parse.stripCr(maybe_line orelse break);
@@ -471,8 +495,32 @@ fn processSingle(
     return 1;
 }
 
+fn processSingle(
+    io: Io,
+    arena: std.mem.Allocator,
+    input_path: []const u8,
+    output_folder: []const u8,
+    base_name: []const u8,
+) !u8 {
+    const read_buf = try arena.alloc(u8, read_buffer_size);
+
+    const input_file = Io.Dir.cwd().openFile(io, input_path, .{}) catch |err| {
+        std.debug.print("Error opening input file: {s}\n", .{@errorName(err)});
+        return 1;
+    };
+    defer input_file.close(io);
+
+    // Streaming mode: positional pread is unreliable under some WASI hosts (Bun)
+    // once total bytes read exceed the buffer size.
+    var file_reader = Io.File.Reader.initStreaming(input_file, io, read_buf);
+    return processFromReader(io, arena, &file_reader.interface, output_folder, base_name);
+}
+
 /// Convert one snapshot file on disk into CSV files under `output_folder`.
 /// Returns a process exit code (0 = success).
+///
+/// For remote HTTP(S) URLs use `processFromRemoteUrl` instead (single-stream pipeline;
+/// parallel seek is not available over HTTP).
 pub fn processCompanyAppointmentsData(
     io: Io,
     arena: std.mem.Allocator,
@@ -497,4 +545,23 @@ pub fn processCompanyAppointmentsData(
         return processSingle(io, arena, input_path, output_folder, base_name);
     }
     return processParallel(io, arena, input_path, output_folder, base_name, n_workers);
+}
+
+test "isRemoteUrl detects http and https" {
+    try std.testing.expect(isRemoteUrl("http://example.com/a.dat"));
+    try std.testing.expect(isRemoteUrl("https://example.com/a.dat"));
+    try std.testing.expect(isRemoteUrl("HTTP://EXAMPLE.COM/a.dat"));
+    try std.testing.expect(isRemoteUrl("HTTPS://EXAMPLE.COM/a.dat"));
+    try std.testing.expect(!isRemoteUrl("file:///tmp/a.dat"));
+    try std.testing.expect(!isRemoteUrl("Prod216_4257_ew_6.dat"));
+    try std.testing.expect(!isRemoteUrl("./http://not-a-url.dat"));
+    try std.testing.expect(!isRemoteUrl(""));
+}
+
+test "baseInputName for local paths and URLs" {
+    try std.testing.expectEqualStrings("mini_snapshot", baseInputName("src/testdata/mini_snapshot.dat"));
+    try std.testing.expectEqualStrings("mini_snapshot", baseInputName("mini_snapshot.dat"));
+    try std.testing.expectEqualStrings("mini_snapshot", baseInputName("http://localhost:8765/mini_snapshot.dat"));
+    try std.testing.expectEqualStrings("mini_snapshot", baseInputName("https://cdn.example.com/path/to/mini_snapshot.dat?token=abc"));
+    try std.testing.expectEqualStrings("download", baseInputName("http://localhost:8765/"));
 }
