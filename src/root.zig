@@ -5,9 +5,9 @@
 //! (never overloaded across products).
 //!
 //! - `parse` — product identification, pure record classification and CSV formatting (no I/O)
-//! - `document` — in-memory full-file conversion to named CSVs
-//! - `stream` — chunked input + batched CSV output by `OutputKind`
-//! - `file_convert` — streaming filesystem CLI path (multithreaded on native for officers)
+//! - `stream` — single body parser: chunked input + batched CSV by `OutputKind`
+//! - `document` — one-shot wrapper around `stream` (full buffer → named CSVs)
+//! - `file_convert` — CLI I/O; sequential path drains `stream` (parallel officers on native)
 //! - `c_api` — C ABI / WASM exports for embedding
 
 pub const parse = @import("parse.zig");

@@ -9,6 +9,7 @@ const Io = std.Io;
 const Thread = std.Thread;
 const http = std.http;
 const parse = @import("parse.zig");
+const stream_mod = @import("stream.zig");
 
 // Smaller buffers under single-threaded (wasm32-wasi) to stay within linear memory
 // and avoid host WASI edge cases with multi‑MB vectored I/O.
@@ -479,7 +480,78 @@ fn processParallel(
     return 0;
 }
 
-/// Stream lines from `reader` into product-specific CSVs under `output_folder`.
+/// Write one stream CSV batch to the matching output file (created lazily).
+/// Batch bytes already include the CSV header when it is the first flush for that kind.
+fn drainStreamBatches(
+    io: Io,
+    arena: std.mem.Allocator,
+    s: *stream_mod.Stream,
+    output_folder: []const u8,
+    base_name: []const u8,
+    outs: *[parse.OutputKind.all.len]?CsvOut,
+    write_bufs: *[parse.OutputKind.all.len]?[]u8,
+) !u8 {
+    while (s.nextBatch()) |batch| {
+        var b = batch;
+        defer b.deinit(s.allocator);
+        const idx: usize = @intCast(@intFromEnum(b.kind));
+        if (outs[idx] == null) {
+            const filename = try std.fs.path.join(arena, &.{
+                output_folder,
+                try std.fmt.allocPrint(arena, "{s}_{s}.csv", .{ b.kind.fileStem(), base_name }),
+            });
+            std.debug.print("Saving {s} data to {s}\n", .{ b.kind.displayName(), filename });
+            const buf = try arena.alloc(u8, write_buffer_size);
+            write_bufs[idx] = buf;
+            // Header is already inside the stream batch — do not write a second one.
+            outs[idx] = CsvOut.create(io, filename, null, buf) catch |err| {
+                std.debug.print("Error opening {s} file: {s}\n", .{ b.kind.displayName(), @errorName(err) });
+                return 1;
+            };
+        }
+        outs[idx].?.w().writeAll(b.data) catch |err| {
+            std.debug.print("Error writing {s} rows: {s}\n", .{ b.kind.displayName(), @errorName(err) });
+            return 1;
+        };
+    }
+    return 0;
+}
+
+fn printStreamSummary(s: *const stream_mod.Stream) void {
+    const ft = s.file_type orelse return;
+    const tc = s.trailer_count orelse return;
+    switch (ft) {
+        .officers_snapshot, .officers_update => {
+            const co = s.countOf(.companies);
+            const pe = s.countOf(.persons);
+            std.debug.print("Processed {d} records: {d} companies, {d} persons.\n", .{ tc, co, pe });
+        },
+        .disqualifications => {
+            const n1 = s.countOf(.persons);
+            const n2 = s.countOf(.disqualifications);
+            const n3 = s.countOf(.exemptions);
+            const n4 = s.countOf(.variations);
+            std.debug.print(
+                "Processed {d} records: {d} persons, {d} disqualifications, {d} exemptions, {d} variations.\n",
+                .{ tc, n1, n2, n3, n4 },
+            );
+        },
+        .liquidation => {
+            std.debug.print(
+                "Processed {d} records: {d} forms, {d} practitioners, {d} free text.\n",
+                .{
+                    tc,
+                    s.countOf(.forms),
+                    s.countOf(.practitioners),
+                    s.countOf(.free_text),
+                },
+            );
+        },
+    }
+}
+
+/// Stream input from `reader` into product-specific CSVs under `output_folder`.
+/// Uses the shared `stream.Stream` body parser (same as one-shot / WASM).
 /// Caller must ensure `output_folder` exists. Same output layout as a local file run.
 pub fn processFromReader(
     io: Io,
@@ -488,7 +560,7 @@ pub fn processFromReader(
     output_folder: []const u8,
     base_name: []const u8,
 ) !u8 {
-    // Read header first so output set / column headers match the product.
+    // Read header first for CLI product logging; body parsing is entirely in Stream.
     const first_line = reader.takeDelimiter('\n') catch |err| {
         std.debug.print("Error reading input: {s}\n", .{@errorName(err)});
         return 1;
@@ -497,359 +569,68 @@ pub fn processFromReader(
         std.debug.print("ERROR: empty input\n", .{});
         return 1;
     });
-    const header = processHeaderRow(header_row) catch return 1;
-    const file_type = header.file_type;
+    _ = processHeaderRow(header_row) catch return 1;
 
-    return switch (file_type) {
-        .officers_snapshot, .officers_update => processOfficersFromReader(io, arena, reader, output_folder, base_name, file_type),
-        .disqualifications => processDisqualFromReader(io, arena, reader, output_folder, base_name),
-        .liquidation => processLiqFromReader(io, arena, reader, output_folder, base_name),
-    };
-}
-
-fn processOfficersFromReader(
-    io: Io,
-    arena: std.mem.Allocator,
-    reader: *Io.Reader,
-    output_folder: []const u8,
-    base_name: []const u8,
-    file_type: parse.FileType,
-) !u8 {
-    const companies_filename = try std.fs.path.join(arena, &.{
-        output_folder,
-        try std.fmt.allocPrint(arena, "companies_data_{s}.csv", .{base_name}),
+    var s = stream_mod.Stream.init(arena, .{
+        .batch_rows = 0, // defaults
+        .batch_bytes = write_buffer_size,
     });
-    const persons_filename = try std.fs.path.join(arena, &.{
-        output_folder,
-        try std.fmt.allocPrint(arena, "persons_data_{s}.csv", .{base_name}),
-    });
+    // Arena-backed; no explicit deinit required for process lifetime.
 
-    std.debug.print("Saving companies data to {s}\n", .{companies_filename});
-    std.debug.print("Saving persons data to {s}\n", .{persons_filename});
-
-    const companies_buf = try arena.alloc(u8, write_buffer_size);
-    const persons_buf = try arena.alloc(u8, write_buffer_size);
-
-    var companies_out = CsvOut.create(io, companies_filename, parse.companies_header, companies_buf) catch |err| {
-        std.debug.print("Error opening companies file: {s}\n", .{@errorName(err)});
-        return 1;
-    };
-    defer companies_out.close();
-
-    var persons_out = CsvOut.create(io, persons_filename, file_type.personsCsvHeader(), persons_buf) catch |err| {
-        std.debug.print("Error opening persons file: {s}\n", .{@errorName(err)});
-        return 1;
-    };
-    defer persons_out.close();
-
-    var companies_processed: i32 = 0;
-    var persons_processed: i32 = 0;
-
-    while (true) {
-        const maybe_line = reader.takeDelimiter('\n') catch |err| {
-            std.debug.print("Error reading input: {s}\n", .{@errorName(err)});
-            return 1;
-        };
-        const row = parse.stripCr(maybe_line orelse break);
-
-        if (row.len >= 8 and std.mem.eql(u8, row[0..8], parse.trailer_record_identifier)) {
-            const record_count = parse.parseTrailerCount(row);
-            const total = companies_processed + persons_processed;
-            if (record_count != total) {
-                std.debug.print("ERROR: Processed {d} records out of {d}\n", .{ total, record_count });
-                return 1;
-            }
-            std.debug.print("Processed {d} records: {d} companies, {d} persons.\n", .{ total, companies_processed, persons_processed });
-            return 0;
-        }
-
-        if (row.len <= 8) continue;
-
-        switch (row[8]) {
-            parse.company_record_type => {
-                writeCompanyRow(&companies_out, row) catch |err| {
-                    std.debug.print("Error writing company row: {s}\n", .{@errorName(err)});
-                    return 1;
-                };
-                companies_processed += 1;
-            },
-            parse.person_record_type => {
-                writePersonRow(&persons_out, file_type, row) catch |err| {
-                    std.debug.print("Error writing person row: {s}\n", .{@errorName(err)});
-                    return 1;
-                };
-                persons_processed += 1;
-            },
-            else => {},
+    var outs: [parse.OutputKind.all.len]?CsvOut = .{null} ** parse.OutputKind.all.len;
+    var write_bufs: [parse.OutputKind.all.len]?[]u8 = .{null} ** parse.OutputKind.all.len;
+    defer {
+        for (&outs) |*maybe| {
+            if (maybe.*) |*out| out.close();
         }
     }
 
-    std.debug.print("ERROR: No trailer record found.\n", .{});
-    return 1;
-}
+    // Re-feed the header line (with newline) so Stream sees the full document.
+    {
+        var header_chunk: [parse.max_csv_row_bytes + 1]u8 = undefined;
+        if (header_row.len > parse.max_csv_row_bytes) {
+            std.debug.print("ERROR: header line too long\n", .{});
+            return 1;
+        }
+        @memcpy(header_chunk[0..header_row.len], header_row);
+        header_chunk[header_row.len] = '\n';
+        s.feed(header_chunk[0 .. header_row.len + 1]) catch |err| {
+            std.debug.print("Error parsing header: {s}\n", .{@errorName(err)});
+            return 1;
+        };
+        if ((try drainStreamBatches(io, arena, &s, output_folder, base_name, &outs, &write_bufs)) != 0)
+            return 1;
+    }
 
-fn writeDisqualRow(out: *CsvOut, format: *const fn ([]u8, []const u8) usize, row: []const u8) !void {
-    const dest = try out.beginRow();
-    const p = format(dest, row);
-    out.endRow(p);
-}
-
-fn processDisqualFromReader(
-    io: Io,
-    arena: std.mem.Allocator,
-    reader: *Io.Reader,
-    output_folder: []const u8,
-    base_name: []const u8,
-) !u8 {
-    const persons_filename = try std.fs.path.join(arena, &.{
-        output_folder,
-        try std.fmt.allocPrint(arena, "persons_data_{s}.csv", .{base_name}),
-    });
-    const disq_filename = try std.fs.path.join(arena, &.{
-        output_folder,
-        try std.fmt.allocPrint(arena, "disqualifications_data_{s}.csv", .{base_name}),
-    });
-    const exempt_filename = try std.fs.path.join(arena, &.{
-        output_folder,
-        try std.fmt.allocPrint(arena, "exemptions_data_{s}.csv", .{base_name}),
-    });
-    const var_filename = try std.fs.path.join(arena, &.{
-        output_folder,
-        try std.fmt.allocPrint(arena, "variations_data_{s}.csv", .{base_name}),
-    });
-
-    std.debug.print("Saving persons data to {s}\n", .{persons_filename});
-    std.debug.print("Saving disqualifications data to {s}\n", .{disq_filename});
-    std.debug.print("Saving exemptions data to {s}\n", .{exempt_filename});
-    std.debug.print("Saving variations data to {s}\n", .{var_filename});
-
-    const b1 = try arena.alloc(u8, write_buffer_size);
-    const b2 = try arena.alloc(u8, write_buffer_size);
-    const b3 = try arena.alloc(u8, write_buffer_size);
-    const b4 = try arena.alloc(u8, write_buffer_size);
-
-    var persons_out = CsvOut.create(io, persons_filename, parse.disqual_persons_header, b1) catch |err| {
-        std.debug.print("Error opening persons file: {s}\n", .{@errorName(err)});
-        return 1;
-    };
-    defer persons_out.close();
-    var disq_out = CsvOut.create(io, disq_filename, parse.disqualifications_header, b2) catch |err| {
-        std.debug.print("Error opening disqualifications file: {s}\n", .{@errorName(err)});
-        return 1;
-    };
-    defer disq_out.close();
-    var exempt_out = CsvOut.create(io, exempt_filename, parse.exemptions_header, b3) catch |err| {
-        std.debug.print("Error opening exemptions file: {s}\n", .{@errorName(err)});
-        return 1;
-    };
-    defer exempt_out.close();
-    var var_out = CsvOut.create(io, var_filename, parse.variations_header, b4) catch |err| {
-        std.debug.print("Error opening variations file: {s}\n", .{@errorName(err)});
-        return 1;
-    };
-    defer var_out.close();
-
-    var n1: i32 = 0;
-    var n2: i32 = 0;
-    var n3: i32 = 0;
-    var n4: i32 = 0;
-
+    // Feed the remainder in large chunks (Stream handles partial lines).
+    const feed_buf = try arena.alloc(u8, read_buffer_size);
     while (true) {
-        const maybe_line = reader.takeDelimiter('\n') catch |err| {
+        const n = reader.readSliceShort(feed_buf) catch |err| {
             std.debug.print("Error reading input: {s}\n", .{@errorName(err)});
             return 1;
         };
-        const row = parse.stripCr(maybe_line orelse break);
-
-        switch (parse.classifyDisqualLine(row)) {
-            .header => {}, // already consumed
-            .trailer => {
-                const tr = parse.parseDisqualTrailer(row) catch {
-                    std.debug.print("ERROR: invalid disqualifications trailer\n", .{});
-                    return 1;
-                };
-                if (tr.type1 != n1 or tr.type2 != n2 or tr.type3 != n3 or tr.type4 != n4) {
-                    std.debug.print(
-                        "ERROR: Processed type counts {d}/{d}/{d}/{d} out of {d}/{d}/{d}/{d}\n",
-                        .{ n1, n2, n3, n4, tr.type1, tr.type2, tr.type3, tr.type4 },
-                    );
-                    return 1;
-                }
-                const total = n1 + n2 + n3 + n4;
-                if (tr.total != total) {
-                    std.debug.print("ERROR: Processed {d} records out of {d}\n", .{ total, tr.total });
-                    return 1;
-                }
-                std.debug.print(
-                    "Processed {d} records: {d} persons, {d} disqualifications, {d} exemptions, {d} variations.\n",
-                    .{ total, n1, n2, n3, n4 },
-                );
-                return 0;
-            },
-            .person => {
-                writeDisqualRow(&persons_out, parse.formatDisqualPersonRow, row) catch |err| {
-                    std.debug.print("Error writing person row: {s}\n", .{@errorName(err)});
-                    return 1;
-                };
-                n1 += 1;
-            },
-            .disqualification => {
-                writeDisqualRow(&disq_out, parse.formatDisqualificationRow, row) catch |err| {
-                    std.debug.print("Error writing disqualification row: {s}\n", .{@errorName(err)});
-                    return 1;
-                };
-                n2 += 1;
-            },
-            .exemption => {
-                writeDisqualRow(&exempt_out, parse.formatExemptionRow, row) catch |err| {
-                    std.debug.print("Error writing exemption row: {s}\n", .{@errorName(err)});
-                    return 1;
-                };
-                n3 += 1;
-            },
-            .variation => {
-                writeDisqualRow(&var_out, parse.formatVariationRow, row) catch |err| {
-                    std.debug.print("Error writing variation row: {s}\n", .{@errorName(err)});
-                    return 1;
-                };
-                n4 += 1;
-            },
-            .other => {},
-        }
-    }
-
-    std.debug.print("ERROR: No trailer record found.\n", .{});
-    return 1;
-}
-
-fn processLiqFromReader(
-    io: Io,
-    arena: std.mem.Allocator,
-    reader: *Io.Reader,
-    output_folder: []const u8,
-    base_name: []const u8,
-) !u8 {
-    const forms_filename = try std.fs.path.join(arena, &.{
-        output_folder,
-        try std.fmt.allocPrint(arena, "forms_data_{s}.csv", .{base_name}),
-    });
-    const prac_filename = try std.fs.path.join(arena, &.{
-        output_folder,
-        try std.fmt.allocPrint(arena, "practitioners_data_{s}.csv", .{base_name}),
-    });
-    const ft_filename = try std.fs.path.join(arena, &.{
-        output_folder,
-        try std.fmt.allocPrint(arena, "free_text_data_{s}.csv", .{base_name}),
-    });
-
-    std.debug.print("Saving forms data to {s}\n", .{forms_filename});
-    std.debug.print("Saving practitioners data to {s}\n", .{prac_filename});
-    std.debug.print("Saving free text data to {s}\n", .{ft_filename});
-
-    const b1 = try arena.alloc(u8, write_buffer_size);
-    const b2 = try arena.alloc(u8, write_buffer_size);
-    const b3 = try arena.alloc(u8, write_buffer_size);
-
-    var forms_out = CsvOut.create(io, forms_filename, parse.liq_forms_header, b1) catch |err| {
-        std.debug.print("Error opening forms file: {s}\n", .{@errorName(err)});
-        return 1;
-    };
-    defer forms_out.close();
-    var prac_out = CsvOut.create(io, prac_filename, parse.liq_practitioners_header, b2) catch |err| {
-        std.debug.print("Error opening practitioners file: {s}\n", .{@errorName(err)});
-        return 1;
-    };
-    defer prac_out.close();
-    var ft_out = CsvOut.create(io, ft_filename, parse.liq_free_text_header, b3) catch |err| {
-        std.debug.print("Error opening free text file: {s}\n", .{@errorName(err)});
-        return 1;
-    };
-    defer ft_out.close();
-
-    var form: parse.LiqForm = .{};
-    var forms_count: i32 = 0;
-    var prac_count: i32 = 0;
-    var ft_count: i32 = 0;
-    var data_records: i32 = 0;
-
-    const emit = struct {
-        fn go(
-            f: *parse.LiqForm,
-            forms: *CsvOut,
-            prac: *CsvOut,
-            free_t: *CsvOut,
-            fc: *i32,
-            pc: *i32,
-            ftc: *i32,
-        ) !void {
-            if (!f.active) return;
-            {
-                const dest = try forms.beginRow();
-                const n = parse.formatLiqFormRow(dest, f);
-                forms.endRow(n);
-                fc.* += 1;
-            }
-            var i: usize = 0;
-            while (i < f.practitioner_count) : (i += 1) {
-                const dest = try prac.beginRow();
-                const n = parse.formatLiqPractitionerRow(dest, f, i);
-                prac.endRow(n);
-                pc.* += 1;
-            }
-            i = 0;
-            while (i < f.free_text_count) : (i += 1) {
-                const dest = try free_t.beginRow();
-                const n = parse.formatLiqFreeTextRow(dest, f, i);
-                free_t.endRow(n);
-                ftc.* += 1;
-            }
-            f.reset();
-        }
-    }.go;
-
-    while (true) {
-        const maybe_line = reader.takeDelimiter('\n') catch |err| {
-            std.debug.print("Error reading input: {s}\n", .{@errorName(err)});
+        if (n == 0) break;
+        s.feed(feed_buf[0..n]) catch |err| {
+            std.debug.print("Error parsing input: {s}\n", .{@errorName(err)});
             return 1;
         };
-        const row = parse.stripCr(maybe_line orelse break);
-
-        switch (parse.classifyLiqLine(row)) {
-            .header => {}, // already consumed
-            .trailer => {
-                emit(&form, &forms_out, &prac_out, &ft_out, &forms_count, &prac_count, &ft_count) catch |err| {
-                    std.debug.print("Error writing liquidation rows: {s}\n", .{@errorName(err)});
-                    return 1;
-                };
-                const record_count = parse.parseTrailerCount(row);
-                if (record_count != data_records) {
-                    std.debug.print("ERROR: Processed {d} records out of {d}\n", .{ data_records, record_count });
-                    return 1;
-                }
-                std.debug.print(
-                    "Processed {d} records: {d} forms, {d} practitioners, {d} free text.\n",
-                    .{ data_records, forms_count, prac_count, ft_count },
-                );
-                return 0;
-            },
-            .form => {
-                emit(&form, &forms_out, &prac_out, &ft_out, &forms_count, &prac_count, &ft_count) catch |err| {
-                    std.debug.print("Error writing liquidation rows: {s}\n", .{@errorName(err)});
-                    return 1;
-                };
-                form.applyRecord(row);
-                data_records += 1;
-            },
-            .data => {
-                form.applyRecord(row);
-                data_records += 1;
-            },
-            .other => {},
-        }
+        if ((try drainStreamBatches(io, arena, &s, output_folder, base_name, &outs, &write_bufs)) != 0)
+            return 1;
     }
 
-    std.debug.print("ERROR: No trailer record found.\n", .{});
-    return 1;
+    s.finish() catch |err| {
+        switch (err) {
+            error.MissingTrailer => std.debug.print("ERROR: No trailer record found.\n", .{}),
+            error.TrailerMismatch => std.debug.print("ERROR: Trailer record count does not match rows parsed\n", .{}),
+            else => std.debug.print("Error finishing parse: {s}\n", .{@errorName(err)}),
+        }
+        return 1;
+    };
+    if ((try drainStreamBatches(io, arena, &s, output_folder, base_name, &outs, &write_bufs)) != 0)
+        return 1;
+
+    printStreamSummary(&s);
+    return 0;
 }
 
 fn processSingle(

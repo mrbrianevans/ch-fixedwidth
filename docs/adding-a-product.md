@@ -64,20 +64,21 @@ If the format is only partially documented, prefer documenting unknowns in `docs
     ▼
 identifyFileType(magic)  ──► FileType  ──► requireImplemented()
     │
-    ├─ document.parseDocument   (one-shot, all CSVs in memory)
-    ├─ stream.Stream            (chunked feed → OutputKind batches)
-    └─ file_convert             (CLI: files / dir / URL / stdin)
-            │
-            ▼
-    named CSV files / C buffers / WASM batches
+    ▼
+stream.Stream   (single body parser: lines → OutputKind batches + trailer check)
+    │
+    ├─ document.parseDocument   (feed all + concat batches → ParseResult)
+    ├─ file_convert sequential  (drain batches → CSV files; URL / stdin / single-thread)
+    ├─ C / WASM ch_stream_*     (host drains batches)
+    └─ file_convert parallel    (officers only: seek-split workers, own line loop)
 ```
 
 | Layer | Path | Responsibility |
 |-------|------|----------------|
 | Pure format | `src/parse.zig` | Magic, `FileType` / `OutputKind`, classify lines, field extractors, CSV formatters, headers |
-| One-shot | `src/document.zig` | Full buffer → `ParseResult` (all kinds) |
-| Streaming | `src/stream.zig` | Carry buffer, per-kind batches, trailer check |
-| CLI I/O | `src/file_convert.zig` | Open outputs, sequential or parallel path |
+| Body parser | `src/stream.zig` | Carry buffer, per-kind batches, product line handlers, trailer check |
+| One-shot | `src/document.zig` | Thin wrapper: full buffer via `Stream` → `ParseResult` |
+| CLI I/O | `src/file_convert.zig` | Open outputs; sequential drains `Stream`; parallel officers path |
 | C / WASM | `src/c_api.zig`, `include/ch_fixedwidth.h` | Stable ABI |
 | TypeScript | `wasm-ts/src/*` | Layout offsets, kind names, `outputFileName` |
 | Browser | `web/` | Optional UX; mostly follows wasm-ts kinds |
@@ -132,24 +133,22 @@ Work roughly top-down. Zig `switch` exhaustiveness will force most call sites to
 7. Trailer parser if non-standard.
 8. If new `OutputKind`s: extend the enum, `all`, `fileStem`, `displayName`, and every switch on `OutputKind` (document, stream, C, TS).
 
-### Phase C — `src/document.zig`
-
-1. Branch in `parseDocument` to a dedicated `parse…` function.
-2. Fill only the `ParseResult` fields for this product’s kinds; leave others empty with zero counts.
-3. Set `file_type` and validate trailer before returning.
-
-### Phase D — `src/stream.zig`
+### Phase C — `src/stream.zig` (body parser — required)
 
 1. Branch in `handleLine` (and `finish` trailer checks) for the product.
 2. Use dedicated `KindBuf`s for each output kind (already present for all current kinds; add fields if you added kinds).
-3. On `finish`, flush headers for `file_type.outputKinds()` and validate trailer the same way as document mode.
+3. On `finish`, flush headers for `file_type.outputKinds()` and validate trailer counts.
+
+### Phase D — `src/document.zig` (one-shot)
+
+Usually **no product-specific code**: `parseDocument` already feeds `Stream` and maps every `OutputKind` into `ParseResult`. Only touch this file if the public `ParseResult` shape changes (new kinds / ABI).
 
 ### Phase E — `src/file_convert.zig` (CLI)
 
-1. Branch in `processFromReader` to `process…FromReader`.
-2. Open one `CsvOut` per output kind using `OutputKind.fileStem()` naming: `{stem}_{base}.csv`.
-3. Gate parallel path: if the product is not officers-style independent lines, force `processSingle` in `processOneLocalFile` (same pattern as 192 / 197).
-4. Log product name via `FileType.displayName()`.
+1. Sequential path (`processFromReader`) already drains `Stream` batches into `{stem}_{base}.csv` via `OutputKind.fileStem()` — no per-product reader loop.
+2. Gate parallel path: if the product is not officers-style independent lines, force `processSingle` in `processOneLocalFile` (same pattern as 192 / 197).
+3. Log product name via `FileType.displayName()` (header probe in `processHeaderRow`).
+4. If you add officers-style parallel support later, extend `processParallel` / workers (still a separate path from `Stream`).
 
 ### Phase F — C ABI and WASM
 
