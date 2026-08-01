@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Native CLI accepts HTTP(S) URLs as the input argument and streams the response body through the same conversion pipeline as a local file (same CSV basenames and contents)
 - Native CLI accepts `-` as the input argument to stream a snapshot from stdin (`companies_data_stdin.csv` / `persons_data_stdin.csv`)
+- Native CLI accepts a **directory** of `.dat` files: each snapshot yields its own company and person CSVs; multi-core builds process files concurrently
 
 ## [0.0.1] — 2026-07-21
 

@@ -43,32 +43,39 @@ chmod +x parser-linux-x86_64
 ## Run
 
 ```bash
-./parser <input.dat|http(s)://.../file.dat|-> <output_folder>
+./parser <input.dat|input_dir/|http(s)://.../file.dat|-> <output_folder>
 ```
 
 | Argument | Description |
 |----------|-------------|
-| Input | Path to a single snapshot file, an `http://` / `https://` URL of a hosted `.dat`, or `-` to read from **stdin** |
+| Input | Path to a single snapshot `.dat`, a **directory** of `.dat` files, an `http://` / `https://` URL of a hosted `.dat`, or `-` to read from **stdin** |
 | `output_folder` | Directory for CSV output (created if missing) |
+
+**Local path detection:** a path ending in `.dat` is treated as a file; a path ending in `/` (or with no `.dat` extension) is more likely a directory. The filesystem is always checked to confirm file vs directory before processing.
 
 Examples:
 
 ```bash
 ./parser Prod216_4257_ew_6.dat ./output
+./parser ./snapshots/ ./output
 ./parser https://example.com/data/Prod216_4257_ew_6.dat ./output
 ./parser - ./output < Prod216_4257_ew_6.dat
 ```
 
 Remote URLs and stdin are converted in a **streaming pipeline** (bytes are parsed as they arrive; the full file is not buffered to disk first). Output CSV names and contents match a local-file run with the same basename (stdin uses basename `stdin`).
 
-Exit code `0` on success (trailer record count matches rows written); non-zero on header/trailer mismatch, HTTP errors, or I/O errors.
+For a **directory** input, every top-level `.dat` file is converted (non-recursive). On multi-core systems, files are processed concurrently; single-threaded builds process one file at a time. Each input file still produces its own company and person CSVs in the shared output folder.
+
+Exit code `0` on success (trailer record count matches rows written for every file); non-zero on header/trailer mismatch, HTTP errors, missing `.dat` files in a directory, or I/O errors.
 
 ## Output
 
-One input file produces two CSVs in the output directory:
+Each input file produces two CSVs in the output directory:
 
 - `companies_data_<basename>.csv`
 - `persons_data_<basename>.csv`
+
+So five `.dat` files in a directory yield ten CSV files (one company and one person file per input).
 
 **Companies header:**
 
@@ -90,7 +97,7 @@ Requires [Zig](https://ziglang.org/) 0.16+.
 
 ```bash
 zig build -Doptimize=ReleaseFast
-./zig-out/bin/parser <input.dat|http(s)://.../file.dat|-> <output_folder>
+./zig-out/bin/parser <input.dat|input_dir/|http(s)://.../file.dat|-> <output_folder>
 ```
 
 ### Development

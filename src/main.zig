@@ -1,4 +1,4 @@
-//! CLI entry point: local file path, HTTP(S) URL, or stdin (`-`) in, CSV files out.
+//! CLI entry point: local file/directory, HTTP(S) URL, or stdin (`-`) in, CSV files out.
 //! Parsing logic lives in the `ch_fixedwidth` library.
 
 const std = @import("std");
@@ -15,7 +15,7 @@ pub fn main(init: std.process.Init) void {
 
     if (args.len < 3) {
         std.debug.print(
-            "Usage: ./parser <input.dat|http(s)://.../file.dat|-> <output_folder>\n",
+            "Usage: ./parser <input.dat|input_dir/|http(s)://.../file.dat|-> <output_folder>\n",
             .{},
         );
         std.process.exit(1);

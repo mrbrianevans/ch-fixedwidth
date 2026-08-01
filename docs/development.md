@@ -22,9 +22,17 @@ zig fmt --check .
 
 CLI binary: `./zig-out/bin/parser` (or `parser.exe` on Windows).
 
-### Remote URL and stdin input (CLI only)
+### Remote URL, stdin, and directory input (CLI only)
 
-The native CLI accepts a local path, an `http://` / `https://` URL, or `-` (stdin). Remote and stdin inputs use sequential streaming via `processFromReader` (HTTP body or stdin → line parse → CSV); they do not use the multithreaded seek path. WASM and the C ABI are unchanged (no network I/O).
+The native CLI accepts a local file path, a **directory** of `.dat` files, an `http://` / `https://` URL, or `-` (stdin). Path kind is confirmed with a filesystem `stat` (heuristics: `.dat` → file; trailing `/` or no `.dat` extension → likely directory).
+
+| Input | Pipeline |
+|-------|----------|
+| Single local file | Multi-threaded seek split when multiple CPUs are available; otherwise sequential stream |
+| Directory of `.dat` | Lists top-level `*.dat` only; multi-core runs one sequential stream per file in parallel; single-threaded builds process files one at a time (within-file MT still used when processing files sequentially on multi-core) |
+| Remote URL / stdin | Sequential streaming via `processFromReader` (no parallel seeks) |
+
+WASM and the C ABI are unchanged (no network or directory fan-out).
 
 Smoke tests:
 
@@ -37,6 +45,12 @@ zig build -Doptimize=ReleaseFast
 
 # Stdin stream
 ./zig-out/bin/parser - ./output/stdin_test < src/testdata/mini_snapshot.dat
+
+# Directory of snapshots (each .dat → companies + persons CSVs)
+mkdir -p ./output/dir_in
+cp src/testdata/mini_snapshot.dat ./output/dir_in/a.dat
+cp src/testdata/mini_snapshot.dat ./output/dir_in/b.dat
+./zig-out/bin/parser ./output/dir_in ./output/dir_out
 ```
 
 ## Library API
@@ -49,7 +63,7 @@ Parsing is separate from CLI I/O so the same logic can be embedded:
 | C ABI | `include/ch_fixedwidth.h`, `libch_fixedwidth` | `ch_parse_snapshot` (one-shot) + `ch_stream_*` (batched streaming) |
 | WASM | `zig build wasm` → `ch_fixedwidth.wasm` | Same C-style exports, no filesystem I/O |
 | TypeScript host | [`wasm-ts/`](../wasm-ts/) | Publish-ready package: `ChFixedWidthStream` + `ChFixedWidthParser`; Bun CLI under `wasm-ts/local/` |
-| CLI | `src/main.zig` + `src/file_convert.zig` | Multithreaded local files; streaming HTTP(S) URL or stdin (`-`) (single pipeline) |
+| CLI | `src/main.zig` + `src/file_convert.zig` | Multithreaded local files; directory of `.dat` (file-level parallel); streaming HTTP(S) URL or stdin (`-`) |
 
 ### Large files (WASM / C)
 
