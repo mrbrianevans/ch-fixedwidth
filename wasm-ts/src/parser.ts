@@ -1,35 +1,38 @@
 import { getExports, instantiateWasm } from "./load.ts";
 import {
   ChParseError,
+  type ChFileType,
   type ChWasmExports,
+  type DocumentInput,
   type LoadOptions,
   type ParseResult,
-  type SnapshotInput,
 } from "./types.ts";
 
 /**
- * Size of `ChParseResult` on wasm32:
- * 5× ChBuffer (ptr+len) + 6× i32 = 5×8 + 6×4 = 64.
+ * wasm32 layout of ChParseResult:
+ * 10× i32 counts (40) + 8× ChBuffer ptr+len (8×8 = 64) = 104.
  */
-const PARSE_RESULT_SIZE = 64;
-const OFF_COMPANIES_PTR = 0;
-const OFF_COMPANIES_LEN = 4;
-const OFF_PERSONS_PTR = 8;
-const OFF_PERSONS_LEN = 12;
-const OFF_COMPANIES = 16;
-const OFF_PERSONS = 20;
-const OFF_TRAILER = 24;
-const OFF_DISQ_PTR = 28;
-const OFF_DISQ_LEN = 32;
-const OFF_EXEMPT_PTR = 36;
-const OFF_EXEMPT_LEN = 40;
-const OFF_VAR_PTR = 44;
-const OFF_VAR_LEN = 48;
-const OFF_DISQ = 52;
-const OFF_EXEMPT = 56;
-const OFF_VAR = 60;
+const PARSE_RESULT_SIZE = 104;
+const OFF_FILE_TYPE = 0;
+const OFF_TRAILER = 4;
+const OFF_COMPANIES = 8;
+const OFF_PERSONS = 12;
+const OFF_DISQ = 16;
+const OFF_EXEMPT = 20;
+const OFF_VAR = 24;
+const OFF_FORMS = 28;
+const OFF_PRAC = 32;
+const OFF_FREE = 36;
+const OFF_COMPANIES_CSV = 40;
+const OFF_PERSONS_CSV = 48;
+const OFF_DISQ_CSV = 56;
+const OFF_EXEMPT_CSV = 64;
+const OFF_VAR_CSV = 72;
+const OFF_FORMS_CSV = 80;
+const OFF_PRAC_CSV = 88;
+const OFF_FREE_CSV = 96;
 
-function toBytes(input: SnapshotInput): Uint8Array {
+function toBytes(input: DocumentInput): Uint8Array {
   if (typeof input === "string") {
     return new TextEncoder().encode(input);
   }
@@ -54,11 +57,19 @@ function copyUtf8(memory: WebAssembly.Memory, ptr: number, len: number): string 
   );
 }
 
+function readCsv(
+  memory: WebAssembly.Memory,
+  view: DataView,
+  bufOff: number,
+): string {
+  return copyUtf8(memory, readU32(view, bufOff), readU32(view, bufOff + 4));
+}
+
 /**
  * Host-side wrapper around the freestanding `ch_fixedwidth` WASM module.
  *
- * One-shot parse: entire input and both CSV outputs live in WASM linear memory.
- * Prefer the streaming API (when available) for multi-hundred-MB snapshots.
+ * One-shot parse: entire input and all CSV outputs live in WASM linear memory.
+ * Prefer the streaming API for multi-hundred-MB files.
  */
 export class ChFixedWidthParser {
   readonly exports: ChWasmExports;
@@ -79,16 +90,16 @@ export class ChFixedWidthParser {
   }
 
   /**
-   * Parse a full Companies House snapshot document into two CSV strings.
+   * Parse a full Companies House fixed-width document into named CSV strings.
    * Throws {@link ChParseError} on non-zero ABI status codes.
    */
-  parse(input: SnapshotInput): ParseResult {
+  parse(input: DocumentInput): ParseResult {
     const bytes = toBytes(input);
     if (bytes.byteLength === 0) {
       throw new ChParseError(1);
     }
 
-    const { memory, ch_alloc, ch_free, ch_parse_snapshot, ch_parse_result_free } =
+    const { memory, ch_alloc, ch_free, ch_parse, ch_parse_result_free } =
       this.exports;
 
     const inputPtr = ch_alloc(bytes.byteLength);
@@ -103,45 +114,34 @@ export class ChFixedWidthParser {
     }
 
     try {
-      // Re-read memory.buffer after each alloc — growth may detach the old buffer.
       new Uint8Array(memory.buffer, inputPtr, bytes.byteLength).set(bytes);
       new Uint8Array(memory.buffer, resultPtr, PARSE_RESULT_SIZE).fill(0);
 
-      const code = ch_parse_snapshot(inputPtr, bytes.byteLength, resultPtr);
+      const code = ch_parse(inputPtr, bytes.byteLength, resultPtr);
       if (code !== 0) {
         throw new ChParseError(code);
       }
 
       const view = new DataView(memory.buffer, resultPtr, PARSE_RESULT_SIZE);
-      const companiesPtr = readU32(view, OFF_COMPANIES_PTR);
-      const companiesLen = readU32(view, OFF_COMPANIES_LEN);
-      const personsPtr = readU32(view, OFF_PERSONS_PTR);
-      const personsLen = readU32(view, OFF_PERSONS_LEN);
-
       return {
-        companiesCsv: copyUtf8(memory, companiesPtr, companiesLen),
-        personsCsv: copyUtf8(memory, personsPtr, personsLen),
+        fileType: readI32(view, OFF_FILE_TYPE) as ChFileType,
+        trailerCount: readI32(view, OFF_TRAILER),
         companies: readI32(view, OFF_COMPANIES),
         persons: readI32(view, OFF_PERSONS),
-        trailerCount: readI32(view, OFF_TRAILER),
-        disqualificationsCsv: copyUtf8(
-          memory,
-          readU32(view, OFF_DISQ_PTR),
-          readU32(view, OFF_DISQ_LEN),
-        ),
-        exemptionsCsv: copyUtf8(
-          memory,
-          readU32(view, OFF_EXEMPT_PTR),
-          readU32(view, OFF_EXEMPT_LEN),
-        ),
-        variationsCsv: copyUtf8(
-          memory,
-          readU32(view, OFF_VAR_PTR),
-          readU32(view, OFF_VAR_LEN),
-        ),
         disqualifications: readI32(view, OFF_DISQ),
         exemptions: readI32(view, OFF_EXEMPT),
         variations: readI32(view, OFF_VAR),
+        forms: readI32(view, OFF_FORMS),
+        practitioners: readI32(view, OFF_PRAC),
+        freeText: readI32(view, OFF_FREE),
+        companiesCsv: readCsv(memory, view, OFF_COMPANIES_CSV),
+        personsCsv: readCsv(memory, view, OFF_PERSONS_CSV),
+        disqualificationsCsv: readCsv(memory, view, OFF_DISQ_CSV),
+        exemptionsCsv: readCsv(memory, view, OFF_EXEMPT_CSV),
+        variationsCsv: readCsv(memory, view, OFF_VAR_CSV),
+        formsCsv: readCsv(memory, view, OFF_FORMS_CSV),
+        practitionersCsv: readCsv(memory, view, OFF_PRAC_CSV),
+        freeTextCsv: readCsv(memory, view, OFF_FREE_CSV),
       };
     } finally {
       ch_parse_result_free(resultPtr);

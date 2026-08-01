@@ -1,7 +1,7 @@
 {
   "name": "@ch-fixedwidth/wasm-ts",
-  "version": "0.0.1",
-  "description": "TypeScript host for the freestanding Companies House fixed-width WASM parser",
+  "version": "0.1.0",
+  "description": "TypeScript host for the freestanding ch_fixedwidth multi-product WASM parser",
   "license": "MIT",
   "type": "module",
   "private": true,

@@ -2,6 +2,7 @@
  * Main thread: pickers, batch queue, progress, streaming writes.
  * Parsing runs in worker.ts (one file at a time).
  */
+import { outputFileName, type CsvBatchKind, type StreamStats } from "@ch-fixedwidth/wasm-ts";
 import wasmUrl from "../ch_fixedwidth.wasm?url";
 import type { WorkerOutMessage } from "./types.ts";
 
@@ -36,8 +37,8 @@ interface QueueItem {
   file: File;
   status: ItemStatus;
   error?: string;
-  companies?: number;
-  persons?: number;
+  /** Row counts by output kind (from stream stats). */
+  stats?: StreamStats;
   /** Frozen parse elapsed (set at end of read / on done). */
   elapsedMs?: number;
   bytesRead?: number;
@@ -57,10 +58,10 @@ const allowMultiFile = canStreamToDisk;
 
 let queue: QueueItem[] = [];
 let outputDir: FileSystemDirectoryHandle | null = null;
-let companiesChunks: Uint8Array[] = [];
-let personsChunks: Uint8Array[] = [];
-let companiesWritable: FileSystemWritableFileStream | null = null;
-let personsWritable: FileSystemWritableFileStream | null = null;
+/** Open writers keyed by output kind (lazy; product-dependent). */
+let kindWritables = new Map<CsvBatchKind, FileSystemWritableFileStream>();
+/** In-memory download fallback chunks when no directory picker. */
+let kindChunks = new Map<CsvBatchKind, Uint8Array[]>();
 let worker: Worker | null = null;
 /** True while a batch run (possibly multi-file) is in progress. */
 let converting = false;
@@ -119,6 +120,36 @@ function formatRecPerSec(records: number, elapsedMs: number): string {
   if (recPerSec >= 1_000_000) return `${(recPerSec / 1_000_000).toFixed(2)} M rec/s`;
   if (recPerSec >= 1000) return `${(recPerSec / 1000).toFixed(1)} k rec/s`;
   return `${formatNumber(Math.round(recPerSec))} rec/s`;
+}
+
+function totalDataRows(stats?: StreamStats): number {
+  if (!stats) return 0;
+  return (
+    stats.companies +
+    stats.persons +
+    stats.disqualifications +
+    stats.exemptions +
+    stats.variations +
+    stats.forms +
+    stats.practitioners +
+    stats.freeText
+  );
+}
+
+/** Compact non-zero row counts for the results line. */
+function formatStatsCounts(stats?: StreamStats): string {
+  if (!stats) return "0 rows";
+  const parts: string[] = [];
+  if (stats.companies) parts.push(`${formatNumber(stats.companies)} co`);
+  if (stats.persons) parts.push(`${formatNumber(stats.persons)} pe`);
+  if (stats.disqualifications) parts.push(`${formatNumber(stats.disqualifications)} disq`);
+  if (stats.exemptions) parts.push(`${formatNumber(stats.exemptions)} ex`);
+  if (stats.variations) parts.push(`${formatNumber(stats.variations)} var`);
+  if (stats.forms) parts.push(`${formatNumber(stats.forms)} forms`);
+  if (stats.practitioners) parts.push(`${formatNumber(stats.practitioners)} prac`);
+  if (stats.freeText) parts.push(`${formatNumber(stats.freeText)} ft`);
+  if (parts.length === 0) return "0 rows";
+  return parts.join(", ");
 }
 
 function setStatus(text: string, kind: "" | "ok" | "error" = ""): void {
@@ -190,9 +221,8 @@ function enterWritingPhase(item: QueueItem): void {
 
 function resultMetaLine(item: QueueItem): string {
   const size = formatBytes(item.file.size);
-  const co = item.companies ?? 0;
-  const pe = item.persons ?? 0;
-  const records = co + pe;
+  const records = totalDataRows(item.stats);
+  const counts = formatStatsCounts(item.stats);
   const elapsed = itemElapsedMs(item);
 
   switch (item.status) {
@@ -204,8 +234,7 @@ function resultMetaLine(item: QueueItem): string {
           size,
           "Writing",
           formatElapsed(elapsed),
-          `${formatNumber(co)} co`,
-          `${formatNumber(pe)} pe`,
+          counts,
           formatRecPerSec(records, elapsed),
         ].join(" · ");
       }
@@ -213,8 +242,7 @@ function resultMetaLine(item: QueueItem): string {
         size,
         "Converting",
         formatElapsed(elapsed),
-        `${formatNumber(co)} co`,
-        `${formatNumber(pe)} pe`,
+        counts,
         formatRecPerSec(records, elapsed),
       ];
       if (item.bytesRead != null && item.file.size > 0) {
@@ -227,8 +255,7 @@ function resultMetaLine(item: QueueItem): string {
       const bits = [
         size,
         `Done in ${formatElapsed(elapsed)}`,
-        `${formatNumber(co)} co`,
-        `${formatNumber(pe)} pe`,
+        counts,
         formatRecPerSec(records, elapsed),
       ];
       return bits.join(" · ");
@@ -421,62 +448,55 @@ async function pickOutputDir(): Promise<void> {
   }
 }
 
-async function openWritables(base: string): Promise<void> {
-  companiesChunks = [];
-  personsChunks = [];
-  companiesWritable = null;
-  personsWritable = null;
-
-  if (outputDir) {
-    const cHandle = await outputDir.getFileHandle(`companies_data_${base}.csv`, {
-      create: true,
-    });
-    const pHandle = await outputDir.getFileHandle(`persons_data_${base}.csv`, {
-      create: true,
-    });
-    companiesWritable = await cHandle.createWritable();
-    personsWritable = await pHandle.createWritable();
-  }
+function resetWritables(): void {
+  kindWritables = new Map();
+  kindChunks = new Map();
 }
 
-async function writeBatch(kind: "companies" | "persons", data: ArrayBuffer): Promise<void> {
-  const bytes = new Uint8Array(data);
-  if (kind === "companies") {
-    if (companiesWritable) await companiesWritable.write(bytes);
-    else companiesChunks.push(bytes);
-  } else if (personsWritable) {
-    await personsWritable.write(bytes);
-  } else {
-    personsChunks.push(bytes);
+async function ensureWritable(kind: CsvBatchKind, base: string): Promise<void> {
+  if (kindWritables.has(kind)) return;
+  if (!outputDir) {
+    if (!kindChunks.has(kind)) kindChunks.set(kind, []);
+    return;
   }
+  const handle = await outputDir.getFileHandle(outputFileName(kind, base), {
+    create: true,
+  });
+  kindWritables.set(kind, await handle.createWritable());
+}
+
+async function writeBatch(kind: CsvBatchKind, data: ArrayBuffer, base: string): Promise<void> {
+  const bytes = new Uint8Array(data);
+  await ensureWritable(kind, base);
+  const writable = kindWritables.get(kind);
+  if (writable) {
+    await writable.write(bytes);
+    return;
+  }
+  let chunks = kindChunks.get(kind);
+  if (!chunks) {
+    chunks = [];
+    kindChunks.set(kind, chunks);
+  }
+  chunks.push(bytes);
 }
 
 async function closeWritables(): Promise<void> {
-  if (companiesWritable) {
-    await companiesWritable.close();
-    companiesWritable = null;
+  for (const w of kindWritables.values()) {
+    await w.close();
   }
-  if (personsWritable) {
-    await personsWritable.close();
-    personsWritable = null;
-  }
+  kindWritables = new Map();
 }
 
 async function abortWritables(): Promise<void> {
-  try {
-    if (companiesWritable) await companiesWritable.abort();
-  } catch {
-    /* ignore */
+  for (const w of kindWritables.values()) {
+    try {
+      await w.abort();
+    } catch {
+      /* ignore */
+    }
   }
-  try {
-    if (personsWritable) await personsWritable.abort();
-  } catch {
-    /* ignore */
-  }
-  companiesWritable = null;
-  personsWritable = null;
-  companiesChunks = [];
-  personsChunks = [];
+  resetWritables();
 }
 
 function triggerDownload(blob: Blob, name: string): void {
@@ -492,18 +512,16 @@ function triggerDownload(blob: Blob, name: string): void {
 }
 
 function downloadFallback(base: string): void {
-  triggerDownload(
-    new Blob(companiesChunks as BlobPart[], { type: "text/csv;charset=utf-8" }),
-    `companies_data_${base}.csv`,
-  );
-  setTimeout(() => {
-    triggerDownload(
-      new Blob(personsChunks as BlobPart[], { type: "text/csv;charset=utf-8" }),
-      `persons_data_${base}.csv`,
-    );
-  }, 250);
-  companiesChunks = [];
-  personsChunks = [];
+  const entries = [...kindChunks.entries()];
+  entries.forEach(([kind, chunks], i) => {
+    setTimeout(() => {
+      triggerDownload(
+        new Blob(chunks as BlobPart[], { type: "text/csv;charset=utf-8" }),
+        outputFileName(kind, base),
+      );
+    }, i * 250);
+  });
+  kindChunks = new Map();
 }
 
 function setConverting(on: boolean): void {
@@ -657,8 +675,7 @@ async function runBatchLoop(): Promise<void> {
     currentItemId = item.id;
     item.status = "converting";
     item.error = undefined;
-    item.companies = 0;
-    item.persons = 0;
+    item.stats = undefined;
     item.bytesRead = 0;
     item.elapsedMs = undefined;
     item.writing = false;
@@ -675,19 +692,7 @@ async function runBatchLoop(): Promise<void> {
         : "Starting…",
     );
 
-    try {
-      await openWritables(base);
-    } catch (err) {
-      stopLiveStatsTimer();
-      item.status = "error";
-      item.error = `Could not create outputs: ${String(err)}`;
-      item.startedAt = undefined;
-      currentItemId = null;
-      renderResults();
-      setStatus(`${item.file.name}: ${item.error}`, "error");
-      continue;
-    }
-
+    resetWritables();
     const outcome = await runWorkerForItem(item, base);
     stopLiveStatsTimer();
     currentItemId = null;
@@ -715,10 +720,7 @@ async function runBatchLoop(): Promise<void> {
     finishBatchRun();
   } else if (done === 1) {
     const only = queue.find((i) => i.status === "done");
-    setStatus(
-      `Done — ${formatNumber(only?.companies ?? 0)} companies, ${formatNumber(only?.persons ?? 0)} persons.`,
-      "ok",
-    );
+    setStatus(`Done — ${formatStatsCounts(only?.stats)}.`, "ok");
     finishBatchRun();
   } else {
     setStatus(`Batch complete — ${done} file${done === 1 ? "" : "s"} converted.`, "ok");
@@ -782,8 +784,7 @@ async function handleWorkerMessage(
     case "progress": {
       currentFileBytesRead = msg.bytesRead;
       item.bytesRead = msg.bytesRead;
-      item.companies = msg.companies;
-      item.persons = msg.persons;
+      item.stats = msg.stats;
       const readComplete = msg.totalBytes > 0 && msg.bytesRead >= msg.totalBytes;
       if (readComplete) {
         enterWritingPhase(item);
@@ -812,7 +813,7 @@ async function handleWorkerMessage(
           enterWritingPhase(item);
           renderResults();
         }
-        await writeBatch(msg.kind, msg.data);
+        await writeBatch(msg.kind, msg.data, base);
         return null;
       } catch (err) {
         worker?.postMessage({ type: "cancel" });
@@ -829,8 +830,7 @@ async function handleWorkerMessage(
         if (!canStreamToDisk || !outputDir) downloadFallback(base);
         item.status = "done";
         item.writing = false;
-        item.companies = msg.companies;
-        item.persons = msg.persons;
+        item.stats = msg.stats;
         item.elapsedMs = msg.elapsedMs;
         item.bytesRead = msg.bytesRead;
         item.startedAt = undefined;
@@ -900,8 +900,7 @@ async function startBatch(retryFailedOnly: boolean): Promise<void> {
       if (item.status === "error" || item.status === "cancelled") {
         item.status = "pending";
         item.error = undefined;
-        item.companies = undefined;
-        item.persons = undefined;
+        item.stats = undefined;
         item.elapsedMs = undefined;
         item.bytesRead = undefined;
         item.startedAt = undefined;
@@ -1033,7 +1032,7 @@ function initInputStepCopy(): void {
   if (allowMultiFile) {
     el.dropZoneTitle.textContent = "Drop .dat files";
     el.dropZoneHint.textContent =
-      "One or more officers bulk files (batch requires an output folder)";
+      "Companies House bulk .dat files (batch requires an output folder)";
     el.dropZone.setAttribute("aria-label", "Drop .dat files here or press to browse");
     el.btnOpen.textContent = "Open files…";
     el.fileInput.multiple = true;

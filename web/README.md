@@ -1,13 +1,15 @@
-# Browser converter
+# ch-fixedwidth browser converter
 
-Convert Companies House officers bulk data (products 195 / 216, `.dat`) to tabular CSV in the browser.
+Convert Companies House fixed-width bulk data (products 195 / 216 / 198 / 192 / 197, `.dat`) to tabular CSV in the browser.
 
 - Zig WASM via local `@ch-fixedwidth/wasm-ts`
 - Streams input (`File.stream`, 8 MiB batches) in a Worker
+- Named CSV outputs per product (`companies_data_*`, `forms_data_*`, …) — never overloaded kinds
 - Chromium: write CSVs to a chosen folder; multi-file batch queue (one file at a time, retry failed)
 - Other browsers: single file, in-memory download fallback
-- Memory estimate during conversion (JS heap when available + WASM linear memory; no special headers required)
+- Memory estimate during conversion (JS heap when available + WASM linear memory)
 - **Vite** for dev (HMR) and production builds — plain HTML / CSS / TypeScript (no UI framework)
+- Visual language: [agents/design.md](../agents/design.md) (converter system)
 
 ## Setup
 

@@ -8,11 +8,36 @@ export const ChErrorCode = {
   OutOfMemory: 5,
   Internal: 6,
   StreamState: 7,
-  /** Known product magic (e.g. DDDDUPDT / DISQUALS) without a body parser yet. */
+  /** Known product magic without a body parser yet. */
   NotImplemented: 8,
 } as const;
 
 export type ChErrorCode = (typeof ChErrorCode)[keyof typeof ChErrorCode];
+
+/** Product id after header magic is known (`CH_FILE_*`). */
+export const ChFileType = {
+  Unknown: -1,
+  OfficersSnapshot: 0,
+  OfficersUpdate: 1,
+  Disqualifications: 2,
+  Liquidation: 3,
+} as const;
+
+export type ChFileType = (typeof ChFileType)[keyof typeof ChFileType];
+
+/** CSV output channel (`CH_OUTPUT_*` / `OutputKind`). */
+export const ChOutputKind = {
+  Companies: 0,
+  Persons: 1,
+  Disqualifications: 2,
+  Exemptions: 3,
+  Variations: 4,
+  Forms: 5,
+  Practitioners: 6,
+  FreeText: 7,
+} as const;
+
+export type ChOutputKindCode = (typeof ChOutputKind)[keyof typeof ChOutputKind];
 
 const ERROR_MESSAGES: Record<number, string> = {
   [ChErrorCode.Ok]: "OK",
@@ -25,7 +50,7 @@ const ERROR_MESSAGES: Record<number, string> = {
   [ChErrorCode.Internal]: "Internal parser error",
   [ChErrorCode.StreamState]: "Invalid stream state (already finished or data after trailer)",
   [ChErrorCode.NotImplemented]:
-    "Recognised product header, but this file type is not implemented yet (unused when all products are wired)",
+    "Recognised product header, but this file type is not implemented yet",
 };
 
 export class ChParseError extends Error {
@@ -39,44 +64,103 @@ export class ChParseError extends Error {
   }
 }
 
-/** Snapshot bytes accepted by the one-shot parser (plain-text fixed-width file). */
-export type SnapshotInput = Uint8Array | ArrayBuffer | string;
+/** Fixed-width document bytes accepted by the one-shot parser. */
+export type DocumentInput = Uint8Array | ArrayBuffer | string;
+
+/** @deprecated Use {@link DocumentInput}. */
+export type SnapshotInput = DocumentInput;
 
 /**
  * Successful in-memory parse result.
- * CSV strings include the header row and trailing newlines on data rows.
- * Prod 192 fills the disqualification fields; officers products leave them empty.
- * Prod 197 maps forms→companiesCsv, practitioners→personsCsv, free text→disqualificationsCsv.
+ * CSV strings include the header row. Unused product outputs are empty strings / 0.
  */
 export interface ParseResult {
-  /** Full companies CSV (or Prod 197 forms CSV). Empty for Prod 192. */
-  companiesCsv: string;
-  /** Full persons CSV (or Prod 197 practitioners CSV). */
-  personsCsv: string;
-  /** Number of company / form data rows written. */
-  companies: number;
-  /** Number of person / practitioner data rows written. */
-  persons: number;
-  /** Trailer total record count from the input. */
+  fileType: ChFileType;
   trailerCount: number;
-  /** Prod 192 type 2, or Prod 197 free text CSV (empty string for officers). */
+  companiesCsv: string;
+  personsCsv: string;
   disqualificationsCsv: string;
-  /** Prod 192 type 3 exemptions CSV (empty string for officers / Prod 197). */
   exemptionsCsv: string;
-  /** Prod 192 type 4 variations CSV (empty string for officers / Prod 197). */
   variationsCsv: string;
+  formsCsv: string;
+  practitionersCsv: string;
+  freeTextCsv: string;
+  companies: number;
+  persons: number;
   disqualifications: number;
   exemptions: number;
   variations: number;
+  forms: number;
+  practitioners: number;
+  freeText: number;
 }
 
-/** CSV batch kind from the streaming API. */
+/** Named CSV batch kind from the streaming API. */
 export type CsvBatchKind =
   | "companies"
   | "persons"
   | "disqualifications"
   | "exemptions"
-  | "variations";
+  | "variations"
+  | "forms"
+  | "practitioners"
+  | "free_text";
+
+const BATCH_KIND_BY_CODE: Record<number, CsvBatchKind> = {
+  [ChOutputKind.Companies]: "companies",
+  [ChOutputKind.Persons]: "persons",
+  [ChOutputKind.Disqualifications]: "disqualifications",
+  [ChOutputKind.Exemptions]: "exemptions",
+  [ChOutputKind.Variations]: "variations",
+  [ChOutputKind.Forms]: "forms",
+  [ChOutputKind.Practitioners]: "practitioners",
+  [ChOutputKind.FreeText]: "free_text",
+};
+
+export function csvBatchKindFromCode(code: number): CsvBatchKind {
+  return BATCH_KIND_BY_CODE[code] ?? "companies";
+}
+
+/** Filename stem before `_<basename>.csv`. */
+export function outputFileStem(kind: CsvBatchKind): string {
+  switch (kind) {
+    case "companies":
+      return "companies_data";
+    case "persons":
+      return "persons_data";
+    case "disqualifications":
+      return "disqualifications_data";
+    case "exemptions":
+      return "exemptions_data";
+    case "variations":
+      return "variations_data";
+    case "forms":
+      return "forms_data";
+    case "practitioners":
+      return "practitioners_data";
+    case "free_text":
+      return "free_text_data";
+  }
+}
+
+export function outputFileName(kind: CsvBatchKind, baseName: string): string {
+  return `${outputFileStem(kind)}_${baseName}.csv`;
+}
+
+/** Output kinds emitted by each product (stable writer order). */
+export function outputKindsForFileType(fileType: ChFileType): CsvBatchKind[] {
+  switch (fileType) {
+    case ChFileType.OfficersSnapshot:
+    case ChFileType.OfficersUpdate:
+      return ["companies", "persons"];
+    case ChFileType.Disqualifications:
+      return ["persons", "disqualifications", "exemptions", "variations"];
+    case ChFileType.Liquidation:
+      return ["forms", "practitioners", "free_text"];
+    default:
+      return [];
+  }
+}
 
 /** One batched CSV chunk from the streaming parser (owned by the host). */
 export interface CsvBatch {
@@ -90,9 +174,16 @@ export interface CsvBatch {
 }
 
 export interface StreamStats {
+  fileType: ChFileType;
+  trailerCount: number;
   companies: number;
   persons: number;
-  trailerCount: number;
+  disqualifications: number;
+  exemptions: number;
+  variations: number;
+  forms: number;
+  practitioners: number;
+  freeText: number;
 }
 
 export interface StreamOptions extends LoadOptions {
@@ -113,30 +204,21 @@ export interface ChWasmExports {
   memory: WebAssembly.Memory;
   ch_alloc(size: number): number;
   ch_free(ptr: number, size: number): void;
-  ch_parse_snapshot(inputPtr: number, inputLen: number, outPtr: number): number;
+  ch_parse(inputPtr: number, inputLen: number, outPtr: number): number;
   ch_parse_result_free(resultPtr: number): void;
   ch_buffer_free(bufPtr: number): void;
-  // Streaming (optional on older modules — host checks before use)
   ch_stream_create?(configPtr: number): number;
   ch_stream_destroy?(streamPtr: number): void;
   ch_stream_feed?(streamPtr: number, dataPtr: number, len: number): number;
   ch_stream_finish?(streamPtr: number): number;
   ch_stream_next_batch?(streamPtr: number, outPtr: number): number;
   ch_csv_batch_free?(batchPtr: number): void;
-  ch_stream_stats?(
-    streamPtr: number,
-    companiesPtr: number,
-    personsPtr: number,
-    trailerPtr: number,
-  ): void;
+  ch_stream_stats?(streamPtr: number, outPtr: number): void;
 }
 
 /**
  * How to load the freestanding `ch_fixedwidth.wasm` module.
  * Provide exactly one of `module`, `wasmBytes`, or `wasmUrl`.
- *
- * For Node/Bun local files, read the file yourself and pass `wasmBytes`
- * (this package does not depend on a filesystem API).
  */
 export interface LoadOptions {
   /** Pre-compiled module (skips fetch/compile of bytes). */

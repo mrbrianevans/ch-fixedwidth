@@ -1,7 +1,7 @@
 {
-  "name": "Companies House officers converter",
-  "short_name": "CH Converter",
-  "description": "Convert Companies House officers bulk data (.dat, products 195 / 216) to tabular CSV. Runs entirely in your browser.",
+  "name": "ch-fixedwidth converter",
+  "short_name": "ch-fixedwidth",
+  "description": "Convert Companies House fixed-width bulk data (.dat) to tabular CSV. Runs entirely in your browser.",
   "id": "./",
   "start_url": "./",
   "scope": "./",

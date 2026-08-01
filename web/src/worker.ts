@@ -1,7 +1,7 @@
 /**
  * Dedicated worker: load WASM, stream File in large batches, post CSV fragments.
  */
-import { ChFixedWidthStream, ChParseError } from "@ch-fixedwidth/wasm-ts";
+import { ChFixedWidthStream, ChParseError, type CsvBatch } from "@ch-fixedwidth/wasm-ts";
 import type { WorkerInMessage, WorkerOutMessage } from "./types.ts";
 
 const DEFAULT_INPUT_BATCH = 8 * 1024 * 1024; // 8 MiB
@@ -24,7 +24,7 @@ function progressEvery(totalBytes: number): number {
   return Math.max(1, Math.min(32 * 1024 * 1024, Math.floor(totalBytes / 50) || 1));
 }
 
-function emitBatches(batches: { kind: "companies" | "persons"; data: Uint8Array; rowCount: number }[]): void {
+function emitBatches(batches: CsvBatch[]): void {
   for (const batch of batches) {
     const ab = batch.data.buffer.slice(
       batch.data.byteOffset,
@@ -42,7 +42,6 @@ async function convert(file: File, wasmUrl: string, inputBatchBytes: number): Pr
   let lastProgressBytes = 0;
   let lastProgressAt = 0;
   const progressStep = progressEvery(totalBytes);
-  /** Also emit on a short wall-clock cadence so UI elapsed/rec-s stay live. */
   const progressIntervalMs = 150;
 
   const stream = await ChFixedWidthStream.create({
@@ -54,13 +53,11 @@ async function convert(file: File, wasmUrl: string, inputBatchBytes: number): Pr
   const emitProgress = (): void => {
     lastProgressBytes = bytesRead;
     lastProgressAt = performance.now();
-    const stats = stream.stats();
     post({
       type: "progress",
       bytesRead,
       totalBytes,
-      companies: stats.companies,
-      persons: stats.persons,
+      stats: stream.stats(),
       wasmMemoryBytes: wasmMemoryBytes(stream),
     });
   };
@@ -123,15 +120,12 @@ async function convert(file: File, wasmUrl: string, inputBatchBytes: number): Pr
       type: "progress",
       bytesRead,
       totalBytes,
-      companies: stats.companies,
-      persons: stats.persons,
+      stats,
       wasmMemoryBytes: mem,
     });
     post({
       type: "done",
-      companies: stats.companies,
-      persons: stats.persons,
-      trailerCount: stats.trailerCount,
+      stats,
       bytesRead,
       elapsedMs: performance.now() - started,
       wasmMemoryBytes: mem,

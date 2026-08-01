@@ -1,9 +1,9 @@
 /**
  * Local Bun CLI — not part of the published package API.
  *
- * Uses the **streaming** WASM API so large snapshots never need to sit fully
- * in linear memory. Input is read in chunks; CSV batches are written as they
- * arrive.
+ * Uses the **streaming** WASM API so large files never need to sit fully
+ * in linear memory. Input is read in chunks; CSV batches are written to the
+ * product-specific filename for each OutputKind.
  *
  *   bun run local/cli.ts <input.dat> [output_dir]
  *
@@ -12,13 +12,16 @@
  *   CHUNK_SIZE  input chunk size in bytes (default: 1048576)
  */
 
-import { createWriteStream } from "node:fs";
+import { createWriteStream, type WriteStream } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { basename, join } from "node:path";
 import {
   ChFixedWidthStream,
   ChParseError,
+  outputFileName,
   type CsvBatch,
+  type CsvBatchKind,
+  type StreamStats,
 } from "../src/index.ts";
 
 const repoRoot = join(import.meta.dir, "..", "..");
@@ -46,14 +49,21 @@ const wasmBytes = await wasmFile.arrayBuffer();
 const base = basename(inputPath).replace(/\.[^.]+$/, "");
 await mkdir(outputDir, { recursive: true });
 
-const companiesPath = join(outputDir, `companies_data_${base}.csv`);
-const personsPath = join(outputDir, `persons_data_${base}.csv`);
+const writers = new Map<CsvBatchKind, WriteStream>();
 
-const companiesOut = createWriteStream(companiesPath);
-const personsOut = createWriteStream(personsPath);
+function getWriter(kind: CsvBatchKind): WriteStream {
+  let w = writers.get(kind);
+  if (!w) {
+    const path = join(outputDir, outputFileName(kind, base));
+    w = createWriteStream(path);
+    writers.set(kind, w);
+    console.log(`Writing ${path}`);
+  }
+  return w;
+}
 
 function writeBatch(batch: CsvBatch): Promise<void> {
-  const stream = batch.kind === "companies" ? companiesOut : personsOut;
+  const stream = getWriter(batch.kind);
   return new Promise((resolve, reject) => {
     stream.write(batch.data, (err) => (err ? reject(err) : resolve()));
   });
@@ -61,7 +71,7 @@ function writeBatch(batch: CsvBatch): Promise<void> {
 
 async function closeWriters(): Promise<void> {
   await Promise.all(
-    [companiesOut, personsOut].map(
+    [...writers.values()].map(
       (s) =>
         new Promise<void>((resolve, reject) =>
           s.end((err) => (err ? reject(err) : resolve())),
@@ -70,10 +80,23 @@ async function closeWriters(): Promise<void> {
   );
 }
 
+function formatStats(stats: StreamStats): string {
+  const parts: string[] = [];
+  if (stats.companies) parts.push(`${stats.companies} companies`);
+  if (stats.persons) parts.push(`${stats.persons} persons`);
+  if (stats.disqualifications) parts.push(`${stats.disqualifications} disqualifications`);
+  if (stats.exemptions) parts.push(`${stats.exemptions} exemptions`);
+  if (stats.variations) parts.push(`${stats.variations} variations`);
+  if (stats.forms) parts.push(`${stats.forms} forms`);
+  if (stats.practitioners) parts.push(`${stats.practitioners} practitioners`);
+  if (stats.freeText) parts.push(`${stats.freeText} free text`);
+  const detail = parts.length ? parts.join(", ") : "no data rows";
+  return `Processed ${stats.trailerCount} trailer records: ${detail} (streaming).`;
+}
+
 const stream = await ChFixedWidthStream.create({ wasmBytes });
 try {
   const file = Bun.file(inputPath);
-  // Prefer streaming read when available; fall back to chunked arrayBuffer for small files.
   if (typeof file.stream === "function") {
     const reader = file.stream().getReader();
     while (true) {
@@ -101,16 +124,10 @@ try {
 
   const stats = stream.stats();
   await closeWriters();
-
-  console.log(
-    `Processed ${stats.trailerCount} records: ${stats.companies} companies, ${stats.persons} persons (streaming).`,
-  );
-  console.log(`Wrote ${companiesPath}`);
-  console.log(`Wrote ${personsPath}`);
+  console.log(formatStats(stats));
 } catch (err) {
   stream.destroy();
-  companiesOut.destroy();
-  personsOut.destroy();
+  for (const w of writers.values()) w.destroy();
   if (err instanceof ChParseError) {
     console.error(`Parse failed (${err.code}): ${err.message}`);
     process.exit(1);

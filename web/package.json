@@ -1,9 +1,9 @@
 {
   "name": "ch-fixedwidth-web",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Browser converter for Companies House fixed-width appointment snapshots",
+  "description": "Browser converter for Companies House fixed-width bulk products (ch-fixedwidth)",
   "scripts": {
     "postinstall": "bun run link-local",
     "link-local": "bun run scripts/link-local.ts",
