@@ -38,7 +38,7 @@ typedef struct ChParseResult {
 #define CH_OK 0
 /** NULL pointer or empty input */
 #define CH_ERR_INVALID_ARG 1
-/** Header is not DDDDSNAP / too short */
+/** Header is unknown / too short (not a recognised product magic) */
 #define CH_ERR_UNSUPPORTED_HEADER 2
 /** No trailer record */
 #define CH_ERR_MISSING_TRAILER 3
@@ -50,6 +50,8 @@ typedef struct ChParseResult {
 #define CH_ERR_INTERNAL 6
 /** Stream used after finish, or non-whitespace data after trailer */
 #define CH_ERR_STREAM_STATE 7
+/** Known product header (e.g. DDDDUPDT / DISQUALS) but body parser not implemented yet */
+#define CH_ERR_NOT_IMPLEMENTED 8
 
 /**
  * Parse a full snapshot document in memory into two CSV documents (with headers).

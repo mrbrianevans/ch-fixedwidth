@@ -5,6 +5,12 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Header-based product dispatch: the first 8-byte header identifier selects the body parser (`DDDDSNAP` implemented; `DDDDUPDT` and `DISQUALS` recognised and rejected with `NotImplemented` / `CH_ERR_NOT_IMPLEMENTED` until their parsers land)
+
 ## [0.0.2] — 2026-08-01
 
 ### Added

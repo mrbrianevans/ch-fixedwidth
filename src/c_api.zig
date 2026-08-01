@@ -49,6 +49,8 @@ pub const CH_ERR_OUT_OF_MEMORY: c_int = 5;
 pub const CH_ERR_INTERNAL: c_int = 6;
 /// Stream already finished, or feed after trailer with non-whitespace data.
 pub const CH_ERR_STREAM_STATE: c_int = 7;
+/// Known product header, but no body parser is implemented yet.
+pub const CH_ERR_NOT_IMPLEMENTED: c_int = 8;
 
 fn gpa() std.mem.Allocator {
     if (comptime builtin.cpu.arch.isWasm()) {
@@ -60,6 +62,7 @@ fn gpa() std.mem.Allocator {
 fn mapStreamErr(err: stream_mod.ParseError) c_int {
     return switch (err) {
         error.UnsupportedFileType => CH_ERR_UNSUPPORTED_HEADER,
+        error.NotImplemented => CH_ERR_NOT_IMPLEMENTED,
         error.MissingTrailer => CH_ERR_MISSING_TRAILER,
         error.TrailerMismatch => CH_ERR_TRAILER_MISMATCH,
         error.OutOfMemory => CH_ERR_OUT_OF_MEMORY,
@@ -116,6 +119,7 @@ pub export fn ch_parse_snapshot(
     const parsed = snapshot.parseSnapshot(gpa(), slice) catch |err| {
         return switch (err) {
             error.UnsupportedFileType => CH_ERR_UNSUPPORTED_HEADER,
+            error.NotImplemented => CH_ERR_NOT_IMPLEMENTED,
             error.MissingTrailer => CH_ERR_MISSING_TRAILER,
             error.TrailerMismatch => CH_ERR_TRAILER_MISMATCH,
             error.OutOfMemory => CH_ERR_OUT_OF_MEMORY,

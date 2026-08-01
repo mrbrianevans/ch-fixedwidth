@@ -1,14 +1,61 @@
-//! Pure snapshot record parsing and CSV formatting (no file I/O).
+//! Pure record parsing and CSV formatting (no file I/O).
 //! Field layout matches the historical Go/Python reference parsers.
 //!
 //! Positions are Unicode character offsets (Python text mode). Most rows are
 //! pure ASCII, so the hot path uses byte indexing; multi-byte rows fall back
 //! to UTF-8 character walking so field boundaries still match the reference.
+//!
+//! File products share an 8-byte header identifier at the start of the first
+//! line. Callers identify the product from that magic, then branch to the
+//! matching body parser. Only officers snapshot (`DDDDSNAP`) is implemented
+//! today; update (`DDDDUPDT`) and disqualifications (`DISQUALS`) are recognised
+//! so they can be wired later.
 
 const std = @import("std");
 const unicode = std.unicode;
 
-pub const snapshot_header_identifier = "DDDDSNAP";
+/// Length of the product magic at the start of a header record / file.
+pub const header_identifier_len: usize = 8;
+
+/// Companies House bulk product identified from the header record magic.
+pub const FileType = enum {
+    /// Products 195 / 216 — company appointments snapshot.
+    officers_snapshot,
+    /// Product 198 — company appointments update (not implemented yet).
+    officers_update,
+    /// Product 192 — disqualified persons snapshot (not implemented yet).
+    disqualifications,
+
+    /// 8-byte header identifier for this product.
+    pub fn identifier(self: FileType) []const u8 {
+        return switch (self) {
+            .officers_snapshot => officers_snapshot_header_id,
+            .officers_update => officers_update_header_id,
+            .disqualifications => disqualifications_header_id,
+        };
+    }
+
+    /// Short human-readable product name (for logs / errors).
+    pub fn displayName(self: FileType) []const u8 {
+        return switch (self) {
+            .officers_snapshot => "officers snapshot (Prod 195/216)",
+            .officers_update => "officers update (Prod 198)",
+            .disqualifications => "disqualified persons (Prod 192)",
+        };
+    }
+
+    /// True when a full body parser exists for this product.
+    pub fn isImplemented(self: FileType) bool {
+        return self == .officers_snapshot;
+    }
+};
+
+pub const officers_snapshot_header_id = "DDDDSNAP";
+pub const officers_update_header_id = "DDDDUPDT";
+pub const disqualifications_header_id = "DISQUALS";
+
+/// Alias retained for callers that only deal with the officers snapshot product.
+pub const snapshot_header_identifier = officers_snapshot_header_id;
 pub const trailer_record_identifier = "99999999";
 pub const company_record_type: u8 = '1';
 pub const person_record_type: u8 = '2';
@@ -30,6 +77,7 @@ pub const LineKind = enum {
 };
 
 pub const HeaderInfo = struct {
+    file_type: FileType,
     run_number: []const u8,
     production_date: []const u8,
 };
@@ -146,9 +194,39 @@ pub fn appendInt(dest: []u8, pos: usize, n: i32) usize {
     return pos + digits.len;
 }
 
+/// Map an 8-byte header identifier to a known `FileType`.
+pub fn identifyFileType(header_id: []const u8) error{UnsupportedFileType}!FileType {
+    if (header_id.len < header_identifier_len) return error.UnsupportedFileType;
+    const id = header_id[0..header_identifier_len];
+    if (std.mem.eql(u8, id, officers_snapshot_header_id)) return .officers_snapshot;
+    if (std.mem.eql(u8, id, officers_update_header_id)) return .officers_update;
+    if (std.mem.eql(u8, id, disqualifications_header_id)) return .disqualifications;
+    return error.UnsupportedFileType;
+}
+
+/// Identify product from the leading bytes of a file or header line.
+pub fn identifyFileTypeFromInput(input: []const u8) error{UnsupportedFileType}!FileType {
+    if (input.len < header_identifier_len) return error.UnsupportedFileType;
+    return identifyFileType(input[0..header_identifier_len]);
+}
+
+/// Fail unless `file_type` has an implemented body parser.
+pub fn requireImplemented(file_type: FileType) error{NotImplemented}!void {
+    if (!file_type.isImplemented()) return error.NotImplemented;
+}
+
+/// Classify a line for the **officers snapshot** body layout (Prod 195/216).
+/// Known product header magics (including update / disqualifications) are
+/// reported as `.header` so the first line can be routed before body parsing.
 pub fn classifyLine(row: []const u8) LineKind {
-    if (row.len >= 8 and std.mem.eql(u8, row[0..8], snapshot_header_identifier)) return .header;
-    if (row.len >= 8 and std.mem.eql(u8, row[0..8], trailer_record_identifier)) return .trailer;
+    if (row.len >= header_identifier_len) {
+        if (identifyFileType(row[0..header_identifier_len])) |_| {
+            return .header;
+        } else |_| {}
+        if (std.mem.eql(u8, row[0..header_identifier_len], trailer_record_identifier)) {
+            return .trailer;
+        }
+    }
     if (row.len <= 8) return .other;
     return switch (row[8]) {
         company_record_type => .company,
@@ -159,8 +237,8 @@ pub fn classifyLine(row: []const u8) LineKind {
 
 /// True if `input` begins with the snapshot magic `DDDDSNAP`.
 pub fn startsWithSnapshotHeader(input: []const u8) bool {
-    return input.len >= snapshot_header_identifier.len and
-        std.mem.eql(u8, input[0..snapshot_header_identifier.len], snapshot_header_identifier);
+    return input.len >= officers_snapshot_header_id.len and
+        std.mem.eql(u8, input[0..officers_snapshot_header_id.len], officers_snapshot_header_id);
 }
 
 /// Fail unless `input` begins with `DDDDSNAP` (snapshot file signature).
@@ -168,11 +246,14 @@ pub fn requireSnapshotHeader(input: []const u8) error{UnsupportedFileType}!void 
     if (!startsWithSnapshotHeader(input)) return error.UnsupportedFileType;
 }
 
+/// Parse a header record for any known product (shared 20-byte layout).
+/// Does **not** require the product to be implemented — callers should branch
+/// on `file_type` / `requireImplemented` to select a body parser.
 pub fn parseHeader(row: []const u8) error{UnsupportedFileType}!HeaderInfo {
-    if (row.len < 20 or !std.mem.eql(u8, row[0..8], snapshot_header_identifier)) {
-        return error.UnsupportedFileType;
-    }
+    if (row.len < 20) return error.UnsupportedFileType;
+    const file_type = try identifyFileType(row[0..header_identifier_len]);
     return .{
+        .file_type = file_type,
         .run_number = row[8..12],
         .production_date = row[12..20],
     };

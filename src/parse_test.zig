@@ -13,16 +13,41 @@ const expected_persons = @embedFile("testdata/expected_persons.csv");
 
 test "classifyLine header company person trailer" {
     try std.testing.expectEqual(parse.LineKind.header, parse.classifyLine("DDDDSNAP425720260706"));
+    try std.testing.expectEqual(parse.LineKind.header, parse.classifyLine("DDDDUPDT172420161018"));
+    try std.testing.expectEqual(parse.LineKind.header, parse.classifyLine("DISQUALS000120240501"));
     try std.testing.expectEqual(parse.LineKind.trailer, parse.classifyLine("9999999900000004"));
     try std.testing.expectEqual(parse.LineKind.company, parse.classifyLine("029052131D                      00160024X<"));
     try std.testing.expectEqual(parse.LineKind.person, parse.classifyLine("029052132302900006800001Y       19940307"));
     try std.testing.expectEqual(parse.LineKind.other, parse.classifyLine("short"));
 }
 
-test "parseHeader extracts run and date" {
-    const info = try parse.parseHeader("DDDDSNAP425720260706");
-    try std.testing.expectEqualStrings("4257", info.run_number);
-    try std.testing.expectEqualStrings("20260706", info.production_date);
+test "identifyFileType maps known header magics" {
+    try std.testing.expectEqual(parse.FileType.officers_snapshot, try parse.identifyFileType("DDDDSNAP"));
+    try std.testing.expectEqual(parse.FileType.officers_update, try parse.identifyFileType("DDDDUPDT"));
+    try std.testing.expectEqual(parse.FileType.disqualifications, try parse.identifyFileType("DISQUALS"));
+    try std.testing.expectError(error.UnsupportedFileType, parse.identifyFileType("NOTASNAP"));
+    try std.testing.expectError(error.UnsupportedFileType, parse.identifyFileType("SHORT"));
+    try std.testing.expectEqual(parse.FileType.officers_snapshot, try parse.identifyFileTypeFromInput("DDDDSNAP425720260706\n"));
+    try std.testing.expect(parse.FileType.officers_snapshot.isImplemented());
+    try std.testing.expect(!parse.FileType.officers_update.isImplemented());
+    try std.testing.expect(!parse.FileType.disqualifications.isImplemented());
+}
+
+test "parseHeader extracts run and date for all known products" {
+    const snap = try parse.parseHeader("DDDDSNAP425720260706");
+    try std.testing.expectEqual(parse.FileType.officers_snapshot, snap.file_type);
+    try std.testing.expectEqualStrings("4257", snap.run_number);
+    try std.testing.expectEqualStrings("20260706", snap.production_date);
+
+    const upd = try parse.parseHeader("DDDDUPDT172420161018");
+    try std.testing.expectEqual(parse.FileType.officers_update, upd.file_type);
+    try std.testing.expectEqualStrings("1724", upd.run_number);
+    try std.testing.expectEqualStrings("20161018", upd.production_date);
+
+    const disq = try parse.parseHeader("DISQUALS000120240501");
+    try std.testing.expectEqual(parse.FileType.disqualifications, disq.file_type);
+    try std.testing.expectEqualStrings("0001", disq.run_number);
+    try std.testing.expectEqualStrings("20240501", disq.production_date);
 }
 
 test "parseHeader rejects bad header" {
@@ -36,6 +61,8 @@ test "requireSnapshotHeader checks file prefix" {
     try std.testing.expectError(error.UnsupportedFileType, parse.requireSnapshotHeader("DDDDSNA"));
     try std.testing.expectError(error.UnsupportedFileType, parse.requireSnapshotHeader("NOTASNAP425720260706\n"));
     try std.testing.expectError(error.UnsupportedFileType, parse.requireSnapshotHeader("PK\x03\x04zipfile"));
+    // Known but not the officers snapshot product.
+    try std.testing.expectError(error.UnsupportedFileType, parse.requireSnapshotHeader("DDDDUPDT172420161018\n"));
 }
 
 test "parseTrailerCount" {
@@ -113,6 +140,23 @@ test "parseSnapshot rejects non-snapshot prefix" {
     try std.testing.expectError(error.UnsupportedFileType, snapshot.parseSnapshot(std.testing.allocator, "random csv,data\n"));
 }
 
+test "parseSnapshot dispatches known-but-unimplemented headers" {
+    const update =
+        \\DDDDUPDT172420161018
+        \\019742101                       00070030WEST MIDLANDS ARTS TRUST(THE)<
+        \\9999999900000001
+        \\
+    ;
+    try std.testing.expectError(error.NotImplemented, snapshot.parseSnapshot(std.testing.allocator, update));
+
+    const disq =
+        \\DISQUALS000120240501
+        \\1...
+        \\
+    ;
+    try std.testing.expectError(error.NotImplemented, snapshot.parseSnapshot(std.testing.allocator, disq));
+}
+
 test "C ABI ch_parse_snapshot on mini fixture" {
     var out: c_api.ChParseResult = .{};
     const rc = c_api.ch_parse_snapshot(mini_snapshot.ptr, mini_snapshot.len, &out);
@@ -182,6 +226,17 @@ test "stream rejects wrong prefix across tiny chunks" {
     // Same path the web client can take: magic split across feeds.
     try s.feed("NOTA");
     try std.testing.expectError(error.UnsupportedFileType, s.feed("SNAP!!!!"));
+}
+
+test "stream rejects known-but-unimplemented product headers" {
+    const allocator = std.testing.allocator;
+    var s = stream_mod.Stream.init(allocator, .{});
+    defer s.deinit();
+    try std.testing.expectError(error.NotImplemented, s.feed("DDDDUPDT1724"));
+
+    var s2 = stream_mod.Stream.init(allocator, .{});
+    defer s2.deinit();
+    try std.testing.expectError(error.NotImplemented, s2.feed("DISQUALS0001"));
 }
 
 test "stream finish rejects empty input" {

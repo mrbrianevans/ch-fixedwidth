@@ -14,6 +14,7 @@ const parse = @import("parse.zig");
 
 pub const ParseError = error{
     UnsupportedFileType,
+    NotImplemented,
     MissingTrailer,
     TrailerMismatch,
     OutOfMemory,
@@ -75,9 +76,11 @@ pub const Stream = struct {
     finished: bool = false,
     saw_trailer: bool = false,
 
-    /// First bytes of the input stream; must form `DDDDSNAP` once 8 are seen.
-    magic: [parse.snapshot_header_identifier.len]u8 = undefined,
+    /// First bytes of the input stream; product magic once 8 are seen.
+    magic: [parse.header_identifier_len]u8 = undefined,
     magic_len: u8 = 0,
+    /// Set once the leading 8-byte header identifier has been identified.
+    file_type: ?parse.FileType = null,
 
     row_buf: [parse.max_csv_row_bytes]u8 = undefined,
 
@@ -97,9 +100,9 @@ pub const Stream = struct {
         self.* = undefined;
     }
 
-    /// Feed the next chunk of snapshot bytes. Drain with `nextBatch` afterward.
-    /// The overall input must begin with `DDDDSNAP` (checked once the first
-    /// 8 bytes have arrived).
+    /// Feed the next chunk of input bytes. Drain with `nextBatch` afterward.
+    /// The leading 8-byte header identifier selects the body parser (currently
+    /// only `DDDDSNAP` is implemented).
     pub fn feed(self: *Stream, chunk: []const u8) ParseError!void {
         if (self.finished) return error.AlreadyFinished;
         if (self.saw_trailer) {
@@ -153,8 +156,8 @@ pub const Stream = struct {
     pub fn finish(self: *Stream) ParseError!void {
         if (self.finished) return error.AlreadyFinished;
 
-        // Incomplete or missing snapshot signature.
-        if (self.magic_len < parse.snapshot_header_identifier.len) {
+        // Incomplete or missing product signature.
+        if (self.file_type == null) {
             return error.UnsupportedFileType;
         }
 
@@ -177,9 +180,10 @@ pub const Stream = struct {
         if (tc != self.companies + self.persons) return error.TrailerMismatch;
     }
 
-    /// Collect the leading bytes of the stream and require `DDDDSNAP`.
+    /// Collect the leading bytes of the stream, identify the product, and
+    /// reject unknown or not-yet-implemented formats.
     fn ingestMagic(self: *Stream, data: []const u8) ParseError!void {
-        const need = parse.snapshot_header_identifier.len;
+        const need = parse.header_identifier_len;
         if (self.magic_len >= need) return;
 
         const take = @min(need - self.magic_len, data.len);
@@ -188,9 +192,12 @@ pub const Stream = struct {
         self.magic_len += @intCast(take);
 
         if (self.magic_len < need) return;
-        if (!std.mem.eql(u8, self.magic[0..need], parse.snapshot_header_identifier)) {
+
+        const file_type = parse.identifyFileType(self.magic[0..need]) catch {
             return error.UnsupportedFileType;
-        }
+        };
+        try parse.requireImplemented(file_type);
+        self.file_type = file_type;
     }
 
     /// Pop the next completed CSV batch (caller owns `data`). Null if none.
@@ -203,9 +210,19 @@ pub const Stream = struct {
         const row = parse.stripCr(line_raw);
         if (row.len == 0) return;
 
+        // Body parsing is product-specific; only officers snapshot is wired.
+        const file_type = self.file_type orelse return error.UnsupportedFileType;
+        switch (file_type) {
+            .officers_snapshot => try self.handleOfficersSnapshotLine(row),
+            .officers_update, .disqualifications => return error.NotImplemented,
+        }
+    }
+
+    fn handleOfficersSnapshotLine(self: *Stream, row: []const u8) ParseError!void {
         switch (parse.classifyLine(row)) {
             .header => {
-                _ = parse.parseHeader(row) catch return error.UnsupportedFileType;
+                const info = parse.parseHeader(row) catch return error.UnsupportedFileType;
+                if (info.file_type != .officers_snapshot) return error.UnsupportedFileType;
                 self.header_seen = true;
                 try self.ensureCompaniesHeader();
                 try self.ensurePersonsHeader();

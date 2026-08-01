@@ -8,6 +8,8 @@ export const ChErrorCode = {
   OutOfMemory: 5,
   Internal: 6,
   StreamState: 7,
+  /** Known product magic (e.g. DDDDUPDT / DISQUALS) without a body parser yet. */
+  NotImplemented: 8,
 } as const;
 
 export type ChErrorCode = (typeof ChErrorCode)[keyof typeof ChErrorCode];
@@ -15,12 +17,15 @@ export type ChErrorCode = (typeof ChErrorCode)[keyof typeof ChErrorCode];
 const ERROR_MESSAGES: Record<number, string> = {
   [ChErrorCode.Ok]: "OK",
   [ChErrorCode.InvalidArg]: "Invalid argument (null or empty input)",
-  [ChErrorCode.UnsupportedHeader]: "Unsupported or missing DDDDSNAP header",
+  [ChErrorCode.UnsupportedHeader]:
+    "Unsupported or missing file header (expected a known 8-byte product magic)",
   [ChErrorCode.MissingTrailer]: "Missing trailer record",
   [ChErrorCode.TrailerMismatch]: "Trailer record count does not match rows parsed",
   [ChErrorCode.OutOfMemory]: "Out of memory in WASM allocator",
   [ChErrorCode.Internal]: "Internal parser error",
   [ChErrorCode.StreamState]: "Invalid stream state (already finished or data after trailer)",
+  [ChErrorCode.NotImplemented]:
+    "Recognised product header, but this file type is not implemented yet",
 };
 
 export class ChParseError extends Error {

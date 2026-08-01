@@ -1,11 +1,16 @@
-//! In-memory snapshot → CSV conversion (no filesystem I/O).
+//! In-memory fixed-width file → CSV conversion (no filesystem I/O).
 //! Used by the C ABI, WASM exports, and unit tests.
+//!
+//! Entry point `parseSnapshot` identifies the product from the header magic
+//! and dispatches to the matching body parser. Only officers snapshot
+//! (`DDDDSNAP`) is implemented today.
 
 const std = @import("std");
 const parse = @import("parse.zig");
 
 pub const ParseError = error{
     UnsupportedFileType,
+    NotImplemented,
     MissingTrailer,
     TrailerMismatch,
     OutOfMemory,
@@ -25,12 +30,23 @@ pub const ParseResult = struct {
     }
 };
 
-/// Parse a full snapshot buffer into companies and persons CSV (with headers).
+/// Parse a full fixed-width buffer into CSV outputs.
 /// Caller owns the result and must call `deinit`.
-/// Rejects input that does not begin with `DDDDSNAP`.
+///
+/// Dispatches on the 8-byte header identifier:
+/// - `DDDDSNAP` → officers snapshot (implemented)
+/// - `DDDDUPDT` / `DISQUALS` → `error.NotImplemented`
+/// - anything else → `error.UnsupportedFileType`
 pub fn parseSnapshot(allocator: std.mem.Allocator, input: []const u8) ParseError!ParseResult {
-    try parse.requireSnapshotHeader(input);
+    const file_type = try parse.identifyFileTypeFromInput(input);
+    return switch (file_type) {
+        .officers_snapshot => parseOfficersSnapshot(allocator, input),
+        .officers_update, .disqualifications => error.NotImplemented,
+    };
+}
 
+/// Officers appointments snapshot (Prod 195/216): companies + persons CSV.
+fn parseOfficersSnapshot(allocator: std.mem.Allocator, input: []const u8) ParseError!ParseResult {
     var companies = std.ArrayList(u8).empty;
     errdefer companies.deinit(allocator);
     var persons = std.ArrayList(u8).empty;
@@ -55,7 +71,8 @@ pub fn parseSnapshot(allocator: std.mem.Allocator, input: []const u8) ParseError
 
         switch (parse.classifyLine(row)) {
             .header => {
-                _ = parse.parseHeader(row) catch return error.UnsupportedFileType;
+                const info = parse.parseHeader(row) catch return error.UnsupportedFileType;
+                if (info.file_type != .officers_snapshot) return error.UnsupportedFileType;
             },
             .trailer => {
                 trailer_count = parse.parseTrailerCount(row);

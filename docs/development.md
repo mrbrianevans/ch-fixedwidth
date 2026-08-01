@@ -78,14 +78,23 @@ See also [`wasm-ts/README.md`](../wasm-ts/README.md).
 
 ## Supported products
 
+The parser reads the first 8 bytes of the header record and selects a body
+parser from that magic (`parse.identifyFileType` → product-specific path).
+
 | Product | Header | Status |
 |---------|--------|--------|
-| 195 / 216 (snapshot) | `DDDDSNAP` | Implemented |
-| 198 (update) | `DDDDUPDT` | Documented only — [Prod198_Update.md](Prod198_Update.md) |
+| 195 / 216 (appointments snapshot) | `DDDDSNAP` | Implemented |
+| 198 (appointments update) | `DDDDUPDT` | Recognised; body parser not implemented — [Prod198_Update.md](Prod198_Update.md) |
+| 192 (disqualified persons) | `DISQUALS` | Recognised; body parser not implemented — [Prod192_Disqualifications.md](Prod192_Disqualifications.md) |
+
+Unknown magics return `UnsupportedFileType` / `CH_ERR_UNSUPPORTED_HEADER`.
+Known-but-unimplemented products return `NotImplemented` / `CH_ERR_NOT_IMPLEMENTED`.
 
 ## Format reference
 
 - Snapshot field layouts: [Prod195_Snapshot.md](Prod195_Snapshot.md)
+- Update field layouts: [Prod198_Update.md](Prod198_Update.md)
+- Disqualification field layouts: [Prod192_Disqualifications.md](Prod192_Disqualifications.md)
 - Field positions are Unicode character offsets. Most rows are ASCII (fast path); multi-byte UTF-8 uses a character walk so boundaries match the historical reference parsers.
 
 ## Alternative implementations

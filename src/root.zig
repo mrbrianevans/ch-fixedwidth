@@ -1,7 +1,10 @@
-//! Companies House fixed-width snapshot parser library.
+//! Companies House fixed-width parser library.
 //!
-//! - `parse` — pure record classification and CSV formatting (no I/O)
-//! - `snapshot` — in-memory full-file conversion to CSV
+//! Products are selected from the 8-byte header identifier (e.g. `DDDDSNAP`).
+//! Only the officers appointments snapshot is implemented today.
+//!
+//! - `parse` — product identification, pure record classification and CSV formatting (no I/O)
+//! - `snapshot` — in-memory full-file conversion to CSV (dispatches on header)
 //! - `stream` — chunked input + batched CSV output (for large files / WASM)
 //! - `file_convert` — streaming filesystem CLI path (multithreaded on native)
 //! - `c_api` — C ABI / WASM exports for embedding

@@ -62,16 +62,30 @@ fn writePersonRow(out: *CsvOut, row: []const u8) !void {
     out.endRow(p);
 }
 
-fn processHeaderRow(row: []const u8) !void {
+/// Identify the product from the header row and ensure a body parser exists.
+/// Returns the parsed header on success so callers can branch if needed.
+fn processHeaderRow(row: []const u8) !parse.HeaderInfo {
     const info = parse.parseHeader(row) catch {
-        const prefix = if (row.len > 8) row[0..8] else row;
+        const prefix = if (row.len >= parse.header_identifier_len)
+            row[0..parse.header_identifier_len]
+        else
+            row;
         std.debug.print("Error: unsupported file type from header: '{s}'\n", .{prefix});
         return error.UnsupportedFileType;
     };
-    std.debug.print("Processing snapshot file with run number {s} from date {s}\n", .{
+    parse.requireImplemented(info.file_type) catch {
+        std.debug.print(
+            "Error: {s} files (header '{s}') are not supported yet\n",
+            .{ info.file_type.displayName(), info.file_type.identifier() },
+        );
+        return error.NotImplemented;
+    };
+    std.debug.print("Processing {s} with run number {s} from date {s}\n", .{
+        info.file_type.displayName(),
         info.run_number,
         info.production_date,
     });
+    return info;
 }
 
 /// True when `s` is an HTTP(S) URL (case-insensitive scheme).
@@ -222,7 +236,9 @@ fn runWorker(ctx: *WorkerCtx) !WorkerResult {
         const row = parse.stripCr(maybe_line orelse break);
 
         if (first and ctx.handle_header) {
-            try processHeaderRow(row);
+            const header = try processHeaderRow(row);
+            // Body workers assume officers-snapshot layout; reject other products early.
+            if (header.file_type != .officers_snapshot) return error.NotImplemented;
             first = false;
             continue;
         }
@@ -237,6 +253,7 @@ fn runWorker(ctx: *WorkerCtx) !WorkerResult {
 
         if (row.len <= 8) continue;
 
+        // Officers snapshot body (Prod 195/216).
         switch (row[8]) {
             parse.company_record_type => {
                 try writeCompanyRow(&companies_out, row);
@@ -483,6 +500,7 @@ pub fn processFromReader(
     var companies_processed: i32 = 0;
     var persons_processed: i32 = 0;
     var row_num: usize = 0;
+    var file_type: ?parse.FileType = null;
 
     while (true) {
         const maybe_line = reader.takeDelimiter('\n') catch |err| {
@@ -492,43 +510,54 @@ pub fn processFromReader(
         const row = parse.stripCr(maybe_line orelse break);
 
         if (row_num == 0) {
-            processHeaderRow(row) catch return 1;
+            const header = processHeaderRow(row) catch return 1;
+            file_type = header.file_type;
             row_num += 1;
             continue;
         }
 
-        if (row.len >= 8 and std.mem.eql(u8, row[0..8], parse.trailer_record_identifier)) {
-            const record_count = parse.parseTrailerCount(row);
-            const total = companies_processed + persons_processed;
-            if (record_count != total) {
-                std.debug.print("ERROR: Processed {d} records out of {d}\n", .{ total, record_count });
+        // Branch on header identifier once body parsing is multi-product.
+        switch (file_type orelse return 1) {
+            .officers_snapshot => {
+                if (row.len >= 8 and std.mem.eql(u8, row[0..8], parse.trailer_record_identifier)) {
+                    const record_count = parse.parseTrailerCount(row);
+                    const total = companies_processed + persons_processed;
+                    if (record_count != total) {
+                        std.debug.print("ERROR: Processed {d} records out of {d}\n", .{ total, record_count });
+                        return 1;
+                    }
+                    std.debug.print("Processed {d} records: {d} companies, {d} persons.\n", .{ total, companies_processed, persons_processed });
+                    return 0;
+                }
+
+                if (row.len <= 8) {
+                    row_num += 1;
+                    continue;
+                }
+
+                switch (row[8]) {
+                    parse.company_record_type => {
+                        writeCompanyRow(&companies_out, row) catch |err| {
+                            std.debug.print("Error writing company row: {s}\n", .{@errorName(err)});
+                            return 1;
+                        };
+                        companies_processed += 1;
+                    },
+                    parse.person_record_type => {
+                        writePersonRow(&persons_out, row) catch |err| {
+                            std.debug.print("Error writing person row: {s}\n", .{@errorName(err)});
+                            return 1;
+                        };
+                        persons_processed += 1;
+                    },
+                    else => {},
+                }
+            },
+            .officers_update, .disqualifications => {
+                // processHeaderRow already rejects these; keep switch exhaustive.
+                std.debug.print("Error: body parser not implemented for this file type\n", .{});
                 return 1;
-            }
-            std.debug.print("Processed {d} records: {d} companies, {d} persons.\n", .{ total, companies_processed, persons_processed });
-            return 0;
-        }
-
-        if (row.len <= 8) {
-            row_num += 1;
-            continue;
-        }
-
-        switch (row[8]) {
-            parse.company_record_type => {
-                writeCompanyRow(&companies_out, row) catch |err| {
-                    std.debug.print("Error writing company row: {s}\n", .{@errorName(err)});
-                    return 1;
-                };
-                companies_processed += 1;
             },
-            parse.person_record_type => {
-                writePersonRow(&persons_out, row) catch |err| {
-                    std.debug.print("Error writing person row: {s}\n", .{@errorName(err)});
-                    return 1;
-                };
-                persons_processed += 1;
-            },
-            else => {},
         }
         row_num += 1;
     }
