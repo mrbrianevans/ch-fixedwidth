@@ -29,7 +29,7 @@ The native CLI accepts a local file path, a **directory** of `.dat` files, an `h
 | Input | Pipeline |
 |-------|----------|
 | Single local file | Multi-threaded seek split when multiple CPUs are available; otherwise sequential stream |
-| Directory of `.dat` | Lists top-level `*.dat` only; multi-core runs one sequential stream per file in parallel; single-threaded builds process files one at a time (within-file MT still used when processing files sequentially on multi-core) |
+| Directory of `.dat` | Lists top-level `*.dat` only; processes **one file at a time** with the same within-file multi-threading as a single file (option B). See [DDR-directory-parallelism.md](DDR-directory-parallelism.md) |
 | Remote URL / stdin | Sequential streaming via `processFromReader` (no parallel seeks) |
 
 WASM and the C ABI are unchanged (no network or directory fan-out).
@@ -63,7 +63,7 @@ Parsing is separate from CLI I/O so the same logic can be embedded:
 | C ABI | `include/ch_fixedwidth.h`, `libch_fixedwidth` | `ch_parse_snapshot` (one-shot) + `ch_stream_*` (batched streaming) |
 | WASM | `zig build wasm` → `ch_fixedwidth.wasm` | Same C-style exports, no filesystem I/O |
 | TypeScript host | [`wasm-ts/`](../wasm-ts/) | Publish-ready package: `ChFixedWidthStream` + `ChFixedWidthParser`; Bun CLI under `wasm-ts/local/` |
-| CLI | `src/main.zig` + `src/file_convert.zig` | Multithreaded local files; directory of `.dat` (file-level parallel); streaming HTTP(S) URL or stdin (`-`) |
+| CLI | `src/main.zig` + `src/file_convert.zig` | Multithreaded local files; directory of `.dat` (sequential files, within-file MT); streaming HTTP(S) URL or stdin (`-`) |
 
 ### Large files (WASM / C)
 

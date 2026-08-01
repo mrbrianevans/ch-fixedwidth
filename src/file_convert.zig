@@ -632,99 +632,13 @@ pub fn listDatFilesInDir(
     return try list.toOwnedSlice(arena);
 }
 
-fn processDirectorySequential(
-    io: Io,
-    arena: std.mem.Allocator,
-    files: []const []const u8,
-    output_folder: []const u8,
-) !u8 {
-    var any_failed = false;
-    for (files) |file_path| {
-        std.debug.print("Processing {s}\n", .{file_path});
-        // One file at a time: on multi-core this still uses within-file parallelism.
-        const code = processOneLocalFile(io, arena, file_path, output_folder) catch |err| {
-            std.debug.print("Fatal error processing {s}: {s}\n", .{ file_path, @errorName(err) });
-            any_failed = true;
-            continue;
-        };
-        if (code != 0) any_failed = true;
-    }
-    return if (any_failed) 1 else 0;
-}
-
-const DirWorkerCtx = struct {
-    io: Io,
-    files: []const []const u8,
-    output_folder: []const u8,
-    next_index: *std.atomic.Value(usize),
-    any_failed: *std.atomic.Value(bool),
-};
-
-fn dirWorkerMain(ctx: *DirWorkerCtx) void {
-    var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer arena_state.deinit();
-
-    while (true) {
-        const i = ctx.next_index.fetchAdd(1, .monotonic);
-        if (i >= ctx.files.len) break;
-
-        _ = arena_state.reset(.retain_capacity);
-        const arena = arena_state.allocator();
-        const file_path = ctx.files[i];
-        std.debug.print("Processing {s}\n", .{file_path});
-        // Sequential stream per file — avoid nested within-file thread pools.
-        const base_name = baseInputName(file_path);
-        const code = processSingle(ctx.io, arena, file_path, ctx.output_folder, base_name) catch |err| {
-            std.debug.print("Fatal error processing {s}: {s}\n", .{ file_path, @errorName(err) });
-            ctx.any_failed.store(true, .monotonic);
-            continue;
-        };
-        if (code != 0) ctx.any_failed.store(true, .monotonic);
-    }
-}
-
-fn processDirectoryParallel(
-    io: Io,
-    arena: std.mem.Allocator,
-    files: []const []const u8,
-    output_folder: []const u8,
-    n_workers: usize,
-) !u8 {
-    _ = arena;
-    var next_index = std.atomic.Value(usize).init(0);
-    var any_failed = std.atomic.Value(bool).init(false);
-    var ctx: DirWorkerCtx = .{
-        .io = io,
-        .files = files,
-        .output_folder = output_folder,
-        .next_index = &next_index,
-        .any_failed = &any_failed,
-    };
-
-    const workers = @max(1, @min(n_workers, max_workers, files.len));
-    if (workers == 1) {
-        dirWorkerMain(&ctx);
-        return if (any_failed.load(.monotonic)) 1 else 0;
-    }
-
-    var threads: [max_workers]Thread = undefined;
-    var t: usize = 1;
-    while (t < workers) : (t += 1) {
-        threads[t] = try Thread.spawn(.{}, dirWorkerMain, .{&ctx});
-    }
-    dirWorkerMain(&ctx);
-    t = 1;
-    while (t < workers) : (t += 1) {
-        threads[t].join();
-    }
-    return if (any_failed.load(.monotonic)) 1 else 0;
-}
-
 /// Convert every `.dat` file in `dir_path` into CSVs under `output_folder`.
 /// Each input file yields `companies_data_<basename>.csv` and
-/// `persons_data_<basename>.csv`. Multi-core builds process files concurrently
-/// (one sequential stream per file); single-threaded builds process one file at
-/// a time (and multi-core sequential multi-file still uses within-file MT).
+/// `persons_data_<basename>.csv`.
+///
+/// Files are processed **one at a time**. On multi-core native builds each file
+/// uses the same within-file seek split as a single-file CLI argument (option B).
+/// See `docs/DDR-directory-parallelism.md`.
 pub fn processDirectory(
     io: Io,
     arena: std.mem.Allocator,
@@ -744,21 +658,18 @@ pub fn processDirectory(
 
     std.debug.print("Found {d} snapshot file(s) in {s}\n", .{ files.len, dir_path });
 
-    // Single file in a directory: same path as a lone file argument (may multi-thread within file).
-    if (files.len == 1) {
-        return processOneLocalFile(io, arena, files[0], output_folder);
+    var any_failed = false;
+    for (files) |file_path| {
+        std.debug.print("Processing {s}\n", .{file_path});
+        // One file at a time with full within-file multi-threading (same as lone file input).
+        const code = processOneLocalFile(io, arena, file_path, output_folder) catch |err| {
+            std.debug.print("Fatal error processing {s}: {s}\n", .{ file_path, @errorName(err) });
+            any_failed = true;
+            continue;
+        };
+        if (code != 0) any_failed = true;
     }
-
-    if (comptime builtin.single_threaded) {
-        return processDirectorySequential(io, arena, files, output_folder);
-    }
-
-    const cpu_count = Thread.getCpuCount() catch 1;
-    const n_workers = @max(1, @min(cpu_count, max_workers));
-    if (n_workers <= 1) {
-        return processDirectorySequential(io, arena, files, output_folder);
-    }
-    return processDirectoryParallel(io, arena, files, output_folder, n_workers);
+    return if (any_failed) 1 else 0;
 }
 
 /// Stream-download `url` over HTTP(S) and convert to CSV under `output_folder`.

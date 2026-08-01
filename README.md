@@ -64,7 +64,7 @@ Examples:
 
 Remote URLs and stdin are converted in a **streaming pipeline** (bytes are parsed as they arrive; the full file is not buffered to disk first). Output CSV names and contents match a local-file run with the same basename (stdin uses basename `stdin`).
 
-For a **directory** input, every top-level `.dat` file is converted (non-recursive). On multi-core systems, files are processed concurrently; single-threaded builds process one file at a time. Each input file still produces its own company and person CSVs in the shared output folder.
+For a **directory** input, every top-level `.dat` file is converted (non-recursive), **one file at a time**. On multi-core systems each file uses the same within-file parallel split as a single-file run (better for mixed ~200 MB–2 GB snapshots). Each input file still produces its own company and person CSVs in the shared output folder. Design rationale: [docs/DDR-directory-parallelism.md](docs/DDR-directory-parallelism.md).
 
 Exit code `0` on success (trailer record count matches rows written for every file); non-zero on header/trailer mismatch, HTTP errors, missing `.dat` files in a directory, or I/O errors.
 
