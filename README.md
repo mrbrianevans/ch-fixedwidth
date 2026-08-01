@@ -6,8 +6,6 @@ High-performance parser for [Companies House](https://www.gov.uk/government/orga
 
 It is designed for speed and can exceed **5 million records per second** on modern laptops.
 
-**Version:** 0.0.1 — see [CHANGELOG.md](CHANGELOG.md).
-
 ## Source format
 
 Plain-text snapshot files (`DDDDSNAP` header) containing company and officer (person) records in a fixed-width layout, with variable-length name and address fields separated by chevrons (`<`).
