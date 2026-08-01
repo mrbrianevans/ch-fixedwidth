@@ -253,40 +253,83 @@ pub const liq_id_cap: usize = 10;
 pub const liq_court_cap: usize = 13;
 pub const liq_ft_cap: usize = 40;
 
+/// Named single-value slots in a Prod 197 form group (tag-driven).
+pub const LiqSlot = enum(u8) {
+    form_number = 0,
+    company_number = 1,
+    company_name = 2,
+    court_ref = 3,
+    appointment_date = 4,
+    date_of_order = 5,
+    date_of_petition = 6,
+    resolution_date = 7,
+    final_meeting_date = 8,
+    termination_date = 9,
+    date_registered = 10,
+    form_dated = 11,
+    new_dissolution_date = 12,
+    transaction_id = 13,
+    registered_office = 14,
+
+    pub const count: usize = 15;
+
+    pub fn cap(self: LiqSlot) usize {
+        return switch (self) {
+            .form_number => liq_form_number_cap,
+            .company_number => liq_company_number_cap,
+            .company_name, .registered_office => liq_field_cap,
+            .court_ref => liq_court_cap,
+            .appointment_date, .date_of_order, .date_of_petition, .resolution_date, .final_meeting_date, .termination_date, .date_registered, .form_dated, .new_dissolution_date => liq_date_cap,
+            .transaction_id => liq_id_cap,
+        };
+    }
+};
+
+const LiqTagAction = enum { set, append_re, push_np, push_ft };
+
+const LiqTagRule = struct {
+    tag: [2]u8,
+    action: LiqTagAction,
+    /// Used when `action == .set` (ignored for list/append actions).
+    slot: LiqSlot = .form_number,
+};
+
+/// Tag dispatch for Prod 197 records. Unknown tags are ignored.
+const liq_tag_rules = [_]LiqTagRule{
+    .{ .tag = .{ 'F', 'M' }, .action = .set, .slot = .form_number },
+    .{ .tag = .{ 'R', 'N' }, .action = .set, .slot = .company_number },
+    .{ .tag = .{ 'N', 'A' }, .action = .set, .slot = .company_name },
+    .{ .tag = .{ 'C', 'O' }, .action = .set, .slot = .court_ref },
+    .{ .tag = .{ 'A', 'D' }, .action = .set, .slot = .appointment_date },
+    .{ .tag = .{ 'D', 'O' }, .action = .set, .slot = .date_of_order },
+    .{ .tag = .{ 'D', 'P' }, .action = .set, .slot = .date_of_petition },
+    .{ .tag = .{ 'R', 'D' }, .action = .set, .slot = .resolution_date },
+    .{ .tag = .{ 'M', 'D' }, .action = .set, .slot = .final_meeting_date },
+    .{ .tag = .{ 'T', 'D' }, .action = .set, .slot = .termination_date },
+    .{ .tag = .{ 'D', 'R' }, .action = .set, .slot = .date_registered },
+    .{ .tag = .{ 'F', 'D' }, .action = .set, .slot = .form_dated },
+    .{ .tag = .{ 'N', 'D' }, .action = .set, .slot = .new_dissolution_date },
+    .{ .tag = .{ 'I', 'D' }, .action = .set, .slot = .transaction_id },
+    .{ .tag = .{ 'R', 'E' }, .action = .append_re, .slot = .registered_office },
+    .{ .tag = .{ 'N', 'P' }, .action = .push_np },
+    .{ .tag = .{ 'F', 'T' }, .action = .push_ft },
+};
+
+fn findLiqTagRule(tag: []const u8) ?LiqTagRule {
+    if (tag.len < 2) return null;
+    for (liq_tag_rules) |rule| {
+        if (rule.tag[0] == tag[0] and rule.tag[1] == tag[1]) return rule;
+    }
+    return null;
+}
+
 /// Accumulator for one Prod 197 form group. Fields are owned copies so stream
 /// parsers can reuse input line buffers.
 pub const LiqForm = struct {
     active: bool = false,
-    form_number: [liq_form_number_cap]u8 = undefined,
-    form_number_len: u8 = 0,
-    company_number: [liq_company_number_cap]u8 = undefined,
-    company_number_len: u8 = 0,
-    company_name: [liq_field_cap]u8 = undefined,
-    company_name_len: u8 = 0,
-    court_ref: [liq_court_cap]u8 = undefined,
-    court_ref_len: u8 = 0,
-    appointment_date: [liq_date_cap]u8 = undefined,
-    appointment_date_len: u8 = 0,
-    date_of_order: [liq_date_cap]u8 = undefined,
-    date_of_order_len: u8 = 0,
-    date_of_petition: [liq_date_cap]u8 = undefined,
-    date_of_petition_len: u8 = 0,
-    resolution_date: [liq_date_cap]u8 = undefined,
-    resolution_date_len: u8 = 0,
-    final_meeting_date: [liq_date_cap]u8 = undefined,
-    final_meeting_date_len: u8 = 0,
-    termination_date: [liq_date_cap]u8 = undefined,
-    termination_date_len: u8 = 0,
-    date_registered: [liq_date_cap]u8 = undefined,
-    date_registered_len: u8 = 0,
-    form_dated: [liq_date_cap]u8 = undefined,
-    form_dated_len: u8 = 0,
-    new_dissolution_date: [liq_date_cap]u8 = undefined,
-    new_dissolution_date_len: u8 = 0,
-    transaction_id: [liq_id_cap]u8 = undefined,
-    transaction_id_len: u8 = 0,
-    registered_office: [liq_field_cap]u8 = undefined,
-    registered_office_len: u8 = 0,
+    /// Single-value tagged fields (see `LiqSlot`).
+    slots: [LiqSlot.count][liq_field_cap]u8 = undefined,
+    slot_lens: [LiqSlot.count]u8 = .{0} ** LiqSlot.count,
     practitioners: [liq_max_practitioners][liq_field_cap]u8 = undefined,
     practitioner_lens: [liq_max_practitioners]u8 = .{0} ** liq_max_practitioners,
     practitioner_count: u8 = 0,
@@ -298,50 +341,55 @@ pub const LiqForm = struct {
         self.* = .{};
     }
 
+    pub fn get(self: *const LiqForm, slot: LiqSlot) []const u8 {
+        const i: usize = @intFromEnum(slot);
+        return self.slots[i][0..self.slot_lens[i]];
+    }
+
     pub fn formNumber(self: *const LiqForm) []const u8 {
-        return self.form_number[0..self.form_number_len];
+        return self.get(.form_number);
     }
     pub fn companyNumber(self: *const LiqForm) []const u8 {
-        return self.company_number[0..self.company_number_len];
+        return self.get(.company_number);
     }
     pub fn companyName(self: *const LiqForm) []const u8 {
-        return self.company_name[0..self.company_name_len];
+        return self.get(.company_name);
     }
     pub fn courtRef(self: *const LiqForm) []const u8 {
-        return self.court_ref[0..self.court_ref_len];
+        return self.get(.court_ref);
     }
     pub fn appointmentDate(self: *const LiqForm) []const u8 {
-        return self.appointment_date[0..self.appointment_date_len];
+        return self.get(.appointment_date);
     }
     pub fn dateOfOrder(self: *const LiqForm) []const u8 {
-        return self.date_of_order[0..self.date_of_order_len];
+        return self.get(.date_of_order);
     }
     pub fn dateOfPetition(self: *const LiqForm) []const u8 {
-        return self.date_of_petition[0..self.date_of_petition_len];
+        return self.get(.date_of_petition);
     }
     pub fn resolutionDate(self: *const LiqForm) []const u8 {
-        return self.resolution_date[0..self.resolution_date_len];
+        return self.get(.resolution_date);
     }
     pub fn finalMeetingDate(self: *const LiqForm) []const u8 {
-        return self.final_meeting_date[0..self.final_meeting_date_len];
+        return self.get(.final_meeting_date);
     }
     pub fn terminationDate(self: *const LiqForm) []const u8 {
-        return self.termination_date[0..self.termination_date_len];
+        return self.get(.termination_date);
     }
     pub fn dateRegistered(self: *const LiqForm) []const u8 {
-        return self.date_registered[0..self.date_registered_len];
+        return self.get(.date_registered);
     }
     pub fn formDated(self: *const LiqForm) []const u8 {
-        return self.form_dated[0..self.form_dated_len];
+        return self.get(.form_dated);
     }
     pub fn newDissolutionDate(self: *const LiqForm) []const u8 {
-        return self.new_dissolution_date[0..self.new_dissolution_date_len];
+        return self.get(.new_dissolution_date);
     }
     pub fn transactionId(self: *const LiqForm) []const u8 {
-        return self.transaction_id[0..self.transaction_id_len];
+        return self.get(.transaction_id);
     }
     pub fn registeredOffice(self: *const LiqForm) []const u8 {
-        return self.registered_office[0..self.registered_office_len];
+        return self.get(.registered_office);
     }
     pub fn practitioner(self: *const LiqForm, i: usize) []const u8 {
         return self.practitioners[i][0..self.practitioner_lens[i]];
@@ -350,82 +398,70 @@ pub const LiqForm = struct {
         return self.free_texts[i][0..self.free_text_lens[i]];
     }
 
+    fn setSlot(self: *LiqForm, slot: LiqSlot, src: []const u8) void {
+        const i: usize = @intFromEnum(slot);
+        const cap = slot.cap();
+        const take = @min(src.len, cap);
+        @memcpy(self.slots[i][0..take], src[0..take]);
+        self.slot_lens[i] = @intCast(take);
+    }
+
+    fn appendRegisteredOffice(self: *LiqForm, payload: []const u8) void {
+        const i: usize = @intFromEnum(LiqSlot.registered_office);
+        const cap = LiqSlot.registered_office.cap();
+        if (self.slot_lens[i] == 0) {
+            self.setSlot(.registered_office, payload);
+            return;
+        }
+        if (self.slot_lens[i] >= cap) return;
+        const space_at = self.slot_lens[i];
+        if (space_at + 1 >= cap) return;
+        self.slots[i][space_at] = ' ';
+        self.slot_lens[i] = @intCast(space_at + 1);
+        const room = cap - self.slot_lens[i];
+        const take = @min(payload.len, room);
+        @memcpy(self.slots[i][self.slot_lens[i]..][0..take], payload[0..take]);
+        self.slot_lens[i] += @intCast(take);
+    }
+
     /// Apply one tagged data record to this form (including the opening `FM`).
     pub fn applyRecord(self: *LiqForm, row: []const u8) void {
         if (row.len < 2) return;
-        const tag = row[0..2];
+        const rule = findLiqTagRule(row[0..2]) orelse return;
         const payload = if (row.len > 2) trimRightSpaces(row[2..]) else row[0..0];
 
-        if (std.mem.eql(u8, tag, "FM")) {
+        // Opening FM may arrive before `active` is set.
+        if (rule.tag[0] == 'F' and rule.tag[1] == 'M') {
             self.active = true;
-            setField(&self.form_number, &self.form_number_len, payload, liq_form_number_cap);
+            self.setSlot(.form_number, payload);
             return;
         }
         if (!self.active) return;
 
-        if (std.mem.eql(u8, tag, "RN")) {
-            setField(&self.company_number, &self.company_number_len, payload, liq_company_number_cap);
-        } else if (std.mem.eql(u8, tag, "NA")) {
-            setField(&self.company_name, &self.company_name_len, payload, liq_field_cap);
-        } else if (std.mem.eql(u8, tag, "CO")) {
-            setField(&self.court_ref, &self.court_ref_len, payload, liq_court_cap);
-        } else if (std.mem.eql(u8, tag, "AD")) {
-            setField(&self.appointment_date, &self.appointment_date_len, payload, liq_date_cap);
-        } else if (std.mem.eql(u8, tag, "DO")) {
-            setField(&self.date_of_order, &self.date_of_order_len, payload, liq_date_cap);
-        } else if (std.mem.eql(u8, tag, "DP")) {
-            setField(&self.date_of_petition, &self.date_of_petition_len, payload, liq_date_cap);
-        } else if (std.mem.eql(u8, tag, "RD")) {
-            setField(&self.resolution_date, &self.resolution_date_len, payload, liq_date_cap);
-        } else if (std.mem.eql(u8, tag, "MD")) {
-            setField(&self.final_meeting_date, &self.final_meeting_date_len, payload, liq_date_cap);
-        } else if (std.mem.eql(u8, tag, "TD")) {
-            setField(&self.termination_date, &self.termination_date_len, payload, liq_date_cap);
-        } else if (std.mem.eql(u8, tag, "DR")) {
-            setField(&self.date_registered, &self.date_registered_len, payload, liq_date_cap);
-        } else if (std.mem.eql(u8, tag, "FD")) {
-            setField(&self.form_dated, &self.form_dated_len, payload, liq_date_cap);
-        } else if (std.mem.eql(u8, tag, "ND")) {
-            setField(&self.new_dissolution_date, &self.new_dissolution_date_len, payload, liq_date_cap);
-        } else if (std.mem.eql(u8, tag, "ID")) {
-            setField(&self.transaction_id, &self.transaction_id_len, payload, liq_id_cap);
-        } else if (std.mem.eql(u8, tag, "RE")) {
-            // Overflow RE records append with a space separator.
-            if (self.registered_office_len == 0) {
-                setField(&self.registered_office, &self.registered_office_len, payload, liq_field_cap);
-            } else if (self.registered_office_len < liq_field_cap) {
-                const space_at = self.registered_office_len;
-                if (space_at + 1 < liq_field_cap) {
-                    self.registered_office[space_at] = ' ';
-                    self.registered_office_len = @intCast(space_at + 1);
-                    const room = liq_field_cap - self.registered_office_len;
-                    const take = @min(payload.len, room);
-                    @memcpy(self.registered_office[self.registered_office_len..][0..take], payload[0..take]);
-                    self.registered_office_len += @intCast(take);
+        switch (rule.action) {
+            .set => self.setSlot(rule.slot, payload),
+            .append_re => self.appendRegisteredOffice(payload),
+            .push_np => {
+                if (self.practitioner_count < liq_max_practitioners) {
+                    const i = self.practitioner_count;
+                    const take = @min(payload.len, liq_field_cap);
+                    @memcpy(self.practitioners[i][0..take], payload[0..take]);
+                    self.practitioner_lens[i] = @intCast(take);
+                    self.practitioner_count += 1;
                 }
-            }
-        } else if (std.mem.eql(u8, tag, "NP")) {
-            if (self.practitioner_count < liq_max_practitioners) {
-                const i = self.practitioner_count;
-                setField(&self.practitioners[i], &self.practitioner_lens[i], payload, liq_field_cap);
-                self.practitioner_count += 1;
-            }
-        } else if (std.mem.eql(u8, tag, "FT")) {
-            if (self.free_text_count < liq_max_free_texts) {
-                const i = self.free_text_count;
-                setField(&self.free_texts[i], &self.free_text_lens[i], payload, liq_ft_cap);
-                self.free_text_count += 1;
-            }
+            },
+            .push_ft => {
+                if (self.free_text_count < liq_max_free_texts) {
+                    const i = self.free_text_count;
+                    const take = @min(payload.len, liq_ft_cap);
+                    @memcpy(self.free_texts[i][0..take], payload[0..take]);
+                    self.free_text_lens[i] = @intCast(take);
+                    self.free_text_count += 1;
+                }
+            },
         }
-        // Unknown tags are ignored (forward-compatible with newer codes).
     }
 };
-
-fn setField(buf: []u8, len_out: *u8, src: []const u8, cap: usize) void {
-    const take = @min(src.len, cap);
-    @memcpy(buf[0..take], src[0..take]);
-    len_out.* = @intCast(take);
-}
 
 pub const HeaderInfo = struct {
     file_type: FileType,
