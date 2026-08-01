@@ -111,6 +111,12 @@ parser from that magic (`parse.identifyFileType` → product-specific path).
 
 Unknown magics return `UnsupportedFileType` / `CH_ERR_UNSUPPORTED_HEADER`. Known but not-yet-implemented magics (future) use `CH_ERR_NOT_IMPLEMENTED` via `FileType.isImplemented`.
 
+## Adding a new product
+
+To support another fixed-width bulk file type (new header magic, record layouts, and CSV outputs), follow the step-by-step guide:
+
+**[adding-a-product.md](adding-a-product.md)** — required format knowledge, design choices (output kinds, sequential vs parallel), file-by-file checklist (parse → document → stream → CLI → C/WASM → TypeScript → docs), and testing expectations.
+
 ## Format reference
 
 - Snapshot field layouts: [Prod195_Snapshot.md](Prod195_Snapshot.md)

@@ -121,7 +121,7 @@ zig build wasm -Doptimize=ReleaseFast
 
 Produces `zig-out/ch_fixedwidth.wasm` (also published on releases as `ch_fixedwidth-wasm32-freestanding.wasm`).
 
-For embedding (C ABI, streaming API, TypeScript host), see [docs/development.md](docs/development.md).
+For embedding (C ABI, streaming API, TypeScript host), see [docs/development.md](docs/development.md). To add support for another bulk product, see [docs/adding-a-product.md](docs/adding-a-product.md).
 
 ### Browser converter
 
