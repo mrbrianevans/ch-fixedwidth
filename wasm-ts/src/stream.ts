@@ -179,7 +179,16 @@ export class ChFixedWidthStream {
         const dataLen = view.getUint32(4, true);
         const rowCount = view.getInt32(8, true);
         const kindCode = view.getInt32(12, true);
-        const kind: CsvBatchKind = kindCode === 1 ? "persons" : "companies";
+        const kind: CsvBatchKind =
+          kindCode === 1
+            ? "persons"
+            : kindCode === 2
+              ? "disqualifications"
+              : kindCode === 3
+                ? "exemptions"
+                : kindCode === 4
+                  ? "variations"
+                  : "companies";
         const data = copyBytes(memory, dataPtr, dataLen);
         out.push(makeBatch(kind, data, rowCount));
         ch_csv_batch_free!(batchPtr);

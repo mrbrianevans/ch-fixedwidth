@@ -25,7 +25,7 @@ const ERROR_MESSAGES: Record<number, string> = {
   [ChErrorCode.Internal]: "Internal parser error",
   [ChErrorCode.StreamState]: "Invalid stream state (already finished or data after trailer)",
   [ChErrorCode.NotImplemented]:
-    "Recognised product header, but this file type is not implemented yet",
+    "Recognised product header, but this file type is not implemented yet (unused when all products are wired)",
 };
 
 export class ChParseError extends Error {
@@ -45,9 +45,10 @@ export type SnapshotInput = Uint8Array | ArrayBuffer | string;
 /**
  * Successful in-memory parse result.
  * CSV strings include the header row and trailing newlines on data rows.
+ * Prod 192 fills the disqualification fields; officers products leave them empty.
  */
 export interface ParseResult {
-  /** Full companies CSV document (header + rows). */
+  /** Full companies CSV document (header + rows). Empty for Prod 192. */
   companiesCsv: string;
   /** Full persons CSV document (header + rows). */
   personsCsv: string;
@@ -55,12 +56,26 @@ export interface ParseResult {
   companies: number;
   /** Number of person data rows written. */
   persons: number;
-  /** Trailer record count from the input (must equal companies + persons). */
+  /** Trailer total record count from the input. */
   trailerCount: number;
+  /** Prod 192 type 2 disqualifications CSV (empty string for officers). */
+  disqualificationsCsv: string;
+  /** Prod 192 type 3 exemptions CSV (empty string for officers). */
+  exemptionsCsv: string;
+  /** Prod 192 type 4 variations CSV (empty string for officers). */
+  variationsCsv: string;
+  disqualifications: number;
+  exemptions: number;
+  variations: number;
 }
 
 /** CSV batch kind from the streaming API. */
-export type CsvBatchKind = "companies" | "persons";
+export type CsvBatchKind =
+  | "companies"
+  | "persons"
+  | "disqualifications"
+  | "exemptions"
+  | "variations";
 
 /** One batched CSV chunk from the streaming parser (owned by the host). */
 export interface CsvBatch {

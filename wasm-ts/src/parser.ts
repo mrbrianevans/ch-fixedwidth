@@ -7,8 +7,11 @@ import {
   type SnapshotInput,
 } from "./types.ts";
 
-/** Size of `ChParseResult` on wasm32 (two buffers + three i32s). */
-const PARSE_RESULT_SIZE = 28;
+/**
+ * Size of `ChParseResult` on wasm32:
+ * 5× ChBuffer (ptr+len) + 6× i32 = 5×8 + 6×4 = 64.
+ */
+const PARSE_RESULT_SIZE = 64;
 const OFF_COMPANIES_PTR = 0;
 const OFF_COMPANIES_LEN = 4;
 const OFF_PERSONS_PTR = 8;
@@ -16,6 +19,15 @@ const OFF_PERSONS_LEN = 12;
 const OFF_COMPANIES = 16;
 const OFF_PERSONS = 20;
 const OFF_TRAILER = 24;
+const OFF_DISQ_PTR = 28;
+const OFF_DISQ_LEN = 32;
+const OFF_EXEMPT_PTR = 36;
+const OFF_EXEMPT_LEN = 40;
+const OFF_VAR_PTR = 44;
+const OFF_VAR_LEN = 48;
+const OFF_DISQ = 52;
+const OFF_EXEMPT = 56;
+const OFF_VAR = 60;
 
 function toBytes(input: SnapshotInput): Uint8Array {
   if (typeof input === "string") {
@@ -112,6 +124,24 @@ export class ChFixedWidthParser {
         companies: readI32(view, OFF_COMPANIES),
         persons: readI32(view, OFF_PERSONS),
         trailerCount: readI32(view, OFF_TRAILER),
+        disqualificationsCsv: copyUtf8(
+          memory,
+          readU32(view, OFF_DISQ_PTR),
+          readU32(view, OFF_DISQ_LEN),
+        ),
+        exemptionsCsv: copyUtf8(
+          memory,
+          readU32(view, OFF_EXEMPT_PTR),
+          readU32(view, OFF_EXEMPT_LEN),
+        ),
+        variationsCsv: copyUtf8(
+          memory,
+          readU32(view, OFF_VAR_PTR),
+          readU32(view, OFF_VAR_LEN),
+        ),
+        disqualifications: readI32(view, OFF_DISQ),
+        exemptions: readI32(view, OFF_EXEMPT),
+        variations: readI32(view, OFF_VAR),
       };
     } finally {
       ch_parse_result_free(resultPtr);

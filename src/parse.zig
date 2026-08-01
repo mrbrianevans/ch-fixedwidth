@@ -7,9 +7,8 @@
 //!
 //! File products share an 8-byte header identifier at the start of the first
 //! line. Callers identify the product from that magic, then branch to the
-//! matching body parser. Implemented today: officers snapshot (`DDDDSNAP`) and
-//! officers update (`DDDDUPDT`). Disqualifications (`DISQUALS`) is recognised
-//! for future work.
+//! matching body parser. Implemented: officers snapshot (`DDDDSNAP`), officers
+//! update (`DDDDUPDT`), and disqualified persons (`DISQUALS`).
 
 const std = @import("std");
 const unicode = std.unicode;
@@ -23,7 +22,7 @@ pub const FileType = enum {
     officers_snapshot,
     /// Product 198 — company appointments update.
     officers_update,
-    /// Product 192 — disqualified persons snapshot (not implemented yet).
+    /// Product 192 — disqualified persons snapshot.
     disqualifications,
 
     /// 8-byte header identifier for this product.
@@ -46,15 +45,17 @@ pub const FileType = enum {
 
     /// True when a full body parser exists for this product.
     pub fn isImplemented(self: FileType) bool {
-        return self == .officers_snapshot or self == .officers_update;
+        return switch (self) {
+            .officers_snapshot, .officers_update, .disqualifications => true,
+        };
     }
 
-    /// CSV header line for the persons (officer) output of this product.
+    /// CSV header line for the persons (officer) output of officers products.
     pub fn personsCsvHeader(self: FileType) []const u8 {
         return switch (self) {
             .officers_snapshot => persons_header,
             .officers_update => update_persons_header,
-            .disqualifications => persons_header, // unused until implemented
+            .disqualifications => disqual_persons_header,
         };
     }
 };
@@ -80,12 +81,45 @@ pub const persons_header =
 pub const update_persons_header =
     "Company Number,App Date Origin,Res Date Origin,Correction Indicator,Corporate Indicator,Old Appointment Type,New Appointment Type,Old Person Number,New Person Number,Partial Date of Birth,Full Date of Birth,Old Person Postcode,New Person Postcode,Appointment Date,Resignation Date,Change Date,Update Date,New Title,New Forenames,New Surname,New Honours,Care Of,PO Box,New Address Line 1,New Address Line 2,New Post Town,New County,New Country,Occupation,New Nationality,New Residential Country\n";
 
+/// Prod 192 record type 1 — disqualified person.
+pub const disqual_persons_header =
+    "Person Number,Date of Birth,Postcode,Title,Forenames,Surname,Honours,Address Line 1,Address Line 2,Posttown,County,Country,Nationality,Corporate Number,Country Registration\n";
+/// Prod 192 record type 2 — disqualification.
+pub const disqualifications_header =
+    "Person Number,Disqual Start Date,Disqual End Date,Section of the Act,Disqualification Type,Order/Undertaking Date,Case Number,Company Name,Court Name\n";
+/// Prod 192 record type 3 — exemption.
+pub const exemptions_header =
+    "Person Number,Exemption Start Date,Exemption End Date,Exemption Purpose,Exemption Company Name\n";
+/// Prod 192 record type 4 — variation.
+pub const variations_header =
+    "Person Number,Disqualification Type,Order/Undertaking Date,Variation Court Action Date,Variation Case Number,Variation Court Name\n";
+
 pub const LineKind = enum {
     header,
     company,
     person,
     trailer,
     other,
+};
+
+/// Line kinds for Prod 192 (`DISQUALS`) body records (type at byte 0).
+pub const DisqualLineKind = enum {
+    header,
+    trailer,
+    person,
+    disqualification,
+    exemption,
+    variation,
+    other,
+};
+
+/// Parsed Prod 192 trailer (`DISQUALS/t1/t2/t3/t4/total`).
+pub const DisqualTrailer = struct {
+    type1: i32,
+    type2: i32,
+    type3: i32,
+    type4: i32,
+    total: i32,
 };
 
 pub const HeaderInfo = struct {
@@ -227,11 +261,19 @@ pub fn requireImplemented(file_type: FileType) error{NotImplemented}!void {
     if (!file_type.isImplemented()) return error.NotImplemented;
 }
 
-/// Classify a line for the **officers snapshot** body layout (Prod 195/216).
-/// Known product header magics (including update / disqualifications) are
-/// reported as `.header` so the first line can be routed before body parsing.
+/// Classify a line for **officers** body layouts (Prod 195/216/198).
+/// Header magics are `.header`. Officers trailer is `99999999…`.
+/// For Prod 192, use `classifyDisqualLine` instead (type at byte 0; trailer is
+/// `DISQUALS/…`).
 pub fn classifyLine(row: []const u8) LineKind {
     if (row.len >= header_identifier_len) {
+        if (std.mem.eql(u8, row[0..header_identifier_len], disqualifications_header_id)) {
+            // Disqual trailer also starts with DISQUALS — keep officers path clear.
+            if (row.len > header_identifier_len and row[header_identifier_len] == '/') {
+                return .trailer;
+            }
+            return .header;
+        }
         if (identifyFileType(row[0..header_identifier_len])) |_| {
             return .header;
         } else |_| {}
@@ -243,6 +285,27 @@ pub fn classifyLine(row: []const u8) LineKind {
     return switch (row[8]) {
         company_record_type => .company,
         person_record_type => .person,
+        else => .other,
+    };
+}
+
+/// Classify a Prod 192 line. Header is `DISQUALS` without `/`; trailer is
+/// `DISQUALS/…`. Body record type is the first character (`1`–`4`).
+pub fn classifyDisqualLine(row: []const u8) DisqualLineKind {
+    if (row.len >= header_identifier_len and
+        std.mem.eql(u8, row[0..header_identifier_len], disqualifications_header_id))
+    {
+        if (row.len > header_identifier_len and row[header_identifier_len] == '/') {
+            return .trailer;
+        }
+        return .header;
+    }
+    if (row.len == 0) return .other;
+    return switch (row[0]) {
+        '1' => .person,
+        '2' => .disqualification,
+        '3' => .exemption,
+        '4' => .variation,
         else => .other,
     };
 }
@@ -273,6 +336,26 @@ pub fn parseHeader(row: []const u8) error{UnsupportedFileType}!HeaderInfo {
 
 pub fn parseTrailerCount(row: []const u8) i32 {
     return fastAtoi(clamp(row, 8, 16));
+}
+
+/// Parse a Prod 192 trailer: `DISQUALS/00011912/00013007/00000098/00000002/00025019`.
+pub fn parseDisqualTrailer(row: []const u8) error{MissingTrailer}!DisqualTrailer {
+    if (row.len < 53) return error.MissingTrailer;
+    if (!std.mem.eql(u8, row[0..8], disqualifications_header_id)) return error.MissingTrailer;
+    if (row[8] != '/') return error.MissingTrailer;
+    // Fixed slash-separated 8-digit counts at known offsets.
+    // DISQUALS/########/########/########/########/########
+    // 0       8 9      17 18     26 27     35 36     44 45    53
+    if (row[17] != '/' or row[26] != '/' or row[35] != '/' or row[44] != '/') {
+        return error.MissingTrailer;
+    }
+    return .{
+        .type1 = fastAtoi(row[9..17]),
+        .type2 = fastAtoi(row[18..26]),
+        .type3 = fastAtoi(row[27..35]),
+        .type4 = fastAtoi(row[36..44]),
+        .total = fastAtoi(row[45..53]),
+    };
 }
 
 /// Format a company record as one CSV line (including trailing newline).
@@ -447,6 +530,110 @@ fn writeCsvFields(dest: []u8, fixed: []const []const u8, var_parts: []const []co
     dest[p] = '\n';
     p += 1;
     return p;
+}
+
+/// Prod 192 type 1 — person. Variable details: 12 chevron fields.
+pub fn formatDisqualPersonRow(dest: []u8, row: []const u8) usize {
+    var fixed: [3][]const u8 = undefined;
+    var var_parts: [12][]const u8 = undefined;
+
+    if (isAscii(row)) {
+        fixed[0] = clamp(row, 1, 13); // Person Number
+        fixed[1] = clamp(row, 13, 21); // DOB
+        fixed[2] = clamp(row, 21, 29); // Postcode
+        const var_len: usize = @intCast(fastAtoi(clamp(row, 29, 33)));
+        splitChevron(clamp(row, 33, 33 + var_len), var_parts[0..]);
+    } else {
+        fixed[0] = sliceChars(row, 1, 13);
+        fixed[1] = sliceChars(row, 13, 21);
+        fixed[2] = sliceChars(row, 21, 29);
+        const var_len: usize = @intCast(fastAtoi(sliceChars(row, 29, 33)));
+        splitChevron(sliceChars(row, 33, 33 + var_len), var_parts[0..]);
+    }
+    return writeCsvFields(dest, &fixed, &var_parts);
+}
+
+/// Prod 192 type 2 — disqualification.
+/// Field starts after SECTION follow real bulk files (docs table is off by 8
+/// from DISQUALIFICATION-TYPE onward: dtype begins at 0-based 49, company at 117,
+/// court-name length at 277).
+pub fn formatDisqualificationRow(dest: []u8, row: []const u8) usize {
+    var fields: [9][]const u8 = undefined;
+
+    if (isAscii(row)) {
+        fields[0] = clamp(row, 1, 13); // Person Number
+        fields[1] = clamp(row, 13, 21); // Start
+        fields[2] = clamp(row, 21, 29); // End
+        fields[3] = clamp(row, 29, 49); // Section
+        fields[4] = clamp(row, 49, 79); // Type
+        fields[5] = clamp(row, 79, 87); // Order/undertaking date
+        fields[6] = clamp(row, 87, 117); // Case number
+        var company = clamp(row, 117, 277);
+        company = trimRightSpaces(company);
+        fields[7] = company;
+        const court_len: usize = @intCast(fastAtoi(clamp(row, 277, 281)));
+        fields[8] = clamp(row, 281, 281 + court_len);
+    } else {
+        fields[0] = sliceChars(row, 1, 13);
+        fields[1] = sliceChars(row, 13, 21);
+        fields[2] = sliceChars(row, 21, 29);
+        fields[3] = sliceChars(row, 29, 49);
+        fields[4] = sliceChars(row, 49, 79);
+        fields[5] = sliceChars(row, 79, 87);
+        fields[6] = sliceChars(row, 87, 117);
+        var company = sliceChars(row, 117, 277);
+        company = trimRightSpaces(company);
+        fields[7] = company;
+        const court_len: usize = @intCast(fastAtoi(sliceChars(row, 277, 281)));
+        fields[8] = sliceChars(row, 281, 281 + court_len);
+    }
+    return writeCsvFields(dest, &fields, &.{} );
+}
+
+/// Prod 192 type 3 — exemption.
+pub fn formatExemptionRow(dest: []u8, row: []const u8) usize {
+    var fields: [5][]const u8 = undefined;
+
+    if (isAscii(row)) {
+        fields[0] = clamp(row, 1, 13);
+        fields[1] = clamp(row, 13, 21);
+        fields[2] = clamp(row, 21, 29);
+        fields[3] = clamp(row, 29, 39);
+        const name_len: usize = @intCast(fastAtoi(clamp(row, 39, 43)));
+        fields[4] = clamp(row, 43, 43 + name_len);
+    } else {
+        fields[0] = sliceChars(row, 1, 13);
+        fields[1] = sliceChars(row, 13, 21);
+        fields[2] = sliceChars(row, 21, 29);
+        fields[3] = sliceChars(row, 29, 39);
+        const name_len: usize = @intCast(fastAtoi(sliceChars(row, 39, 43)));
+        fields[4] = sliceChars(row, 43, 43 + name_len);
+    }
+    return writeCsvFields(dest, &fields, &.{});
+}
+
+/// Prod 192 type 4 — variation.
+pub fn formatVariationRow(dest: []u8, row: []const u8) usize {
+    var fields: [6][]const u8 = undefined;
+
+    if (isAscii(row)) {
+        fields[0] = clamp(row, 1, 13);
+        fields[1] = clamp(row, 13, 43);
+        fields[2] = clamp(row, 43, 51);
+        fields[3] = clamp(row, 51, 59);
+        fields[4] = clamp(row, 59, 89);
+        const court_len: usize = @intCast(fastAtoi(clamp(row, 89, 93)));
+        fields[5] = clamp(row, 93, 93 + court_len);
+    } else {
+        fields[0] = sliceChars(row, 1, 13);
+        fields[1] = sliceChars(row, 13, 43);
+        fields[2] = sliceChars(row, 43, 51);
+        fields[3] = sliceChars(row, 51, 59);
+        fields[4] = sliceChars(row, 59, 89);
+        const court_len: usize = @intCast(fastAtoi(sliceChars(row, 89, 93)));
+        fields[5] = sliceChars(row, 93, 93 + court_len);
+    }
+    return writeCsvFields(dest, &fields, &.{});
 }
 
 /// Strip a trailing CR from a line (handles CRLF inputs).

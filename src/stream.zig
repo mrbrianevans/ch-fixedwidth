@@ -1,4 +1,4 @@
-//! Incremental snapshot → CSV conversion for hosts that cannot hold the full
+//! Incremental fixed-width → CSV conversion for hosts that cannot hold the full
 //! file (or full outputs) in memory.
 //!
 //! Design:
@@ -25,6 +25,9 @@ pub const ParseError = error{
 pub const BatchKind = enum(i32) {
     companies = 0,
     persons = 1,
+    disqualifications = 2,
+    exemptions = 3,
+    variations = 4,
 };
 
 pub const CsvBatch = struct {
@@ -55,31 +58,35 @@ pub const StreamConfig = struct {
     }
 };
 
+const KindBuf = struct {
+    buf: std.ArrayList(u8) = .empty,
+    rows: usize = 0,
+    header_written: bool = false,
+    count: i32 = 0,
+};
+
 pub const Stream = struct {
     allocator: std.mem.Allocator,
     config: StreamConfig,
 
     carry: std.ArrayList(u8) = .empty,
-    companies_buf: std.ArrayList(u8) = .empty,
-    persons_buf: std.ArrayList(u8) = .empty,
-    companies_rows: usize = 0,
-    persons_rows: usize = 0,
-    companies_header_written: bool = false,
-    persons_header_written: bool = false,
+    companies: KindBuf = .{},
+    persons: KindBuf = .{},
+    disqualifications: KindBuf = .{},
+    exemptions: KindBuf = .{},
+    variations: KindBuf = .{},
 
     ready: std.ArrayList(CsvBatch) = .empty,
 
-    companies: i32 = 0,
-    persons: i32 = 0,
     trailer_count: ?i32 = null,
+    /// Prod 192 per-type trailer expectations (set when trailer seen).
+    disqual_trailer: ?parse.DisqualTrailer = null,
     header_seen: bool = false,
     finished: bool = false,
     saw_trailer: bool = false,
 
-    /// First bytes of the input stream; product magic once 8 are seen.
     magic: [parse.header_identifier_len]u8 = undefined,
     magic_len: u8 = 0,
-    /// Set once the leading 8-byte header identifier has been identified.
     file_type: ?parse.FileType = null,
 
     row_buf: [parse.max_csv_row_bytes]u8 = undefined,
@@ -93,21 +100,21 @@ pub const Stream = struct {
 
     pub fn deinit(self: *Stream) void {
         self.carry.deinit(self.allocator);
-        self.companies_buf.deinit(self.allocator);
-        self.persons_buf.deinit(self.allocator);
+        self.companies.buf.deinit(self.allocator);
+        self.persons.buf.deinit(self.allocator);
+        self.disqualifications.buf.deinit(self.allocator);
+        self.exemptions.buf.deinit(self.allocator);
+        self.variations.buf.deinit(self.allocator);
         for (self.ready.items) |*b| b.deinit(self.allocator);
         self.ready.deinit(self.allocator);
         self.* = undefined;
     }
 
     /// Feed the next chunk of input bytes. Drain with `nextBatch` afterward.
-    /// The leading 8-byte header identifier selects the body parser (currently
-    /// only `DDDDSNAP` is implemented).
     pub fn feed(self: *Stream, chunk: []const u8) ParseError!void {
         if (self.finished) return error.AlreadyFinished;
         if (self.saw_trailer) {
             if (chunk.len == 0) return;
-            // Allow trailing whitespace/newlines after trailer; reject real data.
             for (chunk) |c| {
                 if (c != '\n' and c != '\r' and c != ' ' and c != '\t') {
                     return error.FeedAfterTrailer;
@@ -134,7 +141,6 @@ pub const Stream = struct {
 
         while (rest.len > 0) {
             if (self.saw_trailer) {
-                // Remainder of this chunk after trailer.
                 for (rest) |c| {
                     if (c != '\n' and c != '\r' and c != ' ' and c != '\t') {
                         return error.FeedAfterTrailer;
@@ -152,11 +158,9 @@ pub const Stream = struct {
         }
     }
 
-    /// Signal end of input: flush carry line, open batches, validate trailer.
     pub fn finish(self: *Stream) ParseError!void {
         if (self.finished) return error.AlreadyFinished;
 
-        // Incomplete or missing product signature.
         if (self.file_type == null) {
             return error.UnsupportedFileType;
         }
@@ -168,20 +172,52 @@ pub const Stream = struct {
             self.carry.clearRetainingCapacity();
         }
 
-        // Ensure empty outputs still get CSV headers (matches CLI behaviour).
-        try self.ensureCompaniesHeader();
-        try self.ensurePersonsHeader();
-        try self.flushCompanies(true);
-        try self.flushPersons(true);
+        const ft = self.file_type.?;
+        switch (ft) {
+            .officers_snapshot, .officers_update => {
+                try self.ensureHeader(&self.companies, parse.companies_header);
+                try self.ensureHeader(&self.persons, ft.personsCsvHeader());
+                try self.flushKind(&self.companies, .companies, true);
+                try self.flushKind(&self.persons, .persons, true);
+            },
+            .disqualifications => {
+                try self.ensureHeader(&self.persons, parse.disqual_persons_header);
+                try self.ensureHeader(&self.disqualifications, parse.disqualifications_header);
+                try self.ensureHeader(&self.exemptions, parse.exemptions_header);
+                try self.ensureHeader(&self.variations, parse.variations_header);
+                try self.flushKind(&self.persons, .persons, true);
+                try self.flushKind(&self.disqualifications, .disqualifications, true);
+                try self.flushKind(&self.exemptions, .exemptions, true);
+                try self.flushKind(&self.variations, .variations, true);
+            },
+        }
 
         self.finished = true;
 
         const tc = self.trailer_count orelse return error.MissingTrailer;
-        if (tc != self.companies + self.persons) return error.TrailerMismatch;
+        switch (ft) {
+            .officers_snapshot, .officers_update => {
+                if (tc != self.companies.count + self.persons.count) return error.TrailerMismatch;
+            },
+            .disqualifications => {
+                const tr = self.disqual_trailer orelse return error.MissingTrailer;
+                if (tr.type1 != self.persons.count or
+                    tr.type2 != self.disqualifications.count or
+                    tr.type3 != self.exemptions.count or
+                    tr.type4 != self.variations.count or
+                    tr.total != tc)
+                {
+                    return error.TrailerMismatch;
+                }
+                if (tc != self.persons.count + self.disqualifications.count +
+                    self.exemptions.count + self.variations.count)
+                {
+                    return error.TrailerMismatch;
+                }
+            },
+        }
     }
 
-    /// Collect the leading bytes of the stream, identify the product, and
-    /// reject unknown or not-yet-implemented formats.
     fn ingestMagic(self: *Stream, data: []const u8) ParseError!void {
         const need = parse.header_identifier_len;
         if (self.magic_len >= need) return;
@@ -200,7 +236,6 @@ pub const Stream = struct {
         self.file_type = file_type;
     }
 
-    /// Pop the next completed CSV batch (caller owns `data`). Null if none.
     pub fn nextBatch(self: *Stream) ?CsvBatch {
         if (self.ready.items.len == 0) return null;
         return self.ready.orderedRemove(0);
@@ -213,7 +248,7 @@ pub const Stream = struct {
         const file_type = self.file_type orelse return error.UnsupportedFileType;
         switch (file_type) {
             .officers_snapshot, .officers_update => try self.handleOfficersLine(row, file_type),
-            .disqualifications => return error.NotImplemented,
+            .disqualifications => try self.handleDisqualLine(row),
         }
     }
 
@@ -223,48 +258,94 @@ pub const Stream = struct {
                 const info = parse.parseHeader(row) catch return error.UnsupportedFileType;
                 if (info.file_type != file_type) return error.UnsupportedFileType;
                 self.header_seen = true;
-                try self.ensureCompaniesHeader();
-                try self.ensurePersonsHeader();
+                try self.ensureHeader(&self.companies, parse.companies_header);
+                try self.ensureHeader(&self.persons, file_type.personsCsvHeader());
             },
             .trailer => {
                 self.trailer_count = parse.parseTrailerCount(row);
                 self.saw_trailer = true;
             },
             .company => {
-                try self.ensureCompaniesHeader();
+                try self.ensureHeader(&self.companies, parse.companies_header);
                 const n = parse.formatCompanyRow(&self.row_buf, row);
-                try self.companies_buf.appendSlice(self.allocator, self.row_buf[0..n]);
-                self.companies_rows += 1;
-                self.companies += 1;
-                try self.flushCompanies(false);
+                try self.companies.buf.appendSlice(self.allocator, self.row_buf[0..n]);
+                self.companies.rows += 1;
+                self.companies.count += 1;
+                try self.flushKind(&self.companies, .companies, false);
             },
             .person => {
-                try self.ensurePersonsHeader();
+                try self.ensureHeader(&self.persons, file_type.personsCsvHeader());
                 const n = switch (file_type) {
                     .officers_snapshot => parse.formatPersonRow(&self.row_buf, row),
                     .officers_update => parse.formatUpdatePersonRow(&self.row_buf, row),
                     .disqualifications => unreachable,
                 };
-                try self.persons_buf.appendSlice(self.allocator, self.row_buf[0..n]);
-                self.persons_rows += 1;
-                self.persons += 1;
-                try self.flushPersons(false);
+                try self.persons.buf.appendSlice(self.allocator, self.row_buf[0..n]);
+                self.persons.rows += 1;
+                self.persons.count += 1;
+                try self.flushKind(&self.persons, .persons, false);
             },
             .other => {},
         }
     }
 
-    fn ensureCompaniesHeader(self: *Stream) ParseError!void {
-        if (self.companies_header_written) return;
-        try self.companies_buf.appendSlice(self.allocator, parse.companies_header);
-        self.companies_header_written = true;
+    fn handleDisqualLine(self: *Stream, row: []const u8) ParseError!void {
+        switch (parse.classifyDisqualLine(row)) {
+            .header => {
+                const info = parse.parseHeader(row) catch return error.UnsupportedFileType;
+                if (info.file_type != .disqualifications) return error.UnsupportedFileType;
+                self.header_seen = true;
+                try self.ensureHeader(&self.persons, parse.disqual_persons_header);
+                try self.ensureHeader(&self.disqualifications, parse.disqualifications_header);
+                try self.ensureHeader(&self.exemptions, parse.exemptions_header);
+                try self.ensureHeader(&self.variations, parse.variations_header);
+            },
+            .trailer => {
+                const tr = parse.parseDisqualTrailer(row) catch return error.MissingTrailer;
+                self.disqual_trailer = tr;
+                self.trailer_count = tr.total;
+                self.saw_trailer = true;
+            },
+            .person => {
+                try self.ensureHeader(&self.persons, parse.disqual_persons_header);
+                const n = parse.formatDisqualPersonRow(&self.row_buf, row);
+                try self.persons.buf.appendSlice(self.allocator, self.row_buf[0..n]);
+                self.persons.rows += 1;
+                self.persons.count += 1;
+                try self.flushKind(&self.persons, .persons, false);
+            },
+            .disqualification => {
+                try self.ensureHeader(&self.disqualifications, parse.disqualifications_header);
+                const n = parse.formatDisqualificationRow(&self.row_buf, row);
+                try self.disqualifications.buf.appendSlice(self.allocator, self.row_buf[0..n]);
+                self.disqualifications.rows += 1;
+                self.disqualifications.count += 1;
+                try self.flushKind(&self.disqualifications, .disqualifications, false);
+            },
+            .exemption => {
+                try self.ensureHeader(&self.exemptions, parse.exemptions_header);
+                const n = parse.formatExemptionRow(&self.row_buf, row);
+                try self.exemptions.buf.appendSlice(self.allocator, self.row_buf[0..n]);
+                self.exemptions.rows += 1;
+                self.exemptions.count += 1;
+                try self.flushKind(&self.exemptions, .exemptions, false);
+            },
+            .variation => {
+                try self.ensureHeader(&self.variations, parse.variations_header);
+                const n = parse.formatVariationRow(&self.row_buf, row);
+                try self.variations.buf.appendSlice(self.allocator, self.row_buf[0..n]);
+                self.variations.rows += 1;
+                self.variations.count += 1;
+                try self.flushKind(&self.variations, .variations, false);
+            },
+            .other => {},
+        }
     }
 
-    fn ensurePersonsHeader(self: *Stream) ParseError!void {
-        if (self.persons_header_written) return;
-        const hdr = if (self.file_type) |ft| ft.personsCsvHeader() else parse.persons_header;
-        try self.persons_buf.appendSlice(self.allocator, hdr);
-        self.persons_header_written = true;
+    fn ensureHeader(self: *Stream, kind: *KindBuf, header: []const u8) ParseError!void {
+        if (kind.header_written) return;
+        try kind.buf.appendSlice(self.allocator, header);
+        kind.header_written = true;
     }
 
     fn shouldFlush(self: *const Stream, rows: usize, bytes: usize, force: bool) bool {
@@ -274,29 +355,16 @@ pub const Stream = struct {
         return false;
     }
 
-    fn flushCompanies(self: *Stream, force: bool) ParseError!void {
-        if (!self.shouldFlush(self.companies_rows, self.companies_buf.items.len, force)) return;
-        const data = try self.companies_buf.toOwnedSlice(self.allocator);
+    fn flushKind(self: *Stream, kind: *KindBuf, batch_kind: BatchKind, force: bool) ParseError!void {
+        if (!self.shouldFlush(kind.rows, kind.buf.items.len, force)) return;
+        const data = try kind.buf.toOwnedSlice(self.allocator);
         errdefer self.allocator.free(data);
-        const rows: i32 = @intCast(self.companies_rows);
-        self.companies_rows = 0;
+        const rows: i32 = @intCast(kind.rows);
+        kind.rows = 0;
         try self.ready.append(self.allocator, .{
             .data = data,
             .row_count = rows,
-            .kind = .companies,
-        });
-    }
-
-    fn flushPersons(self: *Stream, force: bool) ParseError!void {
-        if (!self.shouldFlush(self.persons_rows, self.persons_buf.items.len, force)) return;
-        const data = try self.persons_buf.toOwnedSlice(self.allocator);
-        errdefer self.allocator.free(data);
-        const rows: i32 = @intCast(self.persons_rows);
-        self.persons_rows = 0;
-        try self.ready.append(self.allocator, .{
-            .data = data,
-            .row_count = rows,
-            .kind = .persons,
+            .kind = batch_kind,
         });
     }
 };

@@ -1,8 +1,7 @@
 //! Companies House fixed-width parser library.
 //!
-//! Products are selected from the 8-byte header identifier (e.g. `DDDDSNAP`,
-//! `DDDDUPDT`). Officers snapshot and update are implemented; other products
-//! may be recognised and rejected until wired.
+//! Products are selected from the 8-byte header identifier (`DDDDSNAP`,
+//! `DDDDUPDT`, `DISQUALS`).
 //!
 //! - `parse` — product identification, pure record classification and CSV formatting (no I/O)
 //! - `snapshot` — in-memory full-file conversion to CSV (dispatches on header)

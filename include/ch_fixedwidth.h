@@ -32,6 +32,15 @@ typedef struct ChParseResult {
     int32_t companies;
     int32_t persons;
     int32_t trailer_count;
+    /** Prod 192 type 2 CSV (empty for officers products). */
+    ChBuffer disqualifications_csv;
+    /** Prod 192 type 3 CSV (empty for officers products). */
+    ChBuffer exemptions_csv;
+    /** Prod 192 type 4 CSV (empty for officers products). */
+    ChBuffer variations_csv;
+    int32_t disqualifications;
+    int32_t exemptions;
+    int32_t variations;
 } ChParseResult;
 
 /** Success */
@@ -50,11 +59,14 @@ typedef struct ChParseResult {
 #define CH_ERR_INTERNAL 6
 /** Stream used after finish, or non-whitespace data after trailer */
 #define CH_ERR_STREAM_STATE 7
-/** Known product header (e.g. DDDDUPDT / DISQUALS) but body parser not implemented yet */
+/** Known product header but body parser not implemented yet */
 #define CH_ERR_NOT_IMPLEMENTED 8
 
 /**
- * Parse a full snapshot document in memory into two CSV documents (with headers).
+ * Parse a full fixed-width document in memory into CSV documents (with headers).
+ *
+ * Officers products fill companies_csv + persons_csv.
+ * Prod 192 fills persons_csv + disqualifications_csv + exemptions_csv + variations_csv.
  *
  * On CH_OK, free the result with ch_parse_result_free().
  * For multi-hundred-MB / GB files, use the streaming API instead.
@@ -64,7 +76,7 @@ int ch_parse_snapshot(const uint8_t *input, size_t input_len, ChParseResult *out
 /** Free one buffer previously filled by ch_parse_snapshot. */
 void ch_buffer_free(ChBuffer *buf);
 
-/** Free both CSV buffers in a parse result and zero counts. */
+/** Free all CSV buffers in a parse result and zero counts. */
 void ch_parse_result_free(ChParseResult *result);
 
 /** Allocate size bytes (e.g. host copies input for WASM). Free with ch_free. */
@@ -98,6 +110,9 @@ typedef struct ChStream ChStream;
 
 #define CH_BATCH_COMPANIES 0
 #define CH_BATCH_PERSONS 1
+#define CH_BATCH_DISQUALIFICATIONS 2
+#define CH_BATCH_EXEMPTIONS 3
+#define CH_BATCH_VARIATIONS 4
 
 /**
  * Create a stream. Free with ch_stream_destroy.

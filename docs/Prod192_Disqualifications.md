@@ -1,3 +1,5 @@
+> **Status: implemented.** Library, CLI, and WASM accept `DISQUALS` files and emit four CSVs: persons (type 1), disqualifications (type 2), exemptions (type 3), variations (type 4). Trailer counts are validated per type and in total.
+
 **DISQUALIFIED PERSONS VIA FTP**  
 **SPECIFICATION**  
 **BULK-DATA PRODUCTS**  
@@ -160,12 +162,12 @@ Variable Length. Maximum length = 4281 bytes.
 | 14         | X      | 8                                                   | DISQUAL-START-DATE             | CCYYMMDD                                                              |
 | 22         | X      | 8                                                   | DISQUAL-END-DATE               | CCYYMMDD<br>Sanction will have a date of 99991231                     |
 | 30         | X      | 20                                                  | SECTION-OF-THE-ACT             |                                                                       |
-| 42         | X      | 30                                                  | DISQUALIFICATION-TYPE          | "ORDER" or "UNDERTAKING" or "SANCTION"                                |
-| 72         | X      | 8                                                   | DISQUAL-ORDER/UNDERTAKING-DATE | CCYYMMDD or blank for older records. Null for sanction                |
-| 80         | X      | 30                                                  | CASE-NUMBER                    |                                                                       |
-| 110        | X      | 160                                                 | COMPANY-NAME                   |                                                                       |
-| 270        | 9      | 4                                                   | COURT-NAME-VARIABLE-IND        |                                                                       |
-| 274        | X      | occurs 0 to 4000 depending on COURT-NAME-VARIABLE-IND | COURT-NAME                   | Contains the court name for orders, "INSOLVENCY SERVICE" for undertakings, and null for sanction. |
+| 50         | X      | 30                                                  | DISQUALIFICATION-TYPE          | "ORDER" or "UNDERTAKING" or "SANCTION" (start **50**, not 42 — official table overlaps section; confirmed against bulk files) |
+| 80         | X      | 8                                                   | DISQUAL-ORDER/UNDERTAKING-DATE | CCYYMMDD or blank for older records. Null for sanction                |
+| 88         | X      | 30                                                  | CASE-NUMBER                    |                                                                       |
+| 118        | X      | 160                                                 | COMPANY-NAME                   |                                                                       |
+| 278        | 9      | 4                                                   | COURT-NAME-VARIABLE-IND        |                                                                       |
+| 282        | X      | occurs 0 to 4000 depending on COURT-NAME-VARIABLE-IND | COURT-NAME                   | Contains the court name for orders, "INSOLVENCY SERVICE" for undertakings, and null for sanction. |
 
 ### 2.3.3 Record Type 3 - Exemption
 

@@ -33,7 +33,7 @@ test "identifyFileType maps known header magics" {
     try std.testing.expectEqual(parse.FileType.officers_snapshot, try parse.identifyFileTypeFromInput("DDDDSNAP425720260706\n"));
     try std.testing.expect(parse.FileType.officers_snapshot.isImplemented());
     try std.testing.expect(parse.FileType.officers_update.isImplemented());
-    try std.testing.expect(!parse.FileType.disqualifications.isImplemented());
+    try std.testing.expect(parse.FileType.disqualifications.isImplemented());
 }
 
 test "parseHeader extracts run and date for all known products" {
@@ -169,13 +169,78 @@ test "formatUpdatePersonRow extracts fixed and chevron fields" {
     try std.testing.expect(csv[csv.len - 1] == '\n');
 }
 
-test "parseSnapshot rejects known-but-unimplemented DISQUALS header" {
-    const disq =
-        \\DISQUALS000120240501
-        \\1...
-        \\
-    ;
-    try std.testing.expectError(error.NotImplemented, snapshot.parseSnapshot(std.testing.allocator, disq));
+const mini_disqual = @embedFile("testdata/mini_disqual.dat");
+const expected_disqual_persons = @embedFile("testdata/expected_disqual_persons.csv");
+const expected_disqualifications = @embedFile("testdata/expected_disqualifications.csv");
+const expected_exemptions = @embedFile("testdata/expected_exemptions.csv");
+const expected_variations = @embedFile("testdata/expected_variations.csv");
+
+test "parseSnapshot mini disqual fixture matches expected CSV" {
+    const allocator = std.testing.allocator;
+    var result = try snapshot.parseSnapshot(allocator, mini_disqual);
+    defer result.deinit(allocator);
+
+    try std.testing.expectEqual(@as(i32, 3), result.persons);
+    try std.testing.expectEqual(@as(i32, 3), result.disqualifications);
+    try std.testing.expectEqual(@as(i32, 2), result.exemptions);
+    try std.testing.expectEqual(@as(i32, 1), result.variations);
+    try std.testing.expectEqual(@as(i32, 9), result.trailer_count);
+
+    try std.testing.expectEqualStrings(expected_disqual_persons, result.persons_csv);
+    try std.testing.expectEqualStrings(expected_disqualifications, result.disqualifications_csv);
+    try std.testing.expectEqualStrings(expected_exemptions, result.exemptions_csv);
+    try std.testing.expectEqualStrings(expected_variations, result.variations_csv);
+}
+
+test "stream matches snapshot on mini disqual with tiny chunks" {
+    const allocator = std.testing.allocator;
+    var s = stream_mod.Stream.init(allocator, .{ .batch_rows = 2, .batch_bytes = 64 });
+    defer s.deinit();
+
+    for (mini_disqual) |byte| {
+        try s.feed(&.{byte});
+    }
+    try s.finish();
+
+    var persons = std.ArrayList(u8).empty;
+    defer persons.deinit(allocator);
+    var disq = std.ArrayList(u8).empty;
+    defer disq.deinit(allocator);
+    var exempt = std.ArrayList(u8).empty;
+    defer exempt.deinit(allocator);
+    var variations = std.ArrayList(u8).empty;
+    defer variations.deinit(allocator);
+
+    while (s.nextBatch()) |batch| {
+        var b = batch;
+        defer b.deinit(allocator);
+        switch (b.kind) {
+            .persons => try persons.appendSlice(allocator, b.data),
+            .disqualifications => try disq.appendSlice(allocator, b.data),
+            .exemptions => try exempt.appendSlice(allocator, b.data),
+            .variations => try variations.appendSlice(allocator, b.data),
+            .companies => {},
+        }
+    }
+
+    try std.testing.expectEqual(@as(i32, 3), s.persons.count);
+    try std.testing.expectEqual(@as(i32, 3), s.disqualifications.count);
+    try std.testing.expectEqual(@as(i32, 2), s.exemptions.count);
+    try std.testing.expectEqual(@as(i32, 1), s.variations.count);
+    try std.testing.expectEqual(@as(i32, 9), s.trailer_count.?);
+    try std.testing.expectEqualStrings(expected_disqual_persons, persons.items);
+    try std.testing.expectEqualStrings(expected_disqualifications, disq.items);
+    try std.testing.expectEqualStrings(expected_exemptions, exempt.items);
+    try std.testing.expectEqualStrings(expected_variations, variations.items);
+}
+
+test "classifyDisqualLine distinguishes header trailer and body types" {
+    try std.testing.expectEqual(parse.DisqualLineKind.header, parse.classifyDisqualLine("DISQUALS428620260801"));
+    try std.testing.expectEqual(parse.DisqualLineKind.trailer, parse.classifyDisqualLine("DISQUALS/00000003/00000003/00000002/00000001/00000009"));
+    try std.testing.expectEqual(parse.DisqualLineKind.person, parse.classifyDisqualLine("1000987800001"));
+    try std.testing.expectEqual(parse.DisqualLineKind.disqualification, parse.classifyDisqualLine("2000987800001"));
+    try std.testing.expectEqual(parse.DisqualLineKind.exemption, parse.classifyDisqualLine("3054199360002"));
+    try std.testing.expectEqual(parse.DisqualLineKind.variation, parse.classifyDisqualLine("4309153140001"));
 }
 
 test "C ABI ch_parse_snapshot on mini fixture" {
@@ -221,11 +286,12 @@ test "stream matches snapshot on mini fixture with tiny chunks" {
         switch (b.kind) {
             .companies => try companies.appendSlice(allocator, b.data),
             .persons => try persons.appendSlice(allocator, b.data),
+            .disqualifications, .exemptions, .variations => {},
         }
     }
 
-    try std.testing.expectEqual(@as(i32, 2), s.companies);
-    try std.testing.expectEqual(@as(i32, 3), s.persons);
+    try std.testing.expectEqual(@as(i32, 2), s.companies.count);
+    try std.testing.expectEqual(@as(i32, 3), s.persons.count);
     try std.testing.expectEqual(@as(i32, 5), s.trailer_count.?);
     try std.testing.expectEqualStrings(expected_companies, companies.items);
     try std.testing.expectEqualStrings(expected_persons, persons.items);
@@ -249,17 +315,17 @@ test "stream rejects wrong prefix across tiny chunks" {
     try std.testing.expectError(error.UnsupportedFileType, s.feed("SNAP!!!!"));
 }
 
-test "stream accepts DDDDUPDT magic and rejects DISQUALS" {
+test "stream accepts DDDDUPDT and DISQUALS magic" {
     const allocator = std.testing.allocator;
     var s = stream_mod.Stream.init(allocator, .{});
     defer s.deinit();
-    // Magic only — full document still needs trailer for finish().
     try s.feed("DDDDUPDT1724");
     try std.testing.expectEqual(parse.FileType.officers_update, s.file_type.?);
 
     var s2 = stream_mod.Stream.init(allocator, .{});
     defer s2.deinit();
-    try std.testing.expectError(error.NotImplemented, s2.feed("DISQUALS0001"));
+    try s2.feed("DISQUALS0001");
+    try std.testing.expectEqual(parse.FileType.disqualifications, s2.file_type.?);
 }
 
 test "stream matches snapshot on mini update with tiny chunks" {
@@ -283,11 +349,12 @@ test "stream matches snapshot on mini update with tiny chunks" {
         switch (b.kind) {
             .companies => try companies.appendSlice(allocator, b.data),
             .persons => try persons.appendSlice(allocator, b.data),
+            .disqualifications, .exemptions, .variations => {},
         }
     }
 
-    try std.testing.expectEqual(@as(i32, 4), s.companies);
-    try std.testing.expectEqual(@as(i32, 9), s.persons);
+    try std.testing.expectEqual(@as(i32, 4), s.companies.count);
+    try std.testing.expectEqual(@as(i32, 9), s.persons.count);
     try std.testing.expectEqual(@as(i32, 13), s.trailer_count.?);
     try std.testing.expectEqualStrings(expected_update_companies, companies.items);
     try std.testing.expectEqualStrings(expected_update_persons, persons.items);

@@ -2,7 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-High-performance parser for [Companies House](https://www.gov.uk/government/organisations/companies-house) bulk appointment data (products **195** / **216** snapshot and **198** update). Converts proprietary fixed-width + chevron files into CSV.
+High-performance parser for [Companies House](https://www.gov.uk/government/organisations/companies-house) bulk data (appointments **195** / **216** / **198**, and disqualified persons **192**). Converts proprietary fixed-width + chevron files into CSV.
 
 It is designed for speed and can exceed **5 million records per second** on modern laptops.
 
@@ -10,12 +10,13 @@ It is designed for speed and can exceed **5 million records per second** on mode
 
 Plain-text `.dat` files identified by an 8-byte header magic:
 
-| Header | Product | Docs |
-|--------|---------|------|
-| `DDDDSNAP` | Appointments snapshot (195 / 216) | [Prod195_Snapshot.md](docs/Prod195_Snapshot.md) |
-| `DDDDUPDT` | Appointments update (198) | [Prod198_Update.md](docs/Prod198_Update.md) |
+| Header | Product | Docs | CLI outputs |
+|--------|---------|------|-------------|
+| `DDDDSNAP` | Appointments snapshot (195 / 216) | [Prod195_Snapshot.md](docs/Prod195_Snapshot.md) | `companies_data_*`, `persons_data_*` |
+| `DDDDUPDT` | Appointments update (198) | [Prod198_Update.md](docs/Prod198_Update.md) | `companies_data_*`, `persons_data_*` |
+| `DISQUALS` | Disqualified persons (192) | [Prod192_Disqualifications.md](docs/Prod192_Disqualifications.md) | `persons_data_*`, `disqualifications_data_*`, `exemptions_data_*`, `variations_data_*` |
 
-Company and officer (person) records use a fixed-width layout with variable-length name and address fields separated by chevrons (`<`). Update person rows include old/new appointment types, person numbers, postcodes, change/update dates, and the full named variable-field set.
+Company and officer (person) records use a fixed-width layout with variable-length name and address fields separated by chevrons (`<`). Update person rows include old/new appointment types, person numbers, postcodes, change/update dates, and the full named variable-field set. Disqualification files use record types 1–4 (person, disqualification, exemption, variation) and a multi-count trailer.
 
 ## Available data
 

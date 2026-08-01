@@ -22,6 +22,15 @@ pub const ChParseResult = extern struct {
     companies: i32 = 0,
     persons: i32 = 0,
     trailer_count: i32 = 0,
+    /// Prod 192 type 2 (empty for officers products).
+    disqualifications_csv: ChBuffer = .{},
+    /// Prod 192 type 3 (empty for officers products).
+    exemptions_csv: ChBuffer = .{},
+    /// Prod 192 type 4 (empty for officers products).
+    variations_csv: ChBuffer = .{},
+    disqualifications: i32 = 0,
+    exemptions: i32 = 0,
+    variations: i32 = 0,
 };
 
 pub const ChStreamConfig = extern struct {
@@ -72,12 +81,15 @@ fn mapStreamErr(err: stream_mod.ParseError) c_int {
 
 fn freeBuffer(buf: *ChBuffer) void {
     if (buf.data) |ptr| {
-        if (buf.len > 0) {
-            gpa().free(ptr[0..buf.len]);
-        }
+        // Free even for len==0 so empty owned slices from Zig are released.
+        gpa().free(ptr[0..buf.len]);
         buf.data = null;
         buf.len = 0;
     }
+}
+
+fn bufferFromSlice(s: []u8) ChBuffer {
+    return .{ .data = s.ptr, .len = s.len };
 }
 
 /// Free a buffer previously filled by `ch_parse_snapshot`.
@@ -85,14 +97,20 @@ pub export fn ch_buffer_free(buf: ?*ChBuffer) void {
     if (buf) |b| freeBuffer(b);
 }
 
-/// Free both CSV buffers in a parse result.
+/// Free all CSV buffers in a parse result.
 pub export fn ch_parse_result_free(result: ?*ChParseResult) void {
     if (result) |r| {
         freeBuffer(&r.companies_csv);
         freeBuffer(&r.persons_csv);
+        freeBuffer(&r.disqualifications_csv);
+        freeBuffer(&r.exemptions_csv);
+        freeBuffer(&r.variations_csv);
         r.companies = 0;
         r.persons = 0;
         r.trailer_count = 0;
+        r.disqualifications = 0;
+        r.exemptions = 0;
+        r.variations = 0;
     }
 }
 
@@ -126,16 +144,16 @@ pub export fn ch_parse_snapshot(
         };
     };
 
-    result.companies_csv = .{
-        .data = parsed.companies_csv.ptr,
-        .len = parsed.companies_csv.len,
-    };
-    result.persons_csv = .{
-        .data = parsed.persons_csv.ptr,
-        .len = parsed.persons_csv.len,
-    };
+    result.companies_csv = bufferFromSlice(parsed.companies_csv);
+    result.persons_csv = bufferFromSlice(parsed.persons_csv);
+    result.disqualifications_csv = bufferFromSlice(parsed.disqualifications_csv);
+    result.exemptions_csv = bufferFromSlice(parsed.exemptions_csv);
+    result.variations_csv = bufferFromSlice(parsed.variations_csv);
     result.companies = parsed.companies;
     result.persons = parsed.persons;
+    result.disqualifications = parsed.disqualifications;
+    result.exemptions = parsed.exemptions;
+    result.variations = parsed.variations;
     result.trailer_count = parsed.trailer_count;
     return CH_OK;
 }
@@ -231,7 +249,7 @@ pub export fn ch_stream_stats(
 ) void {
     if (s == null) return;
     const stream = s.?;
-    if (companies) |c| c.* = stream.companies;
-    if (persons) |p| p.* = stream.persons;
+    if (companies) |c| c.* = stream.companies.count;
+    if (persons) |p| p.* = stream.persons.count;
     if (trailer_count) |t| t.* = stream.trailer_count orelse 0;
 }

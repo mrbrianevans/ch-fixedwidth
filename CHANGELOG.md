@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Header-based product dispatch: the first 8-byte header identifier selects the body parser
 - **Product 198** (`DDDDUPDT`) officers update parser: full fixed person fields + 14 named chevron fields; company layout shared with the snapshot product
-- `DISQUALS` remains recognised and rejected with `NotImplemented` / `CH_ERR_NOT_IMPLEMENTED` until implemented
+- **Product 192** (`DISQUALS`) disqualified persons parser: types 1–4 → persons / disqualifications / exemptions / variations CSVs; slash-separated multi-count trailer validation
 
 ## [0.0.2] — 2026-08-01
 
