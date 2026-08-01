@@ -1,108 +1,99 @@
-# Design System Specification: The Digital Archive
+# Design system: ch-fixedwidth converter
 
-## 1. Overview & Creative North Star
+## 1. Overview & creative north star
 
-**Creative North Star: "The Digital Curator"**
+**Creative north star: "The bulk converter"**
 
-This design system is built to bridge the gap between the tactile weight of a 19th-century ledger and the hyper-efficiency of modern data science. We are not building a standard "SaaS dashboard"; we are crafting a digital repository of record.
+This design system styles the **ch-fixedwidth** browser and related surfaces as a precise data conversion tool — not a SaaS dashboard and not a document archive. Users drop Companies House fixed-width bulk files and leave with clean CSV. Authority comes from clarity, speed cues, and trustworthy British heritage colour — not from ledger metaphor or newspaper layout.
 
-To achieve this, the system moves away from the "boxy" nature of the web. We use **Intentional Asymmetry** and **Tonal Depth** to guide the eye. By breaking the rigid 12-column grid with staggered elements and varying typographic scales, we create a layout that feels like a bespoke broadsheet newspaper—authoritative, curated, and timeless. The goal is to make the user feel they are consulting a definitive source of truth.
-
----
-
-## 2. Colors: Tonal Integrity & The "No-Line" Rule
-
-Our palette is rooted in British heritage—heavy Navy and warm Cream. However, the sophistication lies in how these shades are layered.
-
-### The "No-Line" Rule
-
-**Explicit Instruction:** Traditional 1px solid borders are strictly prohibited for sectioning content. Boundaries must be defined through **Background Color Shifts**. To separate a sidebar from a main feed, transition from `surface` to `surface-container-low`. This creates a seamless, high-end feel that avoids the "cheap" look of boxed templates.
-
-### Surface Hierarchy & Nesting
-
-Treat the UI as a physical stack of fine parchment. Use the surface-container tiers to define importance:
-
-- **Base Layer:** `surface` (#fcf9f4) for the main canvas.
-- **Content Areas:** `surface-container-low` (#f6f3ee) for secondary information.
-- **Focus Elements:** `surface-container-lowest` (#ffffff) for primary cards or data tables to provide "pop" against the cream background.
-
-### Signature Textures
-
-- **The Navy Gradient:** For hero sections or primary CTAs, do not use flat #002147. Instead, use a subtle linear gradient transitioning from `primary` (#000a1e) to `primary_container` (#002147). This adds a "visual soul" reminiscent of deep ink on paper.
-- **Glassmorphism:** For floating navigation or tooltips, use `surface` with 80% opacity and a `20px` backdrop-blur. This ensures the "Archive" stays integrated and doesn't feel disconnected from the data beneath it.
+The goal is to make conversion feel local, private, and reliable: a workshop tool for bulk data, not a curated museum of company records.
 
 ---
 
-## 3. Typography: The Editorial Voice
+## 2. Colours: tonal integrity & the "no-line" rule
 
-We pair the intellectual elegance of **Newsreader** with the functional clarity of **Work Sans**.
+Palette is rooted in British heritage — heavy navy and warm cream — layered for depth without chrome.
 
-- **Newsreader (Display & Headline):** Use this for all high-level storytelling and data headers. It carries the weight of a traditional UK broadsheet. Use tight letter-spacing (-0.02em) for large displays to increase authority.
-- **Work Sans (Title & Body):** Optimized for legibility in dense data environments. Use `title-md` for data labels to ensure they remain "invisible" yet highly functional, allowing the headlines to shine.
+### The "no-line" rule
 
-**Hierarchy Strategy:**
+**Explicit instruction:** Traditional 1px solid borders are strictly prohibited for sectioning content. Boundaries must be defined through **background colour shifts**. To separate a control strip from the main column, transition from `surface` to `surface-container-low`. This avoids the cheap look of boxed templates.
 
-- **Display-lg (3.5rem):** Reserved for major landing page statements.
-- **Headline-md (1.75rem):** The standard for individual company names in records.
-- **Body-md (0.875rem):** The workhorse for all business descriptions and financial data.
+### Surface hierarchy & nesting
 
----
+Treat the UI as stacked work surfaces:
 
-## 4. Elevation & Depth: Tonal Layering
+- **Base layer:** `surface` (#fcf9f4) for the main canvas.
+- **Secondary areas:** `surface-container-low` (#f6f3ee) for supporting copy and tips.
+- **Focus elements:** `surface-container-lowest` (#ffffff) for primary panels (input, convert) so they pop against cream.
 
-In "The Digital Archive," depth is perceived, not forced.
+### Signature textures
 
-- **The Layering Principle:** Place a `surface-container-lowest` card onto a `surface-container-low` section. The slight shift in brightness creates a "Soft Lift."
-- **Ambient Shadows:** If a card must float (e.g., a modal or dropdown), use a shadow tinted with the `on-surface` color: `box-shadow: 0 12px 32px rgba(28, 28, 25, 0.06);`. This mimics natural light falling on paper.
-- **The Ghost Border Fallback:** If accessibility requires a border, use the `outline-variant` token at **15% opacity**. A 100% opaque border is a failure of the design system's elegance.
+- **The navy gradient:** For primary CTAs, do not use flat #002147. Use a subtle linear gradient from `primary` (#000a1e) to `primary_container` (#002147).
+- **Glassmorphism:** For floating tooltips only: `surface` at 80% opacity with a `20px` backdrop-blur.
 
 ---
 
-## 5. Components: Functional Elegance
+## 3. Typography: clear converter voice
+
+Pair **Newsreader** (display / page titles) with **Work Sans** (UI, labels, dense meta).
+
+- **Newsreader:** Page title and major headings — weight without shouting.
+- **Work Sans:** Buttons, file names, progress, status, footer — optimized for dense UI.
+
+**Hierarchy:**
+
+- **Display-lg (3.5rem):** Rare; landing statements only if needed.
+- **Headline-md (1.75rem):** Primary page title (e.g. "Companies House bulk converter").
+- **Body-md (0.875rem):** Status, tips, and secondary copy.
+
+---
+
+## 4. Elevation & depth: tonal layering
+
+Depth is perceived, not forced.
+
+- **The layering principle:** Place a `surface-container-lowest` panel on `surface` or `surface-container-low`. Slight brightness shift creates a soft lift.
+- **Ambient shadows:** If a control must float (modal/dropdown), use `box-shadow: 0 12px 32px rgba(28, 28, 25, 0.06);`.
+- **Ghost border fallback:** If accessibility requires a border, use `outline-variant` at **15% opacity**. A 100% opaque border is a failure of the system’s elegance.
+
+---
+
+## 5. Components: functional elegance
 
 ### Buttons
 
-- **Primary:** Background: `primary_container`; Text: `on_primary`. Roundedness: none (0rem). A sharp corner
-  communicates precision and traditionalism.
-- **Tertiary:** No background or border. Text: `primary`. Use for "Cancel" or "Secondary" actions, styled as a modern underline (2px offset).
+- **Primary:** Background `primary_container`; text `on_primary`. Roundedness: none (0rem). Sharp corners communicate precision.
+- **Tertiary:** No background or border. Text `primary`. Use for Cancel; underline at 2px offset.
 
-### Data Cards & Lists
+### Lists & queues
 
-- **The "No-Divider" Rule:** Never use horizontal lines to separate list items. Use **Vertical White Space** (1.5rem to 2rem) or alternating background shifts (`surface` to `surface-container-low`) to create distinction.
-- **Typography Lead:** Use `headline-sm` (Newsreader) for the primary data point (e.g., Company Name) and `label-md` (Work Sans) for the metadata (e.g., CRN Number).
+- **No-divider rule:** Never use horizontal lines between list items. Use vertical white space (1.5rem–2rem) or alternating surface shifts.
+- **Typography lead:** File name in stronger Work Sans or small Newsreader; size/status as `label-md` / `body-sm` meta.
 
-### Input Fields
+### Input fields
 
-- **Style:** Minimalist. Only a bottom border (2px) using `outline-variant`. Upon focus, the border transitions to `primary_container`.
-- **Background:** Always `surface_container_lowest` to signal interactivity against the cream background.
+- **Style:** Minimalist. Bottom border only (2px) using `outline-variant`. Focus → `primary_container`.
+- **Background:** `surface_container_lowest` against cream.
 
-### Signature Component: The "Archive Ledger"
+### Progress & results
 
-A specialized data table for financial histories.
-
-- **Header:** `primary_container` background with `on_primary` text in `label-sm` (all caps, 0.05em tracking).
-- **Cells:** `surface` background with `body-md` text. No vertical lines; only subtle horizontal shifts on hover.
+- Progress rails and bars use navy/cream tonal contrast, not bright “SaaS blue”.
+- Status copy is British English, plain, and task-focused (“Writing CSV…”, “Batch complete”).
 
 ---
 
-## 6. Do’s and Don’ts
+## 6. Do’s and don’ts
 
 ### Do
 
-- **Do** use British English spelling (e.g., "Catalogue," "Organisations," "Centres").
-- **Do** embrace generous white space. An authoritative document is never "cramped."
-- **Do** use Newsreader for numbers in financial contexts to evoke the feeling of a hand-inked ledger.
+- **Do** use British English spelling (e.g. "Organisations", "Centres" when those words appear).
+- **Do** embrace generous white space — a conversion tool should not feel cramped.
+- **Do** name the product **ch-fixedwidth** (or sentence-case “Companies House bulk converter” for the page title).
+- **Do** describe multi-product capability when listing supported inputs.
 
 ### Don't
 
-- **Don't** use `9999px` (full) roundedness. It is too "playful." Stick to `none` for a structured, professional look.
-- **Don't** use pure black (#000000). Use `primary` (#000a1e) for all dark elements to maintain the navy tonal theme.
-- **Don't** use standard "Blue" for links. Use `primary` with a sophisticated underline or a subtle weight increase.
-- **Don't** overuse the dark navy `primary-container` as a background, especially on large elements.
-
----
-
-## 7. Accessibility & Readability
-
-- **Contrast:** Ensure all `on_surface` text on `surface` backgrounds maintains a minimum 7:1 contrast ratio to accommodate users consulting the archive in various lighting conditions.
-- **Scale:** Never drop below `body-sm` (0.75rem) for legal or archival fine print. Professionalism requires transparency, not hidden text.
+- **Don't** use full pill roundedness (`9999px`). Stick to `none` for a structured, professional look.
+- **Don't** use pure black (#000000). Use `primary` (#000a1e) for dark elements.
+- **Don't** use standard “link blue”. Use `primary` with underline or weight increase.
+- **Don't** frame the UI as a digital archive, ledger, or newspaper — it is a **converter**.

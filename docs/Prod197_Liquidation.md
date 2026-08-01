@@ -1,6 +1,6 @@
 # Companies House Product 197 – Liquidation Daily Updates
 
-> **Status: implemented.** Library, CLI, and WASM accept `LIQNFORM` files and emit three CSVs: forms (one row per form group), practitioners (`NP` records), and free text (`FT` records). Trailer count is validated against the total number of data records (every non-header/non-trailer line).
+> **Status: implemented.** Library, CLI, and WASM accept `LIQNFORM` files and emit three named CSVs: forms (`CH_OUTPUT_FORMS`), practitioners (`CH_OUTPUT_PRACTITIONERS`), and free text (`CH_OUTPUT_FREE_TEXT`). Trailer count is validated against the total number of data records (every non-header/non-trailer line).
 
 **File Format Specification (V4.6d, issued 25 April 2019)**  
 Source: Companies House Liquidation Database Bulk Data Products
@@ -267,13 +267,13 @@ Record-type mix on that same file (illustrative): `FM`/`RN`/`NA`/`DR`/`ID` alway
 5. **Dates**: data-record dates are exported as in the file (`DDMMCCYY`); header production date remains `CCYYMMDD`.
 6. **Trailer validation**: every non-header/non-trailer line counts; total must match the trailer’s 8-digit count.
 7. **CLI sequential only** (form-group state cannot be split across workers like officers products).
-8. **CSV outputs** (CLI filenames; in-memory/C/WASM map forms→companies slot, practitioners→persons, free text→disqualifications):
+8. **CSV outputs** (CLI filenames and `OutputKind` / `CH_OUTPUT_*` — never overloaded onto companies/persons):
 
-| CLI file | Content |
-|----------|---------|
-| `forms_data_*` | One row per form group |
-| `practitioners_data_*` | One row per `NP` |
-| `free_text_data_*` | One row per `FT` |
+| CLI file | Output kind | Content |
+|----------|-------------|---------|
+| `forms_data_*` | `forms` | One row per form group |
+| `practitioners_data_*` | `practitioners` | One row per `NP` |
+| `free_text_data_*` | `free_text` | One row per `FT` |
 
 **forms columns:** Form Number, Company Number, Company Name, Court Reference, Appointment Date, Date of Order, Date of Petition, Resolution Date, Final Meeting Date, Termination Date, Date Form Registered, Form Dated, New Dissolution Date, Transaction ID, Registered Office
 

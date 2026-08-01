@@ -6,7 +6,7 @@
 
 ## Context
 
-The native CLI accepts a directory of Companies House snapshot `.dat` files and writes one company CSV and one person CSV per input file.
+The native CLI accepts a directory of Companies House fixed-width `.dat` files and writes the product-specific CSV set for each input file (officers → companies + persons; other products → their named outputs).
 
 Expected production shape of a directory argument:
 
