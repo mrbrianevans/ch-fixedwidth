@@ -675,12 +675,67 @@ test "isRemoteUrl detects http and https" {
     try std.testing.expect(!isRemoteUrl("Prod216_4257_ew_6.dat"));
     try std.testing.expect(!isRemoteUrl("./http://not-a-url.dat"));
     try std.testing.expect(!isRemoteUrl(""));
+    try std.testing.expect(!isRemoteUrl("-"));
 }
 
-test "baseInputName for local paths and URLs" {
+test "isStdinInput only matches dash" {
+    try std.testing.expect(isStdinInput("-"));
+    try std.testing.expect(!isStdinInput(""));
+    try std.testing.expect(!isStdinInput("--"));
+    try std.testing.expect(!isStdinInput("-.dat"));
+    try std.testing.expect(!isStdinInput("./-"));
+    try std.testing.expect(!isStdinInput("stdin"));
+    try std.testing.expect(!isStdinInput("http://example.com/-"));
+}
+
+test "baseInputName for local paths, URLs, and stdin" {
     try std.testing.expectEqualStrings("mini_snapshot", baseInputName("src/testdata/mini_snapshot.dat"));
     try std.testing.expectEqualStrings("mini_snapshot", baseInputName("mini_snapshot.dat"));
     try std.testing.expectEqualStrings("mini_snapshot", baseInputName("http://localhost:8765/mini_snapshot.dat"));
     try std.testing.expectEqualStrings("mini_snapshot", baseInputName("https://cdn.example.com/path/to/mini_snapshot.dat?token=abc"));
     try std.testing.expectEqualStrings("download", baseInputName("http://localhost:8765/"));
+    try std.testing.expectEqualStrings("stdin", baseInputName("-"));
+}
+
+const mini_snapshot_fixture = @embedFile("testdata/mini_snapshot.dat");
+const expected_companies_fixture = @embedFile("testdata/expected_companies.csv");
+const expected_persons_fixture = @embedFile("testdata/expected_persons.csv");
+
+fn readFileAlloc(io: Io, allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    const file = try Io.Dir.cwd().openFile(io, path, .{});
+    defer file.close(io);
+    const size = (try file.stat(io)).size;
+    const buf = try allocator.alloc(u8, @intCast(size));
+    errdefer allocator.free(buf);
+    var read_buf: [64 * 1024]u8 = undefined;
+    var file_reader = Io.File.Reader.initStreaming(file, io, &read_buf);
+    try file_reader.interface.readSliceAll(buf);
+    return buf;
+}
+
+test "processFromReader streams fixture like stdin and remote" {
+    // Same sequential pipeline used by processFromStdin / processFromRemoteUrl /
+    // processSingle: an Io.Reader of snapshot bytes → CSV under output_folder.
+    const io = std.testing.io;
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const out_rel = try std.fmt.allocPrint(arena, ".zig-cache/tmp/{s}/out", .{tmp.sub_path});
+    try Io.Dir.cwd().createDirPath(io, out_rel);
+
+    var reader = Io.Reader.fixed(mini_snapshot_fixture);
+    const code = try processFromReader(io, arena, &reader, out_rel, "stdin");
+    try std.testing.expectEqual(@as(u8, 0), code);
+
+    const companies_path = try std.fmt.allocPrint(arena, "{s}/companies_data_stdin.csv", .{out_rel});
+    const persons_path = try std.fmt.allocPrint(arena, "{s}/persons_data_stdin.csv", .{out_rel});
+
+    const companies = try readFileAlloc(io, arena, companies_path);
+    const persons = try readFileAlloc(io, arena, persons_path);
+    try std.testing.expectEqualStrings(expected_companies_fixture, companies);
+    try std.testing.expectEqualStrings(expected_persons_fixture, persons);
 }
