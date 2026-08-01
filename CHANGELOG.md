@@ -5,6 +5,23 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- CSV formatters never write past the destination buffer (`error.RowTooLarge` / `CH_ERR_ROW_TOO_LARGE`)
+- Prod 197 form groups fail hard when practitioner or free-text caps are exceeded (`error.RecordLimitExceeded` / `CH_ERR_RECORD_LIMIT`) instead of dropping rows
+- TypeScript `csvBatchKindFromCode` throws on unknown kind codes (no silent fallback to companies)
+
+### Removed
+
+- Legacy snapshot-only helpers `requireSnapshotHeader` / `startsWithSnapshotHeader` (use `identifyFileType` / `parseHeader`)
+
+### Added
+
+- Integration test: parallel officers path and sequential stream path byte-compare on the mini snapshot fixture
+- `.gitignore` entry for local `Prod*.txt` bulk dumps
+
 ## [0.1.0] — 2026-08-01
 
 Multi-product release of **ch-fixedwidth**. Breaking C/WASM/TypeScript API cleanup so output kinds are never overloaded across products.

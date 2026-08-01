@@ -10,6 +10,10 @@ export const ChErrorCode = {
   StreamState: 7,
   /** Known product magic without a body parser yet. */
   NotImplemented: 8,
+  /** Formatted CSV row exceeds the internal row buffer. */
+  RowTooLarge: 9,
+  /** Prod 197 form group exceeded max practitioners or free-text lines. */
+  RecordLimit: 10,
 } as const;
 
 export type ChErrorCode = (typeof ChErrorCode)[keyof typeof ChErrorCode];
@@ -51,6 +55,9 @@ const ERROR_MESSAGES: Record<number, string> = {
   [ChErrorCode.StreamState]: "Invalid stream state (already finished or data after trailer)",
   [ChErrorCode.NotImplemented]:
     "Recognised product header, but this file type is not implemented yet",
+  [ChErrorCode.RowTooLarge]: "CSV row exceeds maximum formatted size",
+  [ChErrorCode.RecordLimit]:
+    "Form group exceeded maximum practitioners or free-text lines",
 };
 
 export class ChParseError extends Error {
@@ -118,7 +125,11 @@ const BATCH_KIND_BY_CODE: Record<number, CsvBatchKind> = {
 };
 
 export function csvBatchKindFromCode(code: number): CsvBatchKind {
-  return BATCH_KIND_BY_CODE[code] ?? "companies";
+  const kind = BATCH_KIND_BY_CODE[code];
+  if (kind === undefined) {
+    throw new Error(`Unknown CSV batch kind code: ${code}`);
+  }
+  return kind;
 }
 
 /** Filename stem before `_<basename>.csv`. */

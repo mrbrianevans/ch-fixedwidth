@@ -96,6 +96,10 @@ typedef struct ChParseResult {
 #define CH_ERR_STREAM_STATE 7
 /** Known product header but body parser not implemented yet */
 #define CH_ERR_NOT_IMPLEMENTED 8
+/** Formatted CSV row exceeds the internal row buffer */
+#define CH_ERR_ROW_TOO_LARGE 9
+/** Prod 197 form group exceeded max practitioners or free-text lines */
+#define CH_ERR_RECORD_LIMIT 10
 
 /**
  * Parse a full fixed-width document in memory into named CSV documents.

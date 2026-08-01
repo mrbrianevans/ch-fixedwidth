@@ -22,6 +22,10 @@ pub const ParseError = error{
     OutOfMemory,
     AlreadyFinished,
     FeedAfterTrailer,
+    /// Formatted CSV row does not fit in `max_csv_row_bytes`.
+    RowTooLarge,
+    /// Prod 197 form group exceeded max practitioners or free-text lines.
+    RecordLimitExceeded,
 };
 
 /// Streaming batch kind — same values as `parse.OutputKind` / C `CH_OUTPUT_*`.
@@ -272,7 +276,7 @@ pub const Stream = struct {
                 self.saw_trailer = true;
             },
             .company => {
-                const n = parse.formatCompanyRow(&self.row_buf, row);
+                const n = parse.formatCompanyRow(&self.row_buf, row) catch return error.RowTooLarge;
                 try self.appendFormattedRow(.companies, parse.companies_header, n);
             },
             .person => {
@@ -280,7 +284,7 @@ pub const Stream = struct {
                     .officers_snapshot => parse.formatPersonRow(&self.row_buf, row),
                     .officers_update => parse.formatUpdatePersonRow(&self.row_buf, row),
                     .disqualifications, .liquidation => unreachable,
-                };
+                } catch return error.RowTooLarge;
                 try self.appendFormattedRow(.persons, file_type.personsCsvHeader(), n);
             },
             .other => {},
@@ -293,17 +297,17 @@ pub const Stream = struct {
         try self.ensureHeader(.practitioners, parse.liq_practitioners_header);
         try self.ensureHeader(.free_text, parse.liq_free_text_header);
 
-        const n = parse.formatLiqFormRow(&self.row_buf, &self.liq_form);
+        const n = parse.formatLiqFormRow(&self.row_buf, &self.liq_form) catch return error.RowTooLarge;
         try self.appendFormattedRow(.forms, parse.liq_forms_header, n);
 
         var i: usize = 0;
         while (i < self.liq_form.practitioner_count) : (i += 1) {
-            const pn = parse.formatLiqPractitionerRow(&self.row_buf, &self.liq_form, i);
+            const pn = parse.formatLiqPractitionerRow(&self.row_buf, &self.liq_form, i) catch return error.RowTooLarge;
             try self.appendFormattedRow(.practitioners, parse.liq_practitioners_header, pn);
         }
         i = 0;
         while (i < self.liq_form.free_text_count) : (i += 1) {
-            const fn_ = parse.formatLiqFreeTextRow(&self.row_buf, &self.liq_form, i);
+            const fn_ = parse.formatLiqFreeTextRow(&self.row_buf, &self.liq_form, i) catch return error.RowTooLarge;
             try self.appendFormattedRow(.free_text, parse.liq_free_text_header, fn_);
         }
         self.liq_form.reset();
@@ -326,11 +330,11 @@ pub const Stream = struct {
             },
             .form => {
                 try self.emitLiqFormToBuffers();
-                self.liq_form.applyRecord(row);
+                self.liq_form.applyRecord(row) catch return error.RecordLimitExceeded;
                 self.liq_data_records += 1;
             },
             .data => {
-                self.liq_form.applyRecord(row);
+                self.liq_form.applyRecord(row) catch return error.RecordLimitExceeded;
                 self.liq_data_records += 1;
             },
             .other => {},
@@ -355,19 +359,19 @@ pub const Stream = struct {
                 self.saw_trailer = true;
             },
             .person => {
-                const n = parse.formatDisqualPersonRow(&self.row_buf, row);
+                const n = parse.formatDisqualPersonRow(&self.row_buf, row) catch return error.RowTooLarge;
                 try self.appendFormattedRow(.persons, parse.disqual_persons_header, n);
             },
             .disqualification => {
-                const n = parse.formatDisqualificationRow(&self.row_buf, row);
+                const n = parse.formatDisqualificationRow(&self.row_buf, row) catch return error.RowTooLarge;
                 try self.appendFormattedRow(.disqualifications, parse.disqualifications_header, n);
             },
             .exemption => {
-                const n = parse.formatExemptionRow(&self.row_buf, row);
+                const n = parse.formatExemptionRow(&self.row_buf, row) catch return error.RowTooLarge;
                 try self.appendFormattedRow(.exemptions, parse.exemptions_header, n);
             },
             .variation => {
-                const n = parse.formatVariationRow(&self.row_buf, row);
+                const n = parse.formatVariationRow(&self.row_buf, row) catch return error.RowTooLarge;
                 try self.appendFormattedRow(.variations, parse.variations_header, n);
             },
             .other => {},

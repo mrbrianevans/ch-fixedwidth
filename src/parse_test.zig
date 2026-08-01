@@ -65,16 +65,6 @@ test "parseHeader rejects bad header" {
     try std.testing.expectError(error.UnsupportedFileType, parse.parseHeader("DDDDSNAP"));
 }
 
-test "requireSnapshotHeader checks file prefix" {
-    try parse.requireSnapshotHeader("DDDDSNAP425720260706\n");
-    try std.testing.expectError(error.UnsupportedFileType, parse.requireSnapshotHeader(""));
-    try std.testing.expectError(error.UnsupportedFileType, parse.requireSnapshotHeader("DDDDSNA"));
-    try std.testing.expectError(error.UnsupportedFileType, parse.requireSnapshotHeader("NOTASNAP425720260706\n"));
-    try std.testing.expectError(error.UnsupportedFileType, parse.requireSnapshotHeader("PK\x03\x04zipfile"));
-    // Known but not the officers snapshot product.
-    try std.testing.expectError(error.UnsupportedFileType, parse.requireSnapshotHeader("DDDDUPDT172420161018\n"));
-}
-
 test "parseTrailerCount" {
     try std.testing.expectEqual(@as(i32, 4), parse.parseTrailerCount("9999999900000004"));
     try std.testing.expectEqual(@as(i32, 6182956), parse.parseTrailerCount("9999999906182956"));
@@ -83,7 +73,7 @@ test "parseTrailerCount" {
 test "formatCompanyRow ASCII" {
     const row = "029052131D                      00160024I.T.K. (SAFETY) LIMITED<                                                                                                                                         ";
     var dest: [parse.max_csv_row_bytes]u8 = undefined;
-    const n = parse.formatCompanyRow(&dest, row);
+    const n = try parse.formatCompanyRow(&dest, row);
     const csv = dest[0..n];
     try std.testing.expectEqualStrings("02905213,D,16,I.T.K. (SAFETY) LIMITED\n", csv);
 }
@@ -91,7 +81,7 @@ test "formatCompanyRow ASCII" {
 test "formatPersonRow splits chevrons" {
     const row = "029052132102038532340001        1995060119990201BB3 3LD 196608          0088<DAVID ROY<EVANS<<<<86 POLE LANE<DARWEN<LANCASHIRE<<<FINANCIAL DIRECTOR<BRITISH<ENGLAND<";
     var dest: [parse.max_csv_row_bytes]u8 = undefined;
-    const n = parse.formatPersonRow(&dest, row);
+    const n = try parse.formatPersonRow(&dest, row);
     const csv = dest[0..n];
     try std.testing.expect(std.mem.startsWith(u8, csv, "02905213,1,02,038532340001, ,19950601,19990201,"));
     try std.testing.expect(std.mem.indexOf(u8, csv, "DAVID ROY") != null);
@@ -102,8 +92,15 @@ test "formatPersonRow splits chevrons" {
 
 test "appendField quotes commas and doubles quotes" {
     var dest: [64]u8 = undefined;
-    const n = parse.appendField(&dest, 0, "a,b\"c");
+    const n = try parse.appendField(&dest, 0, "a,b\"c");
     try std.testing.expectEqualStrings("\"a,b\"\"c\"", dest[0..n]);
+}
+
+test "appendField and formatCompanyRow reject undersized dest" {
+    var tiny: [4]u8 = undefined;
+    try std.testing.expectError(error.RowTooLarge, parse.appendField(&tiny, 0, "hello"));
+    const row = "029052131D                      00160024I.T.K. (SAFETY) LIMITED<";
+    try std.testing.expectError(error.RowTooLarge, parse.formatCompanyRow(&tiny, row));
 }
 
 test "parseDocument mini fixture matches expected CSV" {
@@ -166,7 +163,7 @@ test "parseDocument mini update fixture matches expected CSV" {
 test "formatUpdatePersonRow extracts fixed and chevron fields" {
     const row = "0426797621     0101186084280001186084280003196906                  TR27 5ET20100329        20260724202607240146MR<WARREN ALAN<DIXON<<<<C/O CALLOOSE CARAVAN PARK 16 CALLOOSE LANE W<LEEDSTOWN<HAYLE<CORNWALL<ENGLAND<MANAGER<BRITISH<UNITED KINGDOM<<<<<<<<<<<<<<";
     var dest: [parse.max_csv_row_bytes]u8 = undefined;
-    const n = parse.formatUpdatePersonRow(&dest, row);
+    const n = try parse.formatUpdatePersonRow(&dest, row);
     const csv = dest[0..n];
     try std.testing.expect(std.mem.startsWith(u8, csv, "04267976,1, , , ,01,01,186084280001,186084280003,196906  ,"));
     try std.testing.expect(std.mem.indexOf(u8, csv, "TR27 5ET") != null);
@@ -174,6 +171,34 @@ test "formatUpdatePersonRow extracts fixed and chevron fields" {
     try std.testing.expect(std.mem.indexOf(u8, csv, "DIXON") != null);
     try std.testing.expect(std.mem.indexOf(u8, csv, "MANAGER") != null);
     try std.testing.expect(csv[csv.len - 1] == '\n');
+}
+
+test "LiqForm applyRecord fails when practitioner limit exceeded" {
+    var form: parse.LiqForm = .{};
+    try form.applyRecord("FM0001");
+    var i: usize = 0;
+    while (i < parse.liq_max_practitioners) : (i += 1) {
+        try form.applyRecord("NPNAME<ADDR");
+    }
+    try std.testing.expectError(error.RecordLimitExceeded, form.applyRecord("NPONE MORE"));
+}
+
+test "parseDocument fails when liquidation form exceeds practitioner limit" {
+    // One form group with more NP lines than liq_max_practitioners.
+    var list: std.ArrayList(u8) = .empty;
+    defer list.deinit(std.testing.allocator);
+    try list.appendSlice(std.testing.allocator, "LIQNFORM427620260731\n");
+    try list.appendSlice(std.testing.allocator, "FMTESTFORM\n");
+    try list.appendSlice(std.testing.allocator, "CN12345678\n");
+    var i: usize = 0;
+    while (i < parse.liq_max_practitioners + 1) : (i += 1) {
+        try list.appendSlice(std.testing.allocator, "NPA PRACTITIONER\n");
+    }
+    try list.appendSlice(std.testing.allocator, "9999999900000019\n");
+    try std.testing.expectError(
+        error.RecordLimitExceeded,
+        document.parseDocument(std.testing.allocator, list.items),
+    );
 }
 
 const mini_disqual = @embedFile("testdata/mini_disqual.dat");

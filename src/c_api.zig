@@ -97,6 +97,10 @@ pub const CH_ERR_INTERNAL: c_int = 6;
 pub const CH_ERR_STREAM_STATE: c_int = 7;
 /// Known product header, but no body parser is implemented yet.
 pub const CH_ERR_NOT_IMPLEMENTED: c_int = 8;
+/// Formatted CSV row exceeds the internal row buffer.
+pub const CH_ERR_ROW_TOO_LARGE: c_int = 9;
+/// Prod 197 form group exceeded max practitioners or free-text lines.
+pub const CH_ERR_RECORD_LIMIT: c_int = 10;
 
 fn gpa() std.mem.Allocator {
     if (comptime builtin.cpu.arch.isWasm()) {
@@ -113,6 +117,8 @@ fn mapStreamErr(err: stream_mod.ParseError) c_int {
         error.TrailerMismatch => CH_ERR_TRAILER_MISMATCH,
         error.OutOfMemory => CH_ERR_OUT_OF_MEMORY,
         error.AlreadyFinished, error.FeedAfterTrailer => CH_ERR_STREAM_STATE,
+        error.RowTooLarge => CH_ERR_ROW_TOO_LARGE,
+        error.RecordLimitExceeded => CH_ERR_RECORD_LIMIT,
     };
 }
 
@@ -171,6 +177,8 @@ pub export fn ch_parse(
             error.MissingTrailer => CH_ERR_MISSING_TRAILER,
             error.TrailerMismatch => CH_ERR_TRAILER_MISMATCH,
             error.OutOfMemory => CH_ERR_OUT_OF_MEMORY,
+            error.RowTooLarge => CH_ERR_ROW_TOO_LARGE,
+            error.RecordLimitExceeded => CH_ERR_RECORD_LIMIT,
         };
     };
 

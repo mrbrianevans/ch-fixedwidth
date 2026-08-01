@@ -11,6 +11,7 @@ import {
   ChFixedWidthParser,
   ChFixedWidthStream,
   ChParseError,
+  csvBatchKindFromCode,
   outputFileName,
 } from "./src/index.ts";
 
@@ -110,6 +111,14 @@ test("outputFileName stems match CLI conventions", () => {
   expect(outputFileName("forms", "x")).toBe("forms_data_x.csv");
   expect(outputFileName("free_text", "x")).toBe("free_text_data_x.csv");
   expect(outputFileName("companies", "mini")).toBe("companies_data_mini.csv");
+});
+
+test("csvBatchKindFromCode maps known codes and rejects unknown", () => {
+  expect(csvBatchKindFromCode(0)).toBe("companies");
+  expect(csvBatchKindFromCode(5)).toBe("forms");
+  expect(csvBatchKindFromCode(7)).toBe("free_text");
+  expect(() => csvBatchKindFromCode(99)).toThrow(/Unknown CSV batch kind code/);
+  expect(() => csvBatchKindFromCode(-1)).toThrow(/Unknown CSV batch kind code/);
 });
 
 test("rejects empty input (one-shot)", async () => {

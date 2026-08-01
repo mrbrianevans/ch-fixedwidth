@@ -53,15 +53,15 @@ const CsvOut = struct {
 
 fn writeCompanyRow(out: *CsvOut, row: []const u8) !void {
     const dest = try out.beginRow();
-    const p = parse.formatCompanyRow(dest, row);
+    const p = try parse.formatCompanyRow(dest, row);
     out.endRow(p);
 }
 
 fn writePersonRow(out: *CsvOut, file_type: parse.FileType, row: []const u8) !void {
     const dest = try out.beginRow();
     const p = switch (file_type) {
-        .officers_snapshot => parse.formatPersonRow(dest, row),
-        .officers_update => parse.formatUpdatePersonRow(dest, row),
+        .officers_snapshot => try parse.formatPersonRow(dest, row),
+        .officers_update => try parse.formatUpdatePersonRow(dest, row),
         .disqualifications, .liquidation => return error.NotImplemented,
     };
     out.endRow(p);
@@ -745,12 +745,11 @@ pub fn listDatFilesInDir(
     return try list.toOwnedSlice(arena);
 }
 
-/// Convert every `.dat` file in `dir_path` into CSVs under `output_folder`.
-/// Each input file yields `companies_data_<basename>.csv` and
-/// `persons_data_<basename>.csv`.
+/// Convert every `.dat` file in `dir_path` into product-specific CSVs under
+/// `output_folder` (officers → companies/persons; 192 / 197 → their kind sets).
 ///
-/// Files are processed **one at a time**. On multi-core native builds each file
-/// uses the same within-file seek split as a single-file CLI argument (option B).
+/// Files are processed **one at a time**. On multi-core native builds each officers
+/// file uses the same within-file seek split as a single-file CLI argument (option B).
 /// See `docs/DDR-directory-parallelism.md`.
 pub fn processDirectory(
     io: Io,
@@ -1005,6 +1004,43 @@ test "processFromReader streams fixture like stdin and remote" {
     const persons = try readFileAlloc(io, arena, persons_path);
     try std.testing.expectEqualStrings(expected_companies_fixture, companies);
     try std.testing.expectEqualStrings(expected_persons_fixture, persons);
+}
+
+test "parallel and sequential officers paths produce identical CSV" {
+    // processSingle uses stream.Stream; processParallel uses seek-split workers.
+    // Both must byte-match on the officers snapshot fixture (and expected CSVs).
+    const io = std.testing.io;
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(io, .{ .sub_path = "mini.dat", .data = mini_snapshot_fixture });
+    const base = try std.fmt.allocPrint(arena, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    const input_path = try std.fmt.allocPrint(arena, "{s}/mini.dat", .{base});
+    const out_seq = try std.fmt.allocPrint(arena, "{s}/out_seq", .{base});
+    const out_par = try std.fmt.allocPrint(arena, "{s}/out_par", .{base});
+    try Io.Dir.cwd().createDirPath(io, out_seq);
+    try Io.Dir.cwd().createDirPath(io, out_par);
+
+    const code_seq = try processSingle(io, arena, input_path, out_seq, "mini");
+    try std.testing.expectEqual(@as(u8, 0), code_seq);
+
+    // Use multiple workers so the split/concat path runs (still correct with 1 range).
+    const code_par = try processParallel(io, arena, input_path, out_par, "mini", 4);
+    try std.testing.expectEqual(@as(u8, 0), code_par);
+
+    const seq_c = try readFileAlloc(io, arena, try std.fmt.allocPrint(arena, "{s}/companies_data_mini.csv", .{out_seq}));
+    const seq_p = try readFileAlloc(io, arena, try std.fmt.allocPrint(arena, "{s}/persons_data_mini.csv", .{out_seq}));
+    const par_c = try readFileAlloc(io, arena, try std.fmt.allocPrint(arena, "{s}/companies_data_mini.csv", .{out_par}));
+    const par_p = try readFileAlloc(io, arena, try std.fmt.allocPrint(arena, "{s}/persons_data_mini.csv", .{out_par}));
+
+    try std.testing.expectEqualStrings(seq_c, par_c);
+    try std.testing.expectEqualStrings(seq_p, par_p);
+    try std.testing.expectEqualStrings(expected_companies_fixture, seq_c);
+    try std.testing.expectEqualStrings(expected_persons_fixture, seq_p);
 }
 
 test "resolveLocalInputKind distinguishes file and directory" {

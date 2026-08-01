@@ -168,8 +168,6 @@ pub const officers_update_header_id = "DDDDUPDT";
 pub const disqualifications_header_id = "DISQUALS";
 pub const liquidation_header_id = "LIQNFORM";
 
-/// Alias retained for callers that only deal with the officers snapshot product.
-pub const snapshot_header_identifier = officers_snapshot_header_id;
 pub const trailer_record_identifier = "99999999";
 pub const company_record_type: u8 = '1';
 pub const person_record_type: u8 = '2';
@@ -430,7 +428,9 @@ pub const LiqForm = struct {
     }
 
     /// Apply one tagged data record to this form (including the opening `FM`).
-    pub fn applyRecord(self: *LiqForm, row: []const u8) void {
+    /// Fails with `error.RecordLimitExceeded` when a form group exceeds
+    /// `liq_max_practitioners` or `liq_max_free_texts` (no silent drop).
+    pub fn applyRecord(self: *LiqForm, row: []const u8) error{RecordLimitExceeded}!void {
         if (row.len < 2) return;
         const rule = findLiqTagRule(row[0..2]) orelse return;
         const payload = if (row.len > 2) trimRightSpaces(row[2..]) else row[0..0];
@@ -447,22 +447,20 @@ pub const LiqForm = struct {
             .set => self.setSlot(rule.slot, payload),
             .append_re => self.appendRegisteredOffice(payload),
             .push_np => {
-                if (self.practitioner_count < liq_max_practitioners) {
-                    const i = self.practitioner_count;
-                    const take = @min(payload.len, liq_field_cap);
-                    @memcpy(self.practitioners[i][0..take], payload[0..take]);
-                    self.practitioner_lens[i] = @intCast(take);
-                    self.practitioner_count += 1;
-                }
+                if (self.practitioner_count >= liq_max_practitioners) return error.RecordLimitExceeded;
+                const i = self.practitioner_count;
+                const take = @min(payload.len, liq_field_cap);
+                @memcpy(self.practitioners[i][0..take], payload[0..take]);
+                self.practitioner_lens[i] = @intCast(take);
+                self.practitioner_count += 1;
             },
             .push_ft => {
-                if (self.free_text_count < liq_max_free_texts) {
-                    const i = self.free_text_count;
-                    const take = @min(payload.len, liq_ft_cap);
-                    @memcpy(self.free_texts[i][0..take], payload[0..take]);
-                    self.free_text_lens[i] = @intCast(take);
-                    self.free_text_count += 1;
-                }
+                if (self.free_text_count >= liq_max_free_texts) return error.RecordLimitExceeded;
+                const i = self.free_text_count;
+                const take = @min(payload.len, liq_ft_cap);
+                @memcpy(self.free_texts[i][0..take], payload[0..take]);
+                self.free_text_lens[i] = @intCast(take);
+                self.free_text_count += 1;
             },
         }
     }
@@ -562,12 +560,21 @@ fn csvNeedsQuote(s: []const u8) bool {
     return false;
 }
 
-/// Append a field that may need CSV quoting.
-pub fn appendField(dest: []u8, pos: usize, s: []const u8) usize {
+/// CSV row formatting failed because the destination buffer is too small.
+pub const FormatError = error{RowTooLarge};
+
+/// Append a field that may need CSV quoting. Returns `error.RowTooLarge` if
+/// the write would exceed `dest.len` (never writes past the end).
+pub fn appendField(dest: []u8, pos: usize, s: []const u8) FormatError!usize {
     if (!csvNeedsQuote(s)) {
+        if (pos > dest.len or s.len > dest.len - pos) return error.RowTooLarge;
         @memcpy(dest[pos..][0..s.len], s);
         return pos + s.len;
     }
+    // Surrounding quotes + each byte (or two when doubling `"`).
+    var need: usize = 2;
+    for (s) |c| need += if (c == '"') @as(usize, 2) else 1;
+    if (pos > dest.len or need > dest.len - pos) return error.RowTooLarge;
     var p = pos;
     dest[p] = '"';
     p += 1;
@@ -585,8 +592,9 @@ pub fn appendField(dest: []u8, pos: usize, s: []const u8) usize {
     return p + 1;
 }
 
-pub fn appendInt(dest: []u8, pos: usize, n: i32) usize {
+pub fn appendInt(dest: []u8, pos: usize, n: i32) FormatError!usize {
     if (n == 0) {
+        if (pos >= dest.len) return error.RowTooLarge;
         dest[pos] = '0';
         return pos + 1;
     }
@@ -603,8 +611,15 @@ pub fn appendInt(dest: []u8, pos: usize, n: i32) usize {
         tmp[i] = '-';
     }
     const digits = tmp[i..];
+    if (pos > dest.len or digits.len > dest.len - pos) return error.RowTooLarge;
     @memcpy(dest[pos..][0..digits.len], digits);
     return pos + digits.len;
+}
+
+fn appendByte(dest: []u8, pos: usize, c: u8) FormatError!usize {
+    if (pos >= dest.len) return error.RowTooLarge;
+    dest[pos] = c;
+    return pos + 1;
 }
 
 /// Map an 8-byte header identifier to a known `FileType`.
@@ -697,17 +712,6 @@ pub fn classifyLiqLine(row: []const u8) LiqLineKind {
     return .data;
 }
 
-/// True if `input` begins with the snapshot magic `DDDDSNAP`.
-pub fn startsWithSnapshotHeader(input: []const u8) bool {
-    return input.len >= officers_snapshot_header_id.len and
-        std.mem.eql(u8, input[0..officers_snapshot_header_id.len], officers_snapshot_header_id);
-}
-
-/// Fail unless `input` begins with `DDDDSNAP` (snapshot file signature).
-pub fn requireSnapshotHeader(input: []const u8) error{UnsupportedFileType}!void {
-    if (!startsWithSnapshotHeader(input)) return error.UnsupportedFileType;
-}
-
 /// Parse a header record for any known product (shared 20-byte layout).
 /// Does **not** require the product to be implemented — callers should branch
 /// on `file_type` / `requireImplemented` to select a body parser.
@@ -746,8 +750,8 @@ pub fn parseDisqualTrailer(row: []const u8) error{MissingTrailer}!DisqualTrailer
 }
 
 /// Format a company record as one CSV line (including trailing newline).
-/// `dest` must be at least `max_csv_row_bytes`.
-pub fn formatCompanyRow(dest: []u8, row: []const u8) usize {
+/// `dest` must be large enough (typically `max_csv_row_bytes`); never overflows.
+pub fn formatCompanyRow(dest: []u8, row: []const u8) FormatError!usize {
     const v = FieldView.init(row);
     const name_length: usize = @intCast(v.atoi(36, 40));
     var name = v.get(40, 40 + name_length -| 1);
@@ -756,18 +760,15 @@ pub fn formatCompanyRow(dest: []u8, row: []const u8) usize {
     }
 
     var p: usize = 0;
-    p = appendField(dest, p, v.get(0, 8));
-    dest[p] = ',';
-    p += 1;
-    p = appendField(dest, p, v.get(9, 10));
-    dest[p] = ',';
-    p += 1;
-    p = appendInt(dest, p, v.atoi(32, 36));
-    dest[p] = ',';
-    p += 1;
-    p = appendField(dest, p, name);
-    dest[p] = '\n';
-    return p + 1;
+    p = try appendField(dest, p, v.get(0, 8));
+    p = try appendByte(dest, p, ',');
+    p = try appendField(dest, p, v.get(9, 10));
+    p = try appendByte(dest, p, ',');
+    p = try appendInt(dest, p, v.atoi(32, 36));
+    p = try appendByte(dest, p, ',');
+    p = try appendField(dest, p, name);
+    p = try appendByte(dest, p, '\n');
+    return p;
 }
 
 fn splitChevron(s: []const u8, dst: [][]const u8) void {
@@ -797,8 +798,8 @@ fn fillFixed(v: FieldView, ranges: []const [2]usize, out: [][]const u8) void {
 }
 
 /// Format a snapshot person record (Prod 195/216) as one CSV line (incl. newline).
-/// `dest` must be at least `max_csv_row_bytes`.
-pub fn formatPersonRow(dest: []u8, row: []const u8) usize {
+/// `dest` must be large enough (typically `max_csv_row_bytes`); never overflows.
+pub fn formatPersonRow(dest: []u8, row: []const u8) FormatError!usize {
     const v = FieldView.init(row);
     const ranges = [_][2]usize{
         .{ 0, 8 },   .{ 9, 10 },  .{ 10, 12 }, .{ 12, 24 }, .{ 24, 25 },
@@ -815,8 +816,8 @@ pub fn formatPersonRow(dest: []u8, row: []const u8) usize {
 /// Format an update person record (Prod 198 / `DDDDUPDT`) as one CSV line.
 /// Fixed layout per docs/Prod198_Update.md; variable data has 27 chevrons of
 /// which the first 14 named fields are exported (trailing fillers omitted).
-/// `dest` must be at least `max_csv_row_bytes`.
-pub fn formatUpdatePersonRow(dest: []u8, row: []const u8) usize {
+/// `dest` must be large enough (typically `max_csv_row_bytes`); never overflows.
+pub fn formatUpdatePersonRow(dest: []u8, row: []const u8) FormatError!usize {
     const v = FieldView.init(row);
     // 0-based character positions from the Prod 198 person update layout.
     const ranges = [_][2]usize{
@@ -846,27 +847,22 @@ pub fn formatUpdatePersonRow(dest: []u8, row: []const u8) usize {
     return writeCsvFields(dest, &fixed, &var_parts);
 }
 
-fn writeCsvFields(dest: []u8, fixed: []const []const u8, var_parts: []const []const u8) usize {
+fn writeCsvFields(dest: []u8, fixed: []const []const u8, var_parts: []const []const u8) FormatError!usize {
     var p: usize = 0;
     for (fixed, 0..) |f, i| {
-        if (i > 0) {
-            dest[p] = ',';
-            p += 1;
-        }
-        p = appendField(dest, p, f);
+        if (i > 0) p = try appendByte(dest, p, ',');
+        p = try appendField(dest, p, f);
     }
     for (var_parts) |part| {
-        dest[p] = ',';
-        p += 1;
-        p = appendField(dest, p, part);
+        p = try appendByte(dest, p, ',');
+        p = try appendField(dest, p, part);
     }
-    dest[p] = '\n';
-    p += 1;
+    p = try appendByte(dest, p, '\n');
     return p;
 }
 
 /// Prod 192 type 1 — person. Variable details: 12 chevron fields.
-pub fn formatDisqualPersonRow(dest: []u8, row: []const u8) usize {
+pub fn formatDisqualPersonRow(dest: []u8, row: []const u8) FormatError!usize {
     const v = FieldView.init(row);
     const ranges = [_][2]usize{ .{ 1, 13 }, .{ 13, 21 }, .{ 21, 29 } };
     var fixed: [ranges.len][]const u8 = undefined;
@@ -881,7 +877,7 @@ pub fn formatDisqualPersonRow(dest: []u8, row: []const u8) usize {
 /// Field starts after SECTION follow real bulk files (docs table is off by 8
 /// from DISQUALIFICATION-TYPE onward: dtype begins at 0-based 49, company at 117,
 /// court-name length at 277).
-pub fn formatDisqualificationRow(dest: []u8, row: []const u8) usize {
+pub fn formatDisqualificationRow(dest: []u8, row: []const u8) FormatError!usize {
     const v = FieldView.init(row);
     var fields: [9][]const u8 = undefined;
     fields[0] = v.get(1, 13); // Person Number
@@ -898,7 +894,7 @@ pub fn formatDisqualificationRow(dest: []u8, row: []const u8) usize {
 }
 
 /// Prod 192 type 3 — exemption.
-pub fn formatExemptionRow(dest: []u8, row: []const u8) usize {
+pub fn formatExemptionRow(dest: []u8, row: []const u8) FormatError!usize {
     const v = FieldView.init(row);
     var fields: [5][]const u8 = undefined;
     fields[0] = v.get(1, 13);
@@ -911,7 +907,7 @@ pub fn formatExemptionRow(dest: []u8, row: []const u8) usize {
 }
 
 /// Prod 192 type 4 — variation.
-pub fn formatVariationRow(dest: []u8, row: []const u8) usize {
+pub fn formatVariationRow(dest: []u8, row: []const u8) FormatError!usize {
     const v = FieldView.init(row);
     var fields: [6][]const u8 = undefined;
     fields[0] = v.get(1, 13);
@@ -933,7 +929,7 @@ pub fn stripCr(row: []const u8) []const u8 {
 }
 
 /// Format one Prod 197 form group as a forms CSV row (including newline).
-pub fn formatLiqFormRow(dest: []u8, form: *const LiqForm) usize {
+pub fn formatLiqFormRow(dest: []u8, form: *const LiqForm) FormatError!usize {
     const fields = [_][]const u8{
         form.formNumber(),
         form.companyNumber(),
@@ -956,12 +952,12 @@ pub fn formatLiqFormRow(dest: []u8, form: *const LiqForm) usize {
 
 /// Format one Prod 197 practitioner (`NP`) as a CSV row (including newline).
 /// `index` is 0-based into `form.practitioners`.
-pub fn formatLiqPractitionerRow(dest: []u8, form: *const LiqForm, index: usize) usize {
+pub fn formatLiqPractitionerRow(dest: []u8, form: *const LiqForm, index: usize) FormatError!usize {
     var parts: [6][]const u8 = .{ "", "", "", "", "", "" };
     splitChevron(form.practitioner(index), parts[0..]);
 
     var seq_buf: [12]u8 = undefined;
-    const seq_len = appendInt(seq_buf[0..], 0, @intCast(index + 1));
+    const seq_len = try appendInt(seq_buf[0..], 0, @intCast(index + 1));
 
     const fields = [_][]const u8{
         form.transactionId(),
@@ -980,9 +976,9 @@ pub fn formatLiqPractitionerRow(dest: []u8, form: *const LiqForm, index: usize) 
 
 /// Format one Prod 197 free-text (`FT`) as a CSV row (including newline).
 /// `index` is 0-based into `form.free_texts`.
-pub fn formatLiqFreeTextRow(dest: []u8, form: *const LiqForm, index: usize) usize {
+pub fn formatLiqFreeTextRow(dest: []u8, form: *const LiqForm, index: usize) FormatError!usize {
     var seq_buf: [12]u8 = undefined;
-    const seq_len = appendInt(seq_buf[0..], 0, @intCast(index + 1));
+    const seq_len = try appendInt(seq_buf[0..], 0, @intCast(index + 1));
 
     const fields = [_][]const u8{
         form.transactionId(),
