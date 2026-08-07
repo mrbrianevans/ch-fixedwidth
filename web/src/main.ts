@@ -29,6 +29,8 @@ const el = {
   resultsList: document.getElementById("results-list") as HTMLElement,
   resultsProgressFill: document.getElementById("results-progress-fill") as HTMLElement,
   resultsMemory: document.getElementById("results-memory") as HTMLElement,
+  downloadPanel: document.getElementById("download-panel") as HTMLElement,
+  downloadList: document.getElementById("download-list") as HTMLElement,
 };
 
 type ItemStatus = "pending" | "converting" | "done" | "error" | "cancelled";
@@ -61,8 +63,18 @@ let queue: QueueItem[] = [];
 let outputDir: FileSystemDirectoryHandle | null = null;
 /** Open writers keyed by output kind (lazy; product-dependent). */
 let kindWritables = new Map<CsvBatchKind, FileSystemWritableFileStream>();
-/** In-memory download fallback chunks when no directory picker. */
+/** In-memory CSV chunks when not writing to a directory handle. */
 let kindChunks = new Map<CsvBatchKind, Uint8Array[]>();
+/**
+ * Ready downloads for non-Chromium (object URLs). User clicks to save —
+ * never auto-trigger multiple dialogs.
+ */
+interface ReadyDownload {
+  name: string;
+  url: string;
+  size: number;
+}
+let readyDownloads: ReadyDownload[] = [];
 let worker: Worker | null = null;
 /** True while a batch run (possibly multi-file) is in progress. */
 let converting = false;
@@ -400,6 +412,7 @@ function setInputFiles(files: File[]): void {
   batchStartedAt = null;
   batchTotalMs = null;
   stopBatchWallTimer();
+  clearReadyDownloads();
   showResultsPanel(false);
   el.resultsMemory.hidden = true;
   el.resultsMemory.textContent = "";
@@ -508,29 +521,62 @@ async function abortWritables(): Promise<void> {
   resetWritables();
 }
 
-function triggerDownload(blob: Blob, name: string): void {
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = name;
-  a.rel = "noopener";
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 30_000);
+/** Revoke object URLs and clear the download list UI. */
+function clearReadyDownloads(): void {
+  for (const d of readyDownloads) {
+    URL.revokeObjectURL(d.url);
+  }
+  readyDownloads = [];
+  renderDownloadLinks();
 }
 
-function downloadFallback(base: string): void {
-  const entries = [...kindChunks.entries()];
-  entries.forEach(([kind, chunks], i) => {
-    setTimeout(() => {
-      triggerDownload(
-        new Blob(chunks as BlobPart[], { type: "text/csv;charset=utf-8" }),
-        outputFileName(kind, base),
-      );
-    }, i * 250);
-  });
+/**
+ * Build in-memory CSV blobs for browsers without a directory picker.
+ * Exposes clickable download links (createObjectURL) instead of firing
+ * automatic save dialogs for every output file at once.
+ */
+function materialiseDownloadLinks(base: string): void {
+  clearReadyDownloads();
+  const next: ReadyDownload[] = [];
+  for (const [kind, chunks] of kindChunks.entries()) {
+    const blob = new Blob(chunks as BlobPart[], { type: "text/csv;charset=utf-8" });
+    next.push({
+      name: outputFileName(kind, base),
+      url: URL.createObjectURL(blob),
+      size: blob.size,
+    });
+  }
   kindChunks = new Map();
+  readyDownloads = next;
+  renderDownloadLinks();
+}
+
+function renderDownloadLinks(): void {
+  if (!el.downloadPanel || !el.downloadList) return;
+  el.downloadList.replaceChildren();
+  if (readyDownloads.length === 0) {
+    el.downloadPanel.hidden = true;
+    return;
+  }
+  el.downloadPanel.hidden = false;
+  for (const d of readyDownloads) {
+    const li = document.createElement("li");
+    li.className = "download-item";
+
+    const a = document.createElement("a");
+    a.className = "download-link";
+    a.href = d.url;
+    a.download = d.name;
+    a.rel = "noopener";
+    a.textContent = d.name;
+
+    const meta = document.createElement("span");
+    meta.className = "download-meta meta";
+    meta.textContent = formatBytes(d.size);
+
+    li.append(a, meta);
+    el.downloadList.append(li);
+  }
 }
 
 function setConverting(on: boolean): void {
@@ -721,18 +767,25 @@ async function runBatchLoop(): Promise<void> {
 
   const failed = countByStatus("error");
   const done = countByStatus("done");
+  const downloadHint =
+    readyDownloads.length > 0
+      ? ` Click the link${readyDownloads.length === 1 ? "" : "s"} below to download.`
+      : "";
   if (failed > 0) {
     setStatus(
-      `Batch finished — ${done} succeeded, ${failed} failed. You can retry failed files.`,
+      `Batch finished — ${done} succeeded, ${failed} failed. You can retry failed files.${downloadHint}`,
       "error",
     );
     finishBatchRun();
   } else if (done === 1) {
     const only = queue.find((i) => i.status === "done");
-    setStatus(`Done — ${formatStatsCounts(only?.stats)}.`, "ok");
+    setStatus(`Done — ${formatStatsCounts(only?.stats)}.${downloadHint}`, "ok");
     finishBatchRun();
   } else {
-    setStatus(`Batch complete — ${done} file${done === 1 ? "" : "s"} converted.`, "ok");
+    setStatus(
+      `Batch complete — ${done} file${done === 1 ? "" : "s"} converted.${downloadHint}`,
+      "ok",
+    );
     finishBatchRun();
   }
 }
@@ -836,7 +889,7 @@ async function handleWorkerMessage(
         if (!item.writing) enterWritingPhase(item);
         renderResults();
         await closeWritables();
-        if (!canStreamToDisk || !outputDir) downloadFallback(base);
+        if (!canStreamToDisk || !outputDir) materialiseDownloadLinks(base);
         item.status = "done";
         item.writing = false;
         item.stats = msg.stats;
@@ -926,6 +979,7 @@ async function startBatch(retryFailedOnly: boolean): Promise<void> {
   batchCancelled = false;
   batchStartedAt = performance.now();
   batchTotalMs = null;
+  clearReadyDownloads();
   setConverting(true);
   showResultsPanel(true);
   startBatchWallTimer();
@@ -1033,7 +1087,7 @@ function initOutputStep(): void {
     el.outputDownloadNote.hidden = false;
     el.btnOutdir.disabled = true;
     el.outputDownloadNote.textContent =
-      "This browser will download results into memory. Prefer Chrome or Edge for large files and multi-file batches.";
+      "This browser can convert one file at a time. Results stay in memory; download links appear when conversion finishes. Prefer Chrome or Edge for large files and multi-file batches (output folder).";
   }
 }
 
