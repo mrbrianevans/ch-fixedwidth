@@ -68,6 +68,17 @@ typedef struct ChSupportedFormat {
 } ChSupportedFormat;
 
 /**
+ * Library identity and supported-format catalogue (static; do not free).
+ * version is semver without a leading 'v'; git_commit is a short SHA or "unknown".
+ */
+typedef struct ChLibraryInfo {
+    const char *version;
+    const char *git_commit;
+    const ChSupportedFormat *formats;
+    size_t format_count;
+} ChLibraryInfo;
+
+/**
  * One-shot parse result. Unused kinds have empty buffers and zero counts.
  *
  * Layout (wasm32 and native): ten int32 counts, then eight ChBuffer fields.
@@ -128,6 +139,12 @@ typedef struct ChParseResult {
  * The pointer is valid for the process lifetime; do not free.
  */
 const ChSupportedFormat *ch_supported_formats(size_t *out_count);
+
+/**
+ * Return a pointer to static library metadata: semver, short git commit SHA,
+ * and the supported-formats table. Valid for the process lifetime; do not free.
+ */
+const ChLibraryInfo *ch_library_info(void);
 
 /**
  * Parse a full fixed-width document in memory into named CSV documents.

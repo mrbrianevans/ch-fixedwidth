@@ -9,6 +9,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const document = @import("document.zig");
 const parse = @import("parse.zig");
+const version_mod = @import("version.zig");
 const stream_mod = @import("stream.zig");
 
 /// Opaque heap buffer returned to C/WASM callers.
@@ -40,6 +41,18 @@ pub const ChSupportedFormat = extern struct {
     header_identifier: [*:0]const u8 = "",
     /// NUL-terminated short description (static).
     description: [*:0]const u8 = "",
+};
+
+/// Library identity + supported formats (static strings/table; do not free).
+/// wasm32 layout: 3×ptr + usize = 16 bytes.
+pub const ChLibraryInfo = extern struct {
+    /// NUL-terminated semver (e.g. `"0.1.0"`).
+    version: [*:0]const u8 = "",
+    /// NUL-terminated short git SHA at build time, or `"unknown"`.
+    git_commit: [*:0]const u8 = "",
+    /// Pointer to static `ChSupportedFormat` array of length `format_count`.
+    formats: ?[*]const ChSupportedFormat = null,
+    format_count: usize = 0,
 };
 
 /// Output kind; matches `parse.OutputKind` / `CH_OUTPUT_*`.
@@ -193,6 +206,20 @@ const c_supported_formats_table = blk: {
 pub export fn ch_supported_formats(out_count: ?*usize) [*]const ChSupportedFormat {
     if (out_count) |c| c.* = c_supported_formats_table.len;
     return &c_supported_formats_table;
+}
+
+const c_library_info: ChLibraryInfo = .{
+    // Injected build_options strings are string literals (NUL-terminated).
+    .version = @ptrCast(version_mod.version.ptr),
+    .git_commit = @ptrCast(version_mod.git_commit.ptr),
+    .formats = &c_supported_formats_table,
+    .format_count = c_supported_formats_table.len,
+};
+
+/// Return a pointer to static library metadata (semver, git commit, formats).
+/// Valid for the process lifetime; do not free.
+pub export fn ch_library_info() *const ChLibraryInfo {
+    return &c_library_info;
 }
 
 /// Free all CSV buffers in a parse result.

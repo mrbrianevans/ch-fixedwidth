@@ -153,14 +153,14 @@ Usually **no product-specific code**: `parseDocument` already feeds `Stream` and
 
 ### Phase F — C ABI and WASM
 
-1. `include/ch_fixedwidth.h`: `CH_FILE_*` and any new `CH_OUTPUT_*`; document filled fields in `ChParseResult` / `ChStreamStats` and the `ch_supported_formats` table.
-2. `src/c_api.zig`: keep `extern struct` layouts in sync (counts then buffers). **wasm32 layout sizes must match** what TypeScript reads. The `c_supported_formats_table` is rebuilt from `parse.supported_formats`.
+1. `include/ch_fixedwidth.h`: `CH_FILE_*` and any new `CH_OUTPUT_*`; document filled fields in `ChParseResult` / `ChStreamStats` and the `ch_library_info` / `ch_supported_formats` tables.
+2. `src/c_api.zig`: keep `extern struct` layouts in sync (counts then buffers). **wasm32 layout sizes must match** what TypeScript reads. The `c_supported_formats_table` is rebuilt from `parse.supported_formats`; version/git come from `build_options`.
 3. Rebuild: `zig build test` and `zig build wasm -Doptimize=ReleaseFast`.
 
 ### Phase G — TypeScript host (`wasm-ts/`)
 
 1. `ChFileType` / `ChOutputKind` and `csvBatchKindFromCode`.
-2. `outputFileStem` / `outputKindsForFileType`; `ChFixedWidthParser.supportedFormats()` reads the WASM catalogue.
+2. `outputFileStem` / `outputKindsForFileType`; `ChFixedWidthParser.libraryInfo()` / `supportedFormats()` read the WASM catalogue.
 3. `ParseResult` / `StreamStats` fields; **struct byte offsets** in `parser.ts` / `stream.ts` if the C layout grew.
 4. Local CLI already writes by batch kind; confirm new kinds get correct filenames.
 5. Tests against the mini fixture (one-shot and tiny-chunk stream).

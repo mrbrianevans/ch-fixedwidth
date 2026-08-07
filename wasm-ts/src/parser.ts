@@ -4,6 +4,7 @@ import {
   type ChFileType,
   type ChWasmExports,
   type DocumentInput,
+  type LibraryInfo,
   type LoadOptions,
   type ParseResult,
   type SupportedFormat,
@@ -22,6 +23,12 @@ const PARSE_RESULT_SIZE = 104;
  */
 const SUPPORTED_FORMAT_SIZE = 24;
 const CH_MAX_PRODUCT_CODES = 4;
+
+/**
+ * wasm32 layout of ChLibraryInfo:
+ * ptr version (0) + ptr git_commit (4) + ptr formats (8) + usize format_count (12) = 16.
+ */
+const LIBRARY_INFO_SIZE = 16;
 const OFF_FILE_TYPE = 0;
 const OFF_TRAILER = 4;
 const OFF_COMPANIES = 8;
@@ -60,6 +67,32 @@ function readCString(memory: WebAssembly.Memory, ptr: number): string {
     end++;
   }
   return new TextDecoder("utf-8", { fatal: false }).decode(bytes.subarray(0, end));
+}
+
+function readSupportedFormats(
+  memory: WebAssembly.Memory,
+  tablePtr: number,
+  count: number,
+): SupportedFormat[] {
+  if (tablePtr === 0 || count === 0) return [];
+  const formats: SupportedFormat[] = [];
+  for (let i = 0; i < count; i++) {
+    const base = tablePtr + i * SUPPORTED_FORMAT_SIZE;
+    const view = new DataView(memory.buffer, base, SUPPORTED_FORMAT_SIZE);
+    const fileType = view.getInt32(0, true) as ChFileType;
+    const codeCount = Math.min(view.getUint32(4, true), CH_MAX_PRODUCT_CODES);
+    const productCodes: number[] = [];
+    for (let c = 0; c < codeCount; c++) {
+      productCodes.push(view.getUint16(8 + c * 2, true));
+    }
+    formats.push({
+      fileType,
+      productCodes,
+      headerIdentifier: readCString(memory, view.getUint32(16, true)),
+      description: readCString(memory, view.getUint32(20, true)),
+    });
+  }
+  return formats;
 }
 
 function readU32(view: DataView, offset: number): number {
@@ -110,51 +143,43 @@ export class ChFixedWidthParser {
   }
 
   /**
-   * List of bulk file formats this module can parse (product codes, header
-   * magic, short description). Data is copied out of WASM static storage.
+   * Library identity embedded in the WASM module: semver, build-time git
+   * commit, and supported file formats. Strings/table are copied out of
+   * static WASM storage.
    */
-  supportedFormats(): SupportedFormat[] {
-    const { memory, ch_alloc, ch_free, ch_supported_formats } = this.exports;
-    if (typeof ch_supported_formats !== "function") {
+  libraryInfo(): LibraryInfo {
+    const { memory, ch_library_info } = this.exports;
+    if (typeof ch_library_info !== "function") {
       throw new Error(
-        "Invalid ch_fixedwidth.wasm: missing ch_supported_formats. Rebuild with zig build wasm.",
+        "Invalid ch_fixedwidth.wasm: missing ch_library_info. Rebuild with zig build wasm.",
       );
     }
 
-    const countPtr = ch_alloc(4);
-    if (countPtr === 0) {
-      throw new ChParseError(5);
+    const infoPtr = ch_library_info();
+    if (infoPtr === 0) {
+      throw new Error("ch_library_info returned null");
     }
-    try {
-      const tablePtr = ch_supported_formats(countPtr);
-      const count = new DataView(memory.buffer).getUint32(countPtr, true);
-      if (tablePtr === 0 || count === 0) {
-        return [];
-      }
 
-      const formats: SupportedFormat[] = [];
-      for (let i = 0; i < count; i++) {
-        const base = tablePtr + i * SUPPORTED_FORMAT_SIZE;
-        const view = new DataView(memory.buffer, base, SUPPORTED_FORMAT_SIZE);
-        const fileType = view.getInt32(0, true) as ChFileType;
-        const codeCount = Math.min(view.getUint32(4, true), CH_MAX_PRODUCT_CODES);
-        const productCodes: number[] = [];
-        for (let c = 0; c < codeCount; c++) {
-          productCodes.push(view.getUint16(8 + c * 2, true));
-        }
-        const headerPtr = view.getUint32(16, true);
-        const descPtr = view.getUint32(20, true);
-        formats.push({
-          fileType,
-          productCodes,
-          headerIdentifier: readCString(memory, headerPtr),
-          description: readCString(memory, descPtr),
-        });
-      }
-      return formats;
-    } finally {
-      ch_free(countPtr, 4);
-    }
+    const view = new DataView(memory.buffer, infoPtr, LIBRARY_INFO_SIZE);
+    const versionPtr = view.getUint32(0, true);
+    const commitPtr = view.getUint32(4, true);
+    const formatsPtr = view.getUint32(8, true);
+    const formatCount = view.getUint32(12, true);
+
+    return {
+      version: readCString(memory, versionPtr),
+      gitCommit: readCString(memory, commitPtr),
+      formats: readSupportedFormats(memory, formatsPtr, formatCount),
+    };
+  }
+
+  /**
+   * List of bulk file formats this module can parse (product codes, header
+   * magic, short description). Prefer {@link libraryInfo} when you also need
+   * version/commit metadata.
+   */
+  supportedFormats(): SupportedFormat[] {
+    return this.libraryInfo().formats;
   }
 
   /**

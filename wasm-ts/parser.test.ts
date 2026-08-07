@@ -35,35 +35,44 @@ async function wasmBytes(): Promise<ArrayBuffer> {
   return wasmFile.arrayBuffer();
 }
 
-test("supportedFormats lists product codes, headers, and descriptions", async () => {
+test("libraryInfo exposes version, git commit, and formats", async () => {
   const parser = await ChFixedWidthParser.create({ wasmBytes: await wasmBytes() });
-  const formats = parser.supportedFormats();
+  const info = parser.libraryInfo();
 
-  expect(formats).toHaveLength(4);
-  expect(formats[0]).toEqual({
+  expect(info.version.length).toBeGreaterThan(0);
+  expect(info.version).toMatch(/^\d+\.\d+\.\d+/);
+  expect(info.gitCommit.length).toBeGreaterThan(0);
+  expect(info.gitCommit).not.toBe("");
+  // Prefer a real short SHA; allow "unknown" when git was unavailable at build.
+  expect(info.gitCommit === "unknown" || /^[0-9a-f]+$/i.test(info.gitCommit)).toBe(true);
+
+  expect(info.formats).toHaveLength(4);
+  expect(info.formats[0]).toEqual({
     fileType: ChFileType.OfficersSnapshot,
     productCodes: [195, 216],
     headerIdentifier: "DDDDSNAP",
     description: "officers snapshot",
   });
-  expect(formats[1]).toEqual({
+  expect(info.formats[1]).toEqual({
     fileType: ChFileType.OfficersUpdate,
     productCodes: [198],
     headerIdentifier: "DDDDUPDT",
     description: "officers update",
   });
-  expect(formats[2]).toEqual({
+  expect(info.formats[2]).toEqual({
     fileType: ChFileType.Disqualifications,
     productCodes: [192],
     headerIdentifier: "DISQUALS",
     description: "disqualifications",
   });
-  expect(formats[3]).toEqual({
+  expect(info.formats[3]).toEqual({
     fileType: ChFileType.Liquidation,
     productCodes: [197],
     headerIdentifier: "LIQNFORM",
     description: "liquidations",
   });
+
+  expect(parser.supportedFormats()).toEqual(info.formats);
 });
 
 test("parse mini snapshot via WASM (one-shot)", async () => {

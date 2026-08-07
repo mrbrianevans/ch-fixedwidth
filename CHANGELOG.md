@@ -11,6 +11,7 @@ Multi-product release of **ch-fixedwidth**. Breaking C/WASM/TypeScript API clean
 
 ### Added
 
+- `libraryInfo()` / `ch_library_info`: semver, build-time short git SHA, and supported-format catalogue (product codes, header magic, short description) across Zig, C ABI, WASM, and TypeScript; web footer reads version + commit from WASM
 - `supportedFormats()` / `ch_supported_formats` catalogue: product code(s), header identifier, and short description for each implemented format (Zig, C ABI, WASM/TypeScript)
 - Header-based product dispatch: the first 8-byte header identifier selects the body parser
 - **Product 198** (`DDDDUPDT`) officers update parser

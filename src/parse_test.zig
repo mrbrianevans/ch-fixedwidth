@@ -71,6 +71,32 @@ test "supportedFormats lists product codes, headers, and descriptions" {
     }
 }
 
+test "libraryInfo exposes version, git commit, and formats" {
+    const info = @import("version.zig").libraryInfo();
+    try std.testing.expect(info.version.len > 0);
+    try std.testing.expect(info.git_commit.len > 0);
+    try std.testing.expectEqual(@as(usize, 4), info.formats.len);
+    try std.testing.expectEqualStrings(info.version, @import("version.zig").version);
+    try std.testing.expectEqualStrings(info.git_commit, @import("version.zig").git_commit);
+    // Semver-ish: digit, dot, digit
+    try std.testing.expect(std.mem.indexOfScalar(u8, info.version, '.') != null);
+}
+
+test "ch_library_info C ABI matches Zig libraryInfo" {
+    const info = c_api.ch_library_info();
+    try std.testing.expectEqualStrings(
+        @import("version.zig").version,
+        std.mem.span(info.version),
+    );
+    try std.testing.expectEqualStrings(
+        @import("version.zig").git_commit,
+        std.mem.span(info.git_commit),
+    );
+    try std.testing.expectEqual(@as(usize, 4), info.format_count);
+    try std.testing.expect(info.formats != null);
+    try std.testing.expectEqualStrings("DDDDSNAP", std.mem.span(info.formats.?[0].header_identifier));
+}
+
 test "ch_supported_formats C ABI matches Zig catalogue" {
     var count: usize = 0;
     const table = c_api.ch_supported_formats(&count);

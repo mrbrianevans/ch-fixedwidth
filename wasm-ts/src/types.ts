@@ -174,7 +174,7 @@ export function outputKindsForFileType(fileType: ChFileType): CsvBatchKind[] {
 }
 
 /**
- * One supported bulk file format from `ch_supported_formats`.
+ * One supported bulk file format from `ch_supported_formats` / `ch_library_info`.
  * Product codes are Companies House product numbers (e.g. 195 and 216).
  */
 export interface SupportedFormat {
@@ -185,6 +185,17 @@ export interface SupportedFormat {
   headerIdentifier: string;
   /** Short human-readable label (e.g. `officers snapshot`). */
   description: string;
+}
+
+/**
+ * Library identity from `ch_library_info`: semver, build-time git commit, formats.
+ */
+export interface LibraryInfo {
+  /** Semantic version without a leading `v` (e.g. `0.1.0`). */
+  version: string;
+  /** Short git SHA embedded at build time, or `unknown`. */
+  gitCommit: string;
+  formats: SupportedFormat[];
 }
 
 /** One batched CSV chunk from the streaming parser (owned by the host). */
@@ -237,6 +248,8 @@ export interface ChWasmExports {
    * When `outCountPtr` is non-zero, writes the entry count as a `usize` (u32).
    */
   ch_supported_formats?(outCountPtr: number): number;
+  /** Pointer to a static `ChLibraryInfo` (wasm32 layout: 16 bytes). */
+  ch_library_info?(): number;
   ch_stream_create?(configPtr: number): number;
   ch_stream_destroy?(streamPtr: number): void;
   ch_stream_feed?(streamPtr: number, dataPtr: number, len: number): number;

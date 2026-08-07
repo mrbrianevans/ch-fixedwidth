@@ -42,5 +42,6 @@ export {
   type CsvBatch,
   type CsvBatchKind,
   type SupportedFormat,
+  type LibraryInfo,
   type ChWasmExports,
 } from "./types.ts";

@@ -2,9 +2,13 @@
  * Main thread: pickers, batch queue, progress, streaming writes.
  * Parsing runs in worker.ts (one file at a time).
  */
-import { outputFileName, type CsvBatchKind, type StreamStats } from "@ch-fixedwidth/wasm-ts";
+import {
+  ChFixedWidthParser,
+  outputFileName,
+  type CsvBatchKind,
+  type StreamStats,
+} from "@ch-fixedwidth/wasm-ts";
 import wasmUrl from "../ch_fixedwidth.wasm?url";
-import wasmTsPkg from "../../wasm-ts/package.json";
 import type { WorkerOutMessage } from "./types.ts";
 
 const el = {
@@ -94,17 +98,6 @@ let batchStartedAt: number | null = null;
 let batchTotalMs: number | null = null;
 /** Show results once a batch has been started (or has outcomes). */
 let resultsVisible = false;
-
-/**
- * Parser version for the footer — imported from wasm-ts package.json.
- * Prefer a real import over Vite `define`: Vite 8 may leave `__PARSER_VERSION__`
- * unreplaced in dev, which throws ReferenceError in initSiteFooter and aborts
- * the rest of init (file open/drop handlers never bind).
- */
-const PARSER_VERSION: string =
-  typeof wasmTsPkg.version === "string" && wasmTsPkg.version.trim()
-    ? wasmTsPkg.version.trim()
-    : "dev";
 
 function basenameWithoutExt(name: string): string {
   const i = name.lastIndexOf(".");
@@ -1115,9 +1108,31 @@ function initSiteFooter(): void {
   if (yearEl) yearEl.textContent = String(new Date().getFullYear());
 
   const verEl = document.getElementById("parser-version");
-  if (verEl) {
-    const v = PARSER_VERSION || "dev";
-    verEl.textContent = v.startsWith("v") ? v : `v${v}`;
+  if (!verEl) return;
+
+  // Placeholder until WASM libraryInfo resolves (semver + build-time short SHA).
+  verEl.textContent = "…";
+  void loadParserVersionInto(verEl);
+}
+
+/**
+ * Read version + git commit from the freestanding WASM module so the footer
+ * matches the exact binary that will parse files (not package.json alone).
+ */
+async function loadParserVersionInto(verEl: HTMLElement): Promise<void> {
+  try {
+    const parser = await ChFixedWidthParser.create({ wasmUrl });
+    const info = parser.libraryInfo();
+    const ver = info.version.startsWith("v") ? info.version : `v${info.version}`;
+    const commit = info.gitCommit && info.gitCommit !== "unknown" ? info.gitCommit : null;
+    verEl.textContent = commit ? `${ver} · ${commit}` : ver;
+    verEl.title = commit
+      ? `ch_fixedwidth ${ver} (git ${commit})`
+      : `ch_fixedwidth ${ver}`;
+  } catch (err) {
+    console.warn("Could not load parser version from WASM:", err);
+    verEl.textContent = "dev";
+    verEl.removeAttribute("title");
   }
 }
 
