@@ -141,18 +141,22 @@ function totalDataRows(stats?: StreamStats): number {
   );
 }
 
-/** Compact non-zero row counts for the results line. */
+/** Non-zero row counts for status / results lines (full words, not abbreviations). */
 function formatStatsCounts(stats?: StreamStats): string {
   if (!stats) return "0 rows";
   const parts: string[] = [];
-  if (stats.companies) parts.push(`${formatNumber(stats.companies)} co`);
-  if (stats.persons) parts.push(`${formatNumber(stats.persons)} pe`);
-  if (stats.disqualifications) parts.push(`${formatNumber(stats.disqualifications)} disq`);
-  if (stats.exemptions) parts.push(`${formatNumber(stats.exemptions)} ex`);
-  if (stats.variations) parts.push(`${formatNumber(stats.variations)} var`);
+  if (stats.companies) parts.push(`${formatNumber(stats.companies)} companies`);
+  if (stats.persons) parts.push(`${formatNumber(stats.persons)} persons`);
+  if (stats.disqualifications) {
+    parts.push(`${formatNumber(stats.disqualifications)} disqualifications`);
+  }
+  if (stats.exemptions) parts.push(`${formatNumber(stats.exemptions)} exemptions`);
+  if (stats.variations) parts.push(`${formatNumber(stats.variations)} variations`);
   if (stats.forms) parts.push(`${formatNumber(stats.forms)} forms`);
-  if (stats.practitioners) parts.push(`${formatNumber(stats.practitioners)} prac`);
-  if (stats.freeText) parts.push(`${formatNumber(stats.freeText)} ft`);
+  if (stats.practitioners) {
+    parts.push(`${formatNumber(stats.practitioners)} practitioners`);
+  }
+  if (stats.freeText) parts.push(`${formatNumber(stats.freeText)} free text`);
   if (parts.length === 0) return "0 rows";
   return parts.join(", ");
 }
