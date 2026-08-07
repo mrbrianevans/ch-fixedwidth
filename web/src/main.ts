@@ -1178,7 +1178,10 @@ async function loadLibraryInfoIntoUi(): Promise<void> {
   if (verEl) verEl.textContent = "…";
 
   try {
-    const parser = await ChFixedWidthParser.create({ wasmUrl });
+    // Same absolute URL resolution as the converter worker (Vite ?url is often root-relative).
+    const parser = await ChFixedWidthParser.create({
+      wasmUrl: resolveAssetUrl(String(wasmUrl)),
+    });
     applyLibraryInfoToUi(parser.libraryInfo());
   } catch (err) {
     console.warn("Could not load library info from WASM:", err);

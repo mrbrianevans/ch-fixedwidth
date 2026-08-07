@@ -32,7 +32,9 @@ bun run smoke    # fixture check against wasm-ts
 bun run icons    # regenerate PNG icons from SVG (needs ffmpeg on PATH)
 ```
 
-WASM is resolved from `ch_fixedwidth.wasm` (copied from `zig-out` automatically when missing).
+WASM is resolved from `ch_fixedwidth.wasm` (copied/refreshed from `zig-out` when that build is newer). After Zig export changes, run `zig build wasm -Doptimize=ReleaseFast` from the repo root (or `bun run copy-wasm`).
+
+The local `@ch-fixedwidth/wasm-ts` package is **not** pre-bundled in dev (`optimizeDeps.exclude`), so API changes like `libraryInfo()` show up without a stale Vite dep cache. If the formats list or footer still looks old, stop the dev server, delete `web/node_modules/.vite`, and restart.
 
 ## Progressive Web App
 
