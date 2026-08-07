@@ -146,11 +146,6 @@ export default defineConfig({
   base: "./",
   publicDir: "public",
   plugins: [chFixedwidthPlugin()],
-  // Always a quoted string so dev + build both replace every identifier use.
-  // Avoid `typeof __PARSER_VERSION__` in app code (esbuild define footgun).
-  define: {
-    __PARSER_VERSION__: JSON.stringify(readParserVersion() || "dev"),
-  },
   worker: {
     format: "es",
   },

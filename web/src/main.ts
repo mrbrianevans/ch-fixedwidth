@@ -4,6 +4,7 @@
  */
 import { outputFileName, type CsvBatchKind, type StreamStats } from "@ch-fixedwidth/wasm-ts";
 import wasmUrl from "../ch_fixedwidth.wasm?url";
+import wasmTsPkg from "../../wasm-ts/package.json";
 import type { WorkerOutMessage } from "./types.ts";
 
 const el = {
@@ -83,11 +84,15 @@ let batchTotalMs: number | null = null;
 let resultsVisible = false;
 
 /**
- * Parser version from wasm-ts/package.json, injected by Vite `define`.
- * Do not wrap in `typeof … !== "undefined"` — that pattern breaks under esbuild
- * define replacement (can leave a dangling identifier like `__PARSER_VERSION_`).
+ * Parser version for the footer — imported from wasm-ts package.json.
+ * Prefer a real import over Vite `define`: Vite 8 may leave `__PARSER_VERSION__`
+ * unreplaced in dev, which throws ReferenceError in initSiteFooter and aborts
+ * the rest of init (file open/drop handlers never bind).
  */
-declare const __PARSER_VERSION__: string;
+const PARSER_VERSION: string =
+  typeof wasmTsPkg.version === "string" && wasmTsPkg.version.trim()
+    ? wasmTsPkg.version.trim()
+    : "dev";
 
 function basenameWithoutExt(name: string): string {
   const i = name.lastIndexOf(".");
@@ -1053,7 +1058,7 @@ function initSiteFooter(): void {
 
   const verEl = document.getElementById("parser-version");
   if (verEl) {
-    const v = __PARSER_VERSION__ || "dev";
+    const v = PARSER_VERSION || "dev";
     verEl.textContent = v.startsWith("v") ? v : `v${v}`;
   }
 }
