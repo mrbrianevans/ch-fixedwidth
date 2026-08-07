@@ -1,6 +1,6 @@
 # Companies House Product 198 - Company Appointments Update
 
-> **Status: not implemented yet.** This document is a format reference for a future parser path. The current library and CLI only accept snapshot files (`DDDSNAP`, products 195 / 216).
+> **Status: implemented.** Library, CLI, and WASM accept update files (`DDDDUPDT`, product 198) and emit company + person CSVs with the full update person column set.
 
 **File Type**: Update (`DDDDUPDT` header)
 
@@ -90,5 +90,7 @@ DDDDUPDT172420161018
 0264719021     0101216575880001216575880001195810                  HP9 2UR 20161015                201610180117MRS<AMANDA<BARTHOLOMEW<<<<BEACONSFIELD GOLF CLUB<SEER GREEN<BEACONSFIELD<BUCKS<<RETIRED<BRITISH<ENGLAND<<<<<<<<<<<<<<
 02647190211    0103000844970001000844970001195110                  HP9 2UR 2010101720161015        201610180129MR<JOHN EDWARD<BAILEY<<<<BEACONSFIELD GOLF CLUB<SEER GREEN<BEACONSFIELD<BUCKS<<CHARTERED ACCOUNTANT<BRITISH<ENGLAND<<<<<<<<<<<<<<
 02647190211    0103069920630001069920630001194605                  HP9 1XY 2002113020161015        201610180143<DAVID<LEWIS<<<<PENNYFIELD 9 PITCH POND CLOSE<KNOTTY GREEN<BEACONSFIELD<BUCKINGHAMSHIRE<<MANAGING DIRECTOR<BRITISH<UNITED KINGDOM<<<<<<<<<<<<<<
-9999999900000012
+9999999900000013
 ```
+
+(Trailer count is company + person data rows excluding header/trailer: 4 companies + 9 persons = 13.)

@@ -1,6 +1,8 @@
 import { getExports, instantiateWasm, requireStreamExports } from "./load.ts";
 import {
   ChParseError,
+  csvBatchKindFromCode,
+  type ChFileType,
   type ChWasmExports,
   type CsvBatch,
   type CsvBatchKind,
@@ -12,7 +14,8 @@ import {
 const CONFIG_SIZE = 8;
 /** wasm32 layout of ChCsvBatch */
 const BATCH_SIZE = 16;
-const STATS_I32_TRIPLE = 12;
+/** wasm32 layout of ChStreamStats (10 × i32) */
+const STATS_SIZE = 40;
 
 function toBytes(input: Uint8Array | ArrayBuffer | string): Uint8Array {
   if (typeof input === "string") {
@@ -42,11 +45,10 @@ function makeBatch(kind: CsvBatchKind, data: Uint8Array, rowCount: number): CsvB
 }
 
 /**
- * Streaming host for large snapshots.
+ * Streaming host for large multi-product fixed-width files.
  *
  * Peak WASM memory is roughly O(input chunk + open CSV batches), not O(file).
- * Drain returned batches after every `feed` / `finish` (write them to disk or
- * a JS stream) so batches do not accumulate on the host either.
+ * Drain returned batches after every `feed` / `finish`.
  *
  * Defaults inside WASM: flush every 1000 data rows or 256 KiB of CSV per kind.
  */
@@ -124,24 +126,31 @@ export class ChFixedWidthStream {
     return this.drainBatches();
   }
 
-  /** Cumulative row counts (trailerCount is 0 until a trailer line is seen). */
+  /** Cumulative row counts by output kind (trailerCount is 0 until trailer seen). */
   stats(): StreamStats {
     this.assertLive();
     requireStreamExports(this.exports);
     const { memory, ch_alloc, ch_free, ch_stream_stats } = this.exports;
-    const ptr = ch_alloc(STATS_I32_TRIPLE);
+    const ptr = ch_alloc(STATS_SIZE);
     if (ptr === 0) throw new ChParseError(5);
     try {
-      new Uint8Array(memory.buffer, ptr, STATS_I32_TRIPLE).fill(0);
-      ch_stream_stats!(this.streamPtr, ptr, ptr + 4, ptr + 8);
-      const view = new DataView(memory.buffer, ptr, STATS_I32_TRIPLE);
+      new Uint8Array(memory.buffer, ptr, STATS_SIZE).fill(0);
+      ch_stream_stats!(this.streamPtr, ptr);
+      const view = new DataView(memory.buffer, ptr, STATS_SIZE);
       return {
-        companies: view.getInt32(0, true),
-        persons: view.getInt32(4, true),
-        trailerCount: view.getInt32(8, true),
+        fileType: view.getInt32(0, true) as ChFileType,
+        trailerCount: view.getInt32(4, true),
+        companies: view.getInt32(8, true),
+        persons: view.getInt32(12, true),
+        disqualifications: view.getInt32(16, true),
+        exemptions: view.getInt32(20, true),
+        variations: view.getInt32(24, true),
+        forms: view.getInt32(28, true),
+        practitioners: view.getInt32(32, true),
+        freeText: view.getInt32(36, true),
       };
     } finally {
-      ch_free(ptr, STATS_I32_TRIPLE);
+      ch_free(ptr, STATS_SIZE);
     }
   }
 
@@ -179,7 +188,7 @@ export class ChFixedWidthStream {
         const dataLen = view.getUint32(4, true);
         const rowCount = view.getInt32(8, true);
         const kindCode = view.getInt32(12, true);
-        const kind: CsvBatchKind = kindCode === 1 ? "persons" : "companies";
+        const kind = csvBatchKindFromCode(kindCode);
         const data = copyBytes(memory, dataPtr, dataLen);
         out.push(makeBatch(kind, data, rowCount));
         ch_csv_batch_free!(batchPtr);

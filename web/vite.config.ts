@@ -37,16 +37,25 @@ function readParserVersion(): string {
 /** Ensure freestanding WASM is at web/ch_fixedwidth.wasm for `?url` imports. */
 function ensureWasm(): void {
   const dest = join(root, "ch_fixedwidth.wasm");
-  if (existsSync(dest)) return;
   const candidates = [
     join(repoRoot, "zig-out", "ch_fixedwidth.wasm"),
     join(repoRoot, "zig-out", "bin", "ch_fixedwidth.wasm"),
   ];
   const src = candidates.find((p) => existsSync(p));
   if (!src) {
+    if (existsSync(dest)) {
+      // Keep an existing copy (e.g. CI artifact) when zig-out is absent.
+      return;
+    }
     throw new Error(
       "ch_fixedwidth.wasm not found. From the repo root run:\n  zig build wasm -Doptimize=ReleaseFast",
     );
+  }
+  // Always refresh when zig-out is newer so dev picks up ch_library_info etc.
+  if (existsSync(dest)) {
+    const srcM = statSync(src).mtimeMs;
+    const destM = statSync(dest).mtimeMs;
+    if (destM >= srcM && statSync(dest).size === statSync(src).size) return;
   }
   copyFileSync(src, dest);
   console.log(`[ch-fixedwidth] WASM ready: ${dest}`);
@@ -146,11 +155,6 @@ export default defineConfig({
   base: "./",
   publicDir: "public",
   plugins: [chFixedwidthPlugin()],
-  // Always a quoted string so dev + build both replace every identifier use.
-  // Avoid `typeof __PARSER_VERSION__` in app code (esbuild define footgun).
-  define: {
-    __PARSER_VERSION__: JSON.stringify(readParserVersion() || "dev"),
-  },
   worker: {
     format: "es",
   },
@@ -161,15 +165,24 @@ export default defineConfig({
     sourcemap: true,
     assetsInlineLimit: 0,
   },
-  server: {
-    port: 3000,
-    strictPort: false,
-  },
   preview: {
     port: 3000,
   },
-  // Local monorepo package is TypeScript source — let Vite pre-bundle it.
+  // Local monorepo package is TypeScript source that changes often.
+  // Pre-bundling caches a stale copy (e.g. missing libraryInfo after API
+  // adds) — serve source directly so `bun run dev` matches the package tree.
   optimizeDeps: {
-    include: ["@ch-fixedwidth/wasm-ts"],
+    exclude: ["@ch-fixedwidth/wasm-ts"],
+  },
+  server: {
+    port: 3000,
+    strictPort: false,
+    // Allow importing the sibling wasm-ts package from outside web/.
+    fs: {
+      allow: [root, repoRoot],
+    },
+    watch: {
+      ignored: ["**/zig-out/**", "**/.zig-cache/**"],
+    },
   },
 });

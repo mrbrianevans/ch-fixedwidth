@@ -1,6 +1,6 @@
 /**
- * Web converter UI — visual tokens from agents/design.md
- * (cream / navy heritage palette; product copy is conversion-tool, not archive)
+ * ch-fixedwidth browser converter — visual tokens from agents/design.md
+ * (cream / navy heritage palette; converter utility language)
  */
 
 @import url("https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;0,6..72,700;1,6..72,400&family=Work+Sans:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap");
@@ -528,6 +528,133 @@ label.btn.is-disabled {
 .results-memory {
   margin: 0.75rem 0 0;
   font-variant-numeric: tabular-nums;
+}
+
+/* —— Manual downloads (non-Chromium in-memory outputs) —— */
+
+.download-panel {
+  margin-top: 1rem;
+  padding: 0.85rem 0.9rem;
+  background: var(--surface-container-lowest);
+}
+
+.download-heading {
+  margin: 0 0 0.55rem;
+  font-family: var(--font-body);
+  font-size: var(--label-sm);
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--on-surface-variant);
+}
+
+.download-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.download-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.25rem 1rem;
+  padding: 0.45rem 0;
+}
+
+.download-item + .download-item {
+  /* no-line: spacing only */
+  padding-top: 0.55rem;
+}
+
+.download-link {
+  font-family: var(--font-display);
+  font-size: var(--title-md);
+  font-weight: 600;
+  color: var(--primary);
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
+  text-decoration-thickness: 1px;
+  word-break: break-all;
+}
+
+.download-link:hover {
+  text-decoration-thickness: 2px;
+}
+
+.download-meta {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* —— Supported formats (below converter) —— */
+
+.formats-section {
+  margin: 2.25rem 0 0;
+  padding: 1.35rem 1.25rem 1.4rem;
+  background: var(--surface-container-low);
+  /* No-line rule: tonal band, not a bordered box */
+}
+
+.formats-heading {
+  margin: 0 0 0.35rem;
+  font-family: var(--font-body);
+  font-size: var(--label-md);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--on-surface-variant);
+}
+
+.formats-lede {
+  margin: 0 0 1rem;
+  max-width: 36rem;
+  line-height: 1.55;
+}
+
+.formats-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+}
+
+.formats-list li {
+  margin: 0;
+  font-size: var(--body-md);
+  line-height: 1.5;
+  color: var(--on-surface);
+}
+
+.formats-list-loading {
+  color: var(--on-surface-variant);
+}
+
+.formats-codes {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  color: var(--primary);
+}
+
+.formats-header {
+  font-family: ui-monospace, "Cascadia Code", "Segoe UI Mono", Menlo, monospace;
+  font-size: 0.92em;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--primary);
+}
+
+.formats-name {
+  color: var(--on-surface);
+}
+
+.formats-sep {
+  color: var(--on-surface-variant);
+  margin: 0 0.35em;
+  font-weight: 400;
 }
 
 /* —— Tip + site footer —— */

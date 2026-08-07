@@ -2,10 +2,22 @@
 
 Check the `agents/` directory for markdown instructions for this repository.
 
+## Product identity
+
+Canonical product name: **ch-fixedwidth**.
+
+| Surface | Naming |
+|---------|--------|
+| Repository / package scope | `ch-fixedwidth` |
+| Zig / C library | `ch_fixedwidth` (snake_case) |
+| Native CLI binary | `parser` (release assets `parser-*`) |
+| TypeScript host | `@ch-fixedwidth/wasm-ts` |
+| Browser app | sentence case title (“Companies House bulk converter”); brand **ch-fixedwidth** in kicker/footer |
+
 ## Styling
 
-Website styling should always obey `agents/design.md` (The Digital Archive design system).
-When creating or changing UI in `web/`, ensure visual language matches that specification: surface hierarchy, no-line sectioning, Newsreader + Work Sans, sharp primary actions, and British English copy.
+Website styling should always obey `agents/design.md` (ch-fixedwidth converter design system).
+When creating or changing UI in `web/`, ensure visual language matches that specification: surface hierarchy, no-line sectioning, Newsreader + Work Sans, sharp primary actions, British English copy, and **converter** (not archive) language.
 
 ## Git commits
 
@@ -19,7 +31,7 @@ Example shape:
 ```
 Add agents design system docs
 
-Introduce The Digital Archive design system under agents/ and wire
+Introduce the converter design system under agents/ and wire
 AGENTS.md so UI work follows it.
 
 Prompt: add an agents design.md file to the repo based on the current

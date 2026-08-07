@@ -3,17 +3,17 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Companies House officers bulk converter</title>
+    <title>ch-fixedwidth converter</title>
     <meta
       name="description"
-      content="Convert Companies House officers bulk data (.dat, products 195 / 216) to tabular CSV. Runs locally in your browser."
+      content="Convert Companies House fixed-width bulk data (.dat) to tabular CSV — officers, updates, disqualifications, and liquidation products. Runs locally in your browser."
     />
     <meta name="theme-color" content="#002147" />
     <meta name="color-scheme" content="light" />
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="default" />
-    <meta name="apple-mobile-web-app-title" content="CH Converter" />
+    <meta name="apple-mobile-web-app-title" content="ch-fixedwidth" />
     <link rel="manifest" href="./manifest.webmanifest" />
     <link rel="icon" href="./icons/icon.svg" type="image/svg+xml" />
     <link rel="icon" href="./icons/icon-32.png" type="image/png" sizes="32x32" />
@@ -25,12 +25,13 @@
   <body>
     <main class="page">
       <header class="masthead">
-        <p class="kicker">Products 195 / 216 &middot; Fixed width to CSV</p>
-        <h1>Officers bulk data converter</h1>
+        <p class="kicker">ch-fixedwidth &middot; Fixed width to CSV</p>
+        <h1>Companies House bulk converter</h1>
         <p class="lede">
-          Convert fixed-width officers bulk files (<code>.dat</code>) into tabular
-          CSV for companies and person appointments. Processing runs
-          entirely on this machine; nothing is uploaded.
+          Convert fixed-width bulk files (<code>.dat</code>) into tabular CSV —
+          officers snapshot and update, disqualified persons, and liquidation
+          daily updates. Processing runs entirely on this machine; nothing is
+          uploaded.
         </p>
         <p class="source-line">
           Get data:
@@ -66,7 +67,7 @@
           aria-label="Drop .dat file here or press to browse"
         >
           <span class="drop-zone-title">Drop .dat file</span>
-          <span class="drop-zone-hint">Officers bulk data file, or press to browse</span>
+          <span class="drop-zone-hint">Companies House bulk .dat file, or press to browse</span>
         </div>
         <p id="batch-summary" class="batch-summary meta" hidden></p>
         <ul id="queue-list" class="queue-list" hidden></ul>
@@ -109,7 +110,22 @@
             <ul id="results-list" class="results-list" aria-live="polite"></ul>
           </div>
           <p id="results-memory" class="results-memory meta" hidden></p>
+          <div id="download-panel" class="download-panel" hidden>
+            <p class="download-heading">Downloads</p>
+            <ul id="download-list" class="download-list"></ul>
+          </div>
         </div>
+      </section>
+
+      <section class="formats-section" aria-labelledby="formats-heading">
+        <h2 id="formats-heading" class="formats-heading">Supported file formats</h2>
+        <p class="formats-lede meta">
+          Identified by the first eight characters of the file. Product numbers
+          are Companies House bulk product codes.
+        </p>
+        <ul id="formats-list" class="formats-list">
+          <li class="formats-list-loading meta">Loading formats…</li>
+        </ul>
       </section>
 
       <p class="tip">
@@ -117,14 +133,11 @@
         <a href="https://github.com/mrbrianevans/ch-fixedwidth/releases">command-line tool</a>
         is about ten times faster than this browser converter.
       </p>
-      <p class="tip tip-follow">
-        <a href="https://chguide.co.uk/bulk-data/officers/">File format and structure</a>
-      </p>
 
       <footer class="site-footer">
         <p>
           &copy; <span id="copyright-year"></span> Brian Evans
-          &middot; Parser <span id="parser-version"></span>
+          &middot; Parser <span id="parser-version" title="">…</span>
           &middot;
           <a href="https://github.com/mrbrianevans/ch-fixedwidth">GitHub</a>
           &middot; MIT licensed

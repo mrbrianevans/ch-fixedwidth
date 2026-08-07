@@ -9,6 +9,7 @@ const Io = std.Io;
 const Thread = std.Thread;
 const http = std.http;
 const parse = @import("parse.zig");
+const stream_mod = @import("stream.zig");
 
 // Smaller buffers under single-threaded (wasm32-wasi) to stay within linear memory
 // and avoid host WASI edge cases with multi‑MB vectored I/O.
@@ -52,26 +53,44 @@ const CsvOut = struct {
 
 fn writeCompanyRow(out: *CsvOut, row: []const u8) !void {
     const dest = try out.beginRow();
-    const p = parse.formatCompanyRow(dest, row);
+    const p = try parse.formatCompanyRow(dest, row);
     out.endRow(p);
 }
 
-fn writePersonRow(out: *CsvOut, row: []const u8) !void {
+fn writePersonRow(out: *CsvOut, file_type: parse.FileType, row: []const u8) !void {
     const dest = try out.beginRow();
-    const p = parse.formatPersonRow(dest, row);
+    const p = switch (file_type) {
+        .officers_snapshot => try parse.formatPersonRow(dest, row),
+        .officers_update => try parse.formatUpdatePersonRow(dest, row),
+        .disqualifications, .liquidation => return error.NotImplemented,
+    };
     out.endRow(p);
 }
 
-fn processHeaderRow(row: []const u8) !void {
+/// Identify the product from the header row and ensure a body parser exists.
+/// Returns the parsed header on success so callers can branch if needed.
+fn processHeaderRow(row: []const u8) !parse.HeaderInfo {
     const info = parse.parseHeader(row) catch {
-        const prefix = if (row.len > 8) row[0..8] else row;
+        const prefix = if (row.len >= parse.header_identifier_len)
+            row[0..parse.header_identifier_len]
+        else
+            row;
         std.debug.print("Error: unsupported file type from header: '{s}'\n", .{prefix});
         return error.UnsupportedFileType;
     };
-    std.debug.print("Processing snapshot file with run number {s} from date {s}\n", .{
+    parse.requireImplemented(info.file_type) catch {
+        std.debug.print(
+            "Error: {s} files (header '{s}') are not supported yet\n",
+            .{ info.file_type.displayName(), info.file_type.identifier() },
+        );
+        return error.NotImplemented;
+    };
+    std.debug.print("Processing {s} with run number {s} from date {s}\n", .{
+        info.file_type.displayName(),
         info.run_number,
         info.production_date,
     });
+    return info;
 }
 
 /// True when `s` is an HTTP(S) URL (case-insensitive scheme).
@@ -80,7 +99,7 @@ pub fn isRemoteUrl(s: []const u8) bool {
         std.ascii.startsWithIgnoreCase(s, "https://");
 }
 
-/// True when the CLI should read the snapshot from stdin (`-`).
+/// True when the CLI should read the input from stdin (`-`).
 pub fn isStdinInput(s: []const u8) bool {
     return std.mem.eql(u8, s, "-");
 }
@@ -166,11 +185,12 @@ const WorkerCtx = struct {
     input_path: []const u8,
     companies_path: []const u8,
     persons_path: []const u8,
+    file_type: parse.FileType,
     /// Inclusive start file offset (first byte of first line to process).
     start_off: u64,
     /// Exclusive end file offset (do not process lines starting at or after this).
     end_off: u64,
-    /// If true, first line in range is the snapshot header.
+    /// If true, first line in range is the product header (already validated).
     handle_header: bool,
     /// If true, write CSV headers.
     write_headers: bool,
@@ -208,7 +228,7 @@ fn runWorker(ctx: *WorkerCtx) !WorkerResult {
     var persons_out = try CsvOut.create(
         ctx.io,
         ctx.persons_path,
-        if (ctx.write_headers) parse.persons_header else null,
+        if (ctx.write_headers) ctx.file_type.personsCsvHeader() else null,
         ctx.persons_buf,
     );
     defer persons_out.close();
@@ -222,7 +242,7 @@ fn runWorker(ctx: *WorkerCtx) !WorkerResult {
         const row = parse.stripCr(maybe_line orelse break);
 
         if (first and ctx.handle_header) {
-            try processHeaderRow(row);
+            // Header already validated by the parent before workers spawn.
             first = false;
             continue;
         }
@@ -237,13 +257,14 @@ fn runWorker(ctx: *WorkerCtx) !WorkerResult {
 
         if (row.len <= 8) continue;
 
+        // Officers snapshot / update body (record type at byte 8).
         switch (row[8]) {
             parse.company_record_type => {
                 try writeCompanyRow(&companies_out, row);
                 result.companies += 1;
             },
             parse.person_record_type => {
-                try writePersonRow(&persons_out, row);
+                try writePersonRow(&persons_out, ctx.file_type, row);
                 result.persons += 1;
             },
             else => {},
@@ -310,6 +331,20 @@ fn processParallel(
 
     const probe_buf = try arena.alloc(u8, 1024 * 1024);
 
+    // Identify product from the header before splitting so every worker uses
+    // the correct person formatter / CSV header.
+    const header_info = blk: {
+        const f = try Io.Dir.cwd().openFile(io, input_path, .{});
+        defer f.close(io);
+        var fr = Io.File.Reader.init(f, io, probe_buf);
+        const maybe = try fr.interface.takeDelimiter('\n');
+        const row = parse.stripCr(maybe orelse {
+            std.debug.print("ERROR: empty input\n", .{});
+            return 1;
+        });
+        break :blk processHeaderRow(row) catch return 1;
+    };
+
     var starts: [max_workers + 1]u64 = undefined;
     starts[0] = 0;
     starts[workers] = file_size;
@@ -364,6 +399,7 @@ fn processParallel(
             .input_path = input_path,
             .companies_path = co,
             .persons_path = pe,
+            .file_type = header_info.file_type,
             .start_off = ranges[r].start,
             .end_off = ranges[r].end,
             .handle_header = (r == 0),
@@ -444,7 +480,78 @@ fn processParallel(
     return 0;
 }
 
-/// Stream lines from `reader` into company/person CSVs under `output_folder`.
+/// Write one stream CSV batch to the matching output file (created lazily).
+/// Batch bytes already include the CSV header when it is the first flush for that kind.
+fn drainStreamBatches(
+    io: Io,
+    arena: std.mem.Allocator,
+    s: *stream_mod.Stream,
+    output_folder: []const u8,
+    base_name: []const u8,
+    outs: *[parse.OutputKind.all.len]?CsvOut,
+    write_bufs: *[parse.OutputKind.all.len]?[]u8,
+) !u8 {
+    while (s.nextBatch()) |batch| {
+        var b = batch;
+        defer b.deinit(s.allocator);
+        const idx = b.kind.index();
+        if (outs[idx] == null) {
+            const filename = try std.fs.path.join(arena, &.{
+                output_folder,
+                try std.fmt.allocPrint(arena, "{s}_{s}.csv", .{ b.kind.fileStem(), base_name }),
+            });
+            std.debug.print("Saving {s} data to {s}\n", .{ b.kind.displayName(), filename });
+            const buf = try arena.alloc(u8, write_buffer_size);
+            write_bufs[idx] = buf;
+            // Header is already inside the stream batch — do not write a second one.
+            outs[idx] = CsvOut.create(io, filename, null, buf) catch |err| {
+                std.debug.print("Error opening {s} file: {s}\n", .{ b.kind.displayName(), @errorName(err) });
+                return 1;
+            };
+        }
+        outs[idx].?.w().writeAll(b.data) catch |err| {
+            std.debug.print("Error writing {s} rows: {s}\n", .{ b.kind.displayName(), @errorName(err) });
+            return 1;
+        };
+    }
+    return 0;
+}
+
+fn printStreamSummary(s: *const stream_mod.Stream) void {
+    const ft = s.file_type orelse return;
+    const tc = s.trailer_count orelse return;
+    switch (ft) {
+        .officers_snapshot, .officers_update => {
+            const co = s.countOf(.companies);
+            const pe = s.countOf(.persons);
+            std.debug.print("Processed {d} records: {d} companies, {d} persons.\n", .{ tc, co, pe });
+        },
+        .disqualifications => {
+            const n1 = s.countOf(.persons);
+            const n2 = s.countOf(.disqualifications);
+            const n3 = s.countOf(.exemptions);
+            const n4 = s.countOf(.variations);
+            std.debug.print(
+                "Processed {d} records: {d} persons, {d} disqualifications, {d} exemptions, {d} variations.\n",
+                .{ tc, n1, n2, n3, n4 },
+            );
+        },
+        .liquidation => {
+            std.debug.print(
+                "Processed {d} records: {d} forms, {d} practitioners, {d} free text.\n",
+                .{
+                    tc,
+                    s.countOf(.forms),
+                    s.countOf(.practitioners),
+                    s.countOf(.free_text),
+                },
+            );
+        },
+    }
+}
+
+/// Stream input from `reader` into product-specific CSVs under `output_folder`.
+/// Uses the shared `stream.Stream` body parser (same as one-shot / WASM).
 /// Caller must ensure `output_folder` exists. Same output layout as a local file run.
 pub fn processFromReader(
     io: Io,
@@ -453,88 +560,77 @@ pub fn processFromReader(
     output_folder: []const u8,
     base_name: []const u8,
 ) !u8 {
-    const companies_filename = try std.fs.path.join(arena, &.{
-        output_folder,
-        try std.fmt.allocPrint(arena, "companies_data_{s}.csv", .{base_name}),
-    });
-    const persons_filename = try std.fs.path.join(arena, &.{
-        output_folder,
-        try std.fmt.allocPrint(arena, "persons_data_{s}.csv", .{base_name}),
-    });
-
-    std.debug.print("Saving companies data to {s}\n", .{companies_filename});
-    std.debug.print("Saving persons data to {s}\n", .{persons_filename});
-
-    const companies_buf = try arena.alloc(u8, write_buffer_size);
-    const persons_buf = try arena.alloc(u8, write_buffer_size);
-
-    var companies_out = CsvOut.create(io, companies_filename, parse.companies_header, companies_buf) catch |err| {
-        std.debug.print("Error opening companies file: {s}\n", .{@errorName(err)});
+    // Read header first for CLI product logging; body parsing is entirely in Stream.
+    const first_line = reader.takeDelimiter('\n') catch |err| {
+        std.debug.print("Error reading input: {s}\n", .{@errorName(err)});
         return 1;
     };
-    defer companies_out.close();
-
-    var persons_out = CsvOut.create(io, persons_filename, parse.persons_header, persons_buf) catch |err| {
-        std.debug.print("Error opening persons file: {s}\n", .{@errorName(err)});
+    const header_row = parse.stripCr(first_line orelse {
+        std.debug.print("ERROR: empty input\n", .{});
         return 1;
-    };
-    defer persons_out.close();
+    });
+    _ = processHeaderRow(header_row) catch return 1;
 
-    var companies_processed: i32 = 0;
-    var persons_processed: i32 = 0;
-    var row_num: usize = 0;
+    var s = stream_mod.Stream.init(arena, .{
+        .batch_rows = 0, // defaults
+        .batch_bytes = write_buffer_size,
+    });
+    // Arena-backed; no explicit deinit required for process lifetime.
 
+    var outs: [parse.OutputKind.all.len]?CsvOut = .{null} ** parse.OutputKind.all.len;
+    var write_bufs: [parse.OutputKind.all.len]?[]u8 = .{null} ** parse.OutputKind.all.len;
+    defer {
+        for (&outs) |*maybe| {
+            if (maybe.*) |*out| out.close();
+        }
+    }
+
+    // Re-feed the header line (with newline) so Stream sees the full document.
+    {
+        var header_chunk: [parse.max_csv_row_bytes + 1]u8 = undefined;
+        if (header_row.len > parse.max_csv_row_bytes) {
+            std.debug.print("ERROR: header line too long\n", .{});
+            return 1;
+        }
+        @memcpy(header_chunk[0..header_row.len], header_row);
+        header_chunk[header_row.len] = '\n';
+        s.feed(header_chunk[0 .. header_row.len + 1]) catch |err| {
+            std.debug.print("Error parsing header: {s}\n", .{@errorName(err)});
+            return 1;
+        };
+        if ((try drainStreamBatches(io, arena, &s, output_folder, base_name, &outs, &write_bufs)) != 0)
+            return 1;
+    }
+
+    // Feed the remainder in large chunks (Stream handles partial lines).
+    const feed_buf = try arena.alloc(u8, read_buffer_size);
     while (true) {
-        const maybe_line = reader.takeDelimiter('\n') catch |err| {
+        const n = reader.readSliceShort(feed_buf) catch |err| {
             std.debug.print("Error reading input: {s}\n", .{@errorName(err)});
             return 1;
         };
-        const row = parse.stripCr(maybe_line orelse break);
-
-        if (row_num == 0) {
-            processHeaderRow(row) catch return 1;
-            row_num += 1;
-            continue;
-        }
-
-        if (row.len >= 8 and std.mem.eql(u8, row[0..8], parse.trailer_record_identifier)) {
-            const record_count = parse.parseTrailerCount(row);
-            const total = companies_processed + persons_processed;
-            if (record_count != total) {
-                std.debug.print("ERROR: Processed {d} records out of {d}\n", .{ total, record_count });
-                return 1;
-            }
-            std.debug.print("Processed {d} records: {d} companies, {d} persons.\n", .{ total, companies_processed, persons_processed });
-            return 0;
-        }
-
-        if (row.len <= 8) {
-            row_num += 1;
-            continue;
-        }
-
-        switch (row[8]) {
-            parse.company_record_type => {
-                writeCompanyRow(&companies_out, row) catch |err| {
-                    std.debug.print("Error writing company row: {s}\n", .{@errorName(err)});
-                    return 1;
-                };
-                companies_processed += 1;
-            },
-            parse.person_record_type => {
-                writePersonRow(&persons_out, row) catch |err| {
-                    std.debug.print("Error writing person row: {s}\n", .{@errorName(err)});
-                    return 1;
-                };
-                persons_processed += 1;
-            },
-            else => {},
-        }
-        row_num += 1;
+        if (n == 0) break;
+        s.feed(feed_buf[0..n]) catch |err| {
+            std.debug.print("Error parsing input: {s}\n", .{@errorName(err)});
+            return 1;
+        };
+        if ((try drainStreamBatches(io, arena, &s, output_folder, base_name, &outs, &write_bufs)) != 0)
+            return 1;
     }
 
-    std.debug.print("ERROR: No trailer record found.\n", .{});
-    return 1;
+    s.finish() catch |err| {
+        switch (err) {
+            error.MissingTrailer => std.debug.print("ERROR: No trailer record found.\n", .{}),
+            error.TrailerMismatch => std.debug.print("ERROR: Trailer record count does not match rows parsed\n", .{}),
+            else => std.debug.print("Error finishing parse: {s}\n", .{@errorName(err)}),
+        }
+        return 1;
+    };
+    if ((try drainStreamBatches(io, arena, &s, output_folder, base_name, &outs, &write_bufs)) != 0)
+        return 1;
+
+    printStreamSummary(&s);
+    return 0;
 }
 
 fn processSingle(
@@ -558,8 +654,9 @@ fn processSingle(
     return processFromReader(io, arena, &file_reader.interface, output_folder, base_name);
 }
 
-/// Convert one local snapshot file (assumes `output_folder` already exists).
-/// On multi-core native builds, splits the file across worker threads.
+/// Convert one local fixed-width file (assumes `output_folder` already exists).
+/// On multi-core native builds, officers products split the file across workers.
+/// Prod 192 / 197 always use the sequential path (multi-CSV / form-group state).
 fn processOneLocalFile(
     io: Io,
     arena: std.mem.Allocator,
@@ -572,6 +669,22 @@ fn processOneLocalFile(
         return processSingle(io, arena, input_path, output_folder, base_name);
     }
 
+    // Probe product so multi-CSV / form-group products skip officers parallel split.
+    const probe_buf = try arena.alloc(u8, 64 * 1024);
+    const probed = blk: {
+        const f = Io.Dir.cwd().openFile(io, input_path, .{}) catch break :blk null;
+        defer f.close(io);
+        var fr = Io.File.Reader.init(f, io, probe_buf);
+        const maybe = fr.interface.takeDelimiter('\n') catch break :blk null;
+        const row = parse.stripCr(maybe orelse break :blk null);
+        break :blk parse.parseHeader(row) catch null;
+    };
+    if (probed) |h| {
+        if (h.file_type == .disqualifications or h.file_type == .liquidation) {
+            return processSingle(io, arena, input_path, output_folder, base_name);
+        }
+    }
+
     const cpu_count = Thread.getCpuCount() catch 1;
     const n_workers = @max(1, @min(cpu_count, max_workers));
 
@@ -581,11 +694,11 @@ fn processOneLocalFile(
     return processParallel(io, arena, input_path, output_folder, base_name, n_workers);
 }
 
-/// Convert one snapshot file on disk into CSV files under `output_folder`.
-/// Returns a process exit code (0 = success).
+/// Convert one local fixed-width file on disk into product-specific CSVs under
+/// `output_folder`. Returns a process exit code (0 = success).
 ///
 /// Prefer `processInput` when the argument may be a path, directory, URL, or stdin.
-pub fn processCompanyAppointmentsData(
+pub fn processLocalFile(
     io: Io,
     arena: std.mem.Allocator,
     input_path: []const u8,
@@ -632,12 +745,11 @@ pub fn listDatFilesInDir(
     return try list.toOwnedSlice(arena);
 }
 
-/// Convert every `.dat` file in `dir_path` into CSVs under `output_folder`.
-/// Each input file yields `companies_data_<basename>.csv` and
-/// `persons_data_<basename>.csv`.
+/// Convert every `.dat` file in `dir_path` into product-specific CSVs under
+/// `output_folder` (officers → companies/persons; 192 / 197 → their kind sets).
 ///
-/// Files are processed **one at a time**. On multi-core native builds each file
-/// uses the same within-file seek split as a single-file CLI argument (option B).
+/// Files are processed **one at a time**. On multi-core native builds each officers
+/// file uses the same within-file seek split as a single-file CLI argument (option B).
 /// See `docs/DDR-directory-parallelism.md`.
 pub fn processDirectory(
     io: Io,
@@ -656,7 +768,7 @@ pub fn processDirectory(
         return 1;
     }
 
-    std.debug.print("Found {d} snapshot file(s) in {s}\n", .{ files.len, dir_path });
+    std.debug.print("Found {d} .dat file(s) in {s}\n", .{ files.len, dir_path });
 
     var any_failed = false;
     for (files) |file_path| {
@@ -744,7 +856,7 @@ pub fn processFromRemoteUrl(
     return processFromReader(io, arena, body_reader, output_folder, base_name);
 }
 
-/// Stream-read a snapshot from process stdin and convert to CSV under `output_folder`.
+/// Stream-read a fixed-width file from process stdin and convert to CSV under `output_folder`.
 /// Same sequential `processFromReader` path as single-stream local and remote URL input.
 /// Output basenames use `stdin` (e.g. `companies_data_stdin.csv`).
 pub fn processFromStdin(
@@ -758,7 +870,7 @@ pub fn processFromStdin(
     };
 
     const base_name = baseInputName("-");
-    std.debug.print("Reading snapshot from stdin\n", .{});
+    std.debug.print("Reading from stdin\n", .{});
 
     const read_buf = try arena.alloc(u8, read_buffer_size);
     // Do not close stdin — process owns the standard handles.
@@ -794,7 +906,7 @@ pub fn processInput(
 
     return switch (kind) {
         .directory => processDirectory(io, arena, input, output_folder),
-        .file => processCompanyAppointmentsData(io, arena, input, output_folder),
+        .file => processLocalFile(io, arena, input, output_folder),
     };
 }
 
@@ -892,6 +1004,43 @@ test "processFromReader streams fixture like stdin and remote" {
     const persons = try readFileAlloc(io, arena, persons_path);
     try std.testing.expectEqualStrings(expected_companies_fixture, companies);
     try std.testing.expectEqualStrings(expected_persons_fixture, persons);
+}
+
+test "parallel and sequential officers paths produce identical CSV" {
+    // processSingle uses stream.Stream; processParallel uses seek-split workers.
+    // Both must byte-match on the officers snapshot fixture (and expected CSVs).
+    const io = std.testing.io;
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(io, .{ .sub_path = "mini.dat", .data = mini_snapshot_fixture });
+    const base = try std.fmt.allocPrint(arena, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    const input_path = try std.fmt.allocPrint(arena, "{s}/mini.dat", .{base});
+    const out_seq = try std.fmt.allocPrint(arena, "{s}/out_seq", .{base});
+    const out_par = try std.fmt.allocPrint(arena, "{s}/out_par", .{base});
+    try Io.Dir.cwd().createDirPath(io, out_seq);
+    try Io.Dir.cwd().createDirPath(io, out_par);
+
+    const code_seq = try processSingle(io, arena, input_path, out_seq, "mini");
+    try std.testing.expectEqual(@as(u8, 0), code_seq);
+
+    // Use multiple workers so the split/concat path runs (still correct with 1 range).
+    const code_par = try processParallel(io, arena, input_path, out_par, "mini", 4);
+    try std.testing.expectEqual(@as(u8, 0), code_par);
+
+    const seq_c = try readFileAlloc(io, arena, try std.fmt.allocPrint(arena, "{s}/companies_data_mini.csv", .{out_seq}));
+    const seq_p = try readFileAlloc(io, arena, try std.fmt.allocPrint(arena, "{s}/persons_data_mini.csv", .{out_seq}));
+    const par_c = try readFileAlloc(io, arena, try std.fmt.allocPrint(arena, "{s}/companies_data_mini.csv", .{out_par}));
+    const par_p = try readFileAlloc(io, arena, try std.fmt.allocPrint(arena, "{s}/persons_data_mini.csv", .{out_par}));
+
+    try std.testing.expectEqualStrings(seq_c, par_c);
+    try std.testing.expectEqualStrings(seq_p, par_p);
+    try std.testing.expectEqualStrings(expected_companies_fixture, seq_c);
+    try std.testing.expectEqualStrings(expected_persons_fixture, seq_p);
 }
 
 test "resolveLocalInputKind distinguishes file and directory" {

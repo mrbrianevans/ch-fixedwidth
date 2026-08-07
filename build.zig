@@ -1,14 +1,24 @@
 const std = @import("std");
 
+/// Keep in sync with `build.zig.zon`, `CHANGELOG.md`, and package.json versions.
+const library_version = "0.1.0";
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+
+    const git_commit = resolveGitCommit(b);
+
+    const build_opts = b.addOptions();
+    build_opts.addOption([]const u8, "version", library_version);
+    build_opts.addOption([]const u8, "git_commit", git_commit);
 
     const mod = b.addModule("ch_fixedwidth", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
     });
+    mod.addOptions("build_options", build_opts);
 
     // --- CLI ---
     const exe = b.addExecutable(.{
@@ -42,6 +52,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    static_lib.root_module.addOptions("build_options", build_opts);
     static_lib.root_module.link_libc = false;
     b.installArtifact(static_lib);
 
@@ -56,6 +67,7 @@ pub fn build(b: *std.Build) void {
                 .optimize = optimize,
             }),
         });
+        shared_lib.root_module.addOptions("build_options", build_opts);
         b.installArtifact(shared_lib);
     }
 
@@ -76,6 +88,7 @@ pub fn build(b: *std.Build) void {
         .target = wasm_target,
         .optimize = optimize,
     });
+    wasm_mod.addOptions("build_options", build_opts);
     const wasm = b.addExecutable(.{
         .name = "ch_fixedwidth",
         .root_module = wasm_mod,
@@ -84,11 +97,13 @@ pub fn build(b: *std.Build) void {
     wasm.rdynamic = true;
     // Export C ABI symbols for JS / host loaders.
     wasm.root_module.export_symbol_names = &.{
-        "ch_parse_snapshot",
+        "ch_parse",
         "ch_parse_result_free",
         "ch_buffer_free",
         "ch_alloc",
         "ch_free",
+        "ch_supported_formats",
+        "ch_library_info",
         "ch_stream_create",
         "ch_stream_destroy",
         "ch_stream_feed",
@@ -118,4 +133,30 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_exe_tests.step);
+}
+
+/// Short git SHA at configure time, overridable with `-Dgit-commit=…`.
+fn resolveGitCommit(b: *std.Build) []const u8 {
+    if (b.option([]const u8, "git-commit", "Short git commit SHA embedded in the library")) |override| {
+        if (override.len > 0) return override;
+    }
+
+    const result = std.process.run(b.allocator, b.graph.io, .{
+        .argv = &.{ "git", "rev-parse", "--short=12", "HEAD" },
+        .stdout_limit = .limited(64),
+        .stderr_limit = .limited(256),
+    }) catch return "unknown";
+    defer {
+        b.allocator.free(result.stdout);
+        b.allocator.free(result.stderr);
+    }
+
+    switch (result.term) {
+        .exited => |code| if (code != 0) return "unknown",
+        else => return "unknown",
+    }
+
+    const trimmed = std.mem.trim(u8, result.stdout, &std.ascii.whitespace);
+    if (trimmed.len == 0) return "unknown";
+    return b.dupe(trimmed);
 }

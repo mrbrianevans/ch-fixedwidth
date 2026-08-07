@@ -37,7 +37,7 @@ export async function instantiateWasm(
 /** Validate and cast instance exports to the C ABI table. */
 export function getExports(instance: WebAssembly.Instance): ChWasmExports {
   const exports = instance.exports as unknown as ChWasmExports;
-  if (!exports.memory || typeof exports.ch_parse_snapshot !== "function") {
+  if (!exports.memory || typeof exports.ch_parse !== "function") {
     throw new Error("Invalid ch_fixedwidth.wasm: missing expected exports");
   }
   if (typeof exports.ch_alloc !== "function" || typeof exports.ch_free !== "function") {
@@ -57,12 +57,7 @@ export function requireStreamExports(exports: ChWasmExports): asserts exports is
   ch_stream_finish: (streamPtr: number) => number;
   ch_stream_next_batch: (streamPtr: number, outPtr: number) => number;
   ch_csv_batch_free: (batchPtr: number) => void;
-  ch_stream_stats: (
-    streamPtr: number,
-    companiesPtr: number,
-    personsPtr: number,
-    trailerPtr: number,
-  ) => void;
+  ch_stream_stats: (streamPtr: number, outPtr: number) => void;
 } {
   const needed = [
     "ch_stream_create",

@@ -23,6 +23,8 @@ output/
 # Large local data files (download separately for benchmarks)
 *.dat
 !src/testdata/*.dat
+# Local bulk text dumps at repo root (not fixtures)
+Prod*.txt
 
 # JS / Bun (wasm-ts package)
 node_modules/

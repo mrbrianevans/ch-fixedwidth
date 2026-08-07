@@ -1,6 +1,6 @@
 # Reference parsers (comparison archive)
 
-> **Maintained product code** lives at the repository root (Zig library + CLI). This directory keeps alternate language implementations and historical comparison notes.
+> **Maintained product code** is **ch-fixedwidth** at the repository root (Zig library + CLI + WASM). This directory keeps alternate language implementations and historical comparison notes. Reference parsers here target the officers snapshot product only; multi-product support lives in Zig.
 
 # Fixed width parser for companies house data
 
