@@ -1103,36 +1103,97 @@ function initInputStepCopy(): void {
   }
 }
 
-function initSiteFooter(): void {
-  const yearEl = document.getElementById("copyright-year");
-  if (yearEl) yearEl.textContent = String(new Date().getFullYear());
-
-  const verEl = document.getElementById("parser-version");
-  if (!verEl) return;
-
-  // Placeholder until WASM libraryInfo resolves (semver + build-time short SHA).
-  verEl.textContent = "…";
-  void loadParserVersionInto(verEl);
+function formatProductCodes(codes: number[]): string {
+  return codes.join(" / ");
 }
 
-/**
- * Read version + git commit from the freestanding WASM module so the footer
- * matches the exact binary that will parse files (not package.json alone).
- */
-async function loadParserVersionInto(verEl: HTMLElement): Promise<void> {
-  try {
-    const parser = await ChFixedWidthParser.create({ wasmUrl });
-    const info = parser.libraryInfo();
+function renderFormatsList(listEl: HTMLElement, formats: { productCodes: number[]; headerIdentifier: string; description: string }[]): void {
+  listEl.replaceChildren();
+  if (formats.length === 0) {
+    const empty = document.createElement("li");
+    empty.className = "formats-list-loading meta";
+    empty.textContent = "No formats reported by this parser build.";
+    listEl.appendChild(empty);
+    return;
+  }
+
+  for (const fmt of formats) {
+    const li = document.createElement("li");
+
+    const codes = document.createElement("span");
+    codes.className = "formats-codes";
+    codes.textContent = formatProductCodes(fmt.productCodes);
+
+    const sep1 = document.createElement("span");
+    sep1.className = "formats-sep";
+    sep1.textContent = "·";
+    sep1.setAttribute("aria-hidden", "true");
+
+    const header = document.createElement("code");
+    header.className = "formats-header";
+    header.textContent = fmt.headerIdentifier;
+
+    const sep2 = document.createElement("span");
+    sep2.className = "formats-sep";
+    sep2.textContent = "·";
+    sep2.setAttribute("aria-hidden", "true");
+
+    const name = document.createElement("span");
+    name.className = "formats-name";
+    name.textContent = fmt.description;
+
+    li.append(codes, sep1, header, sep2, name);
+    listEl.appendChild(li);
+  }
+}
+
+function applyLibraryInfoToUi(info: {
+  version: string;
+  gitCommit: string;
+  formats: { productCodes: number[]; headerIdentifier: string; description: string }[];
+}): void {
+  const verEl = document.getElementById("parser-version");
+  if (verEl) {
     const ver = info.version.startsWith("v") ? info.version : `v${info.version}`;
     const commit = info.gitCommit && info.gitCommit !== "unknown" ? info.gitCommit : null;
     verEl.textContent = commit ? `${ver} · ${commit}` : ver;
     verEl.title = commit
       ? `ch_fixedwidth ${ver} (git ${commit})`
       : `ch_fixedwidth ${ver}`;
+  }
+
+  const listEl = document.getElementById("formats-list");
+  if (listEl) renderFormatsList(listEl, info.formats);
+}
+
+/**
+ * Load library identity and formats from the freestanding WASM module so the
+ * UI matches the exact binary that will parse files.
+ */
+async function loadLibraryInfoIntoUi(): Promise<void> {
+  const yearEl = document.getElementById("copyright-year");
+  if (yearEl) yearEl.textContent = String(new Date().getFullYear());
+
+  const verEl = document.getElementById("parser-version");
+  if (verEl) verEl.textContent = "…";
+
+  try {
+    const parser = await ChFixedWidthParser.create({ wasmUrl });
+    applyLibraryInfoToUi(parser.libraryInfo());
   } catch (err) {
-    console.warn("Could not load parser version from WASM:", err);
-    verEl.textContent = "dev";
-    verEl.removeAttribute("title");
+    console.warn("Could not load library info from WASM:", err);
+    if (verEl) {
+      verEl.textContent = "dev";
+      verEl.removeAttribute("title");
+    }
+    const listEl = document.getElementById("formats-list");
+    if (listEl) {
+      listEl.replaceChildren();
+      const li = document.createElement("li");
+      li.className = "formats-list-loading meta";
+      li.textContent = "Could not load formats from the parser module.";
+      listEl.appendChild(li);
+    }
   }
 }
 
@@ -1148,7 +1209,7 @@ function init(): void {
 
   initOutputStep();
   initInputStepCopy();
-  initSiteFooter();
+  void loadLibraryInfoIntoUi();
 
   // Open uses <label for="file-input"> — no click handler needed on the label.
   // Prevent double-open if a browser also synthesizes a click we handle elsewhere.
