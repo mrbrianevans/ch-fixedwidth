@@ -41,5 +41,6 @@ export {
   type StreamStats,
   type CsvBatch,
   type CsvBatchKind,
+  type SupportedFormat,
   type ChWasmExports,
 } from "./types.ts";

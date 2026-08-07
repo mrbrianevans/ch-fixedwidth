@@ -6,6 +6,7 @@ import {
   type DocumentInput,
   type LoadOptions,
   type ParseResult,
+  type SupportedFormat,
 } from "./types.ts";
 
 /**
@@ -13,6 +14,14 @@ import {
  * 10× i32 counts (40) + 8× ChBuffer ptr+len (8×8 = 64) = 104.
  */
 const PARSE_RESULT_SIZE = 104;
+
+/**
+ * wasm32 layout of ChSupportedFormat:
+ * i32 file_type (0) + u32 product_code_count (4) + [4]u16 product_codes (8)
+ * + ptr header (16) + ptr description (20) = 24.
+ */
+const SUPPORTED_FORMAT_SIZE = 24;
+const CH_MAX_PRODUCT_CODES = 4;
 const OFF_FILE_TYPE = 0;
 const OFF_TRAILER = 4;
 const OFF_COMPANIES = 8;
@@ -40,6 +49,17 @@ function toBytes(input: DocumentInput): Uint8Array {
     return new Uint8Array(input);
   }
   return input;
+}
+
+/** Read a NUL-terminated UTF-8 C string from WASM linear memory. */
+function readCString(memory: WebAssembly.Memory, ptr: number): string {
+  if (ptr === 0) return "";
+  const bytes = new Uint8Array(memory.buffer, ptr);
+  let end = 0;
+  while (end < bytes.length && bytes[end] !== 0) {
+    end++;
+  }
+  return new TextDecoder("utf-8", { fatal: false }).decode(bytes.subarray(0, end));
 }
 
 function readU32(view: DataView, offset: number): number {
@@ -87,6 +107,54 @@ export class ChFixedWidthParser {
   static async create(options: LoadOptions): Promise<ChFixedWidthParser> {
     const instance = await instantiateWasm(options);
     return new ChFixedWidthParser(instance);
+  }
+
+  /**
+   * List of bulk file formats this module can parse (product codes, header
+   * magic, short description). Data is copied out of WASM static storage.
+   */
+  supportedFormats(): SupportedFormat[] {
+    const { memory, ch_alloc, ch_free, ch_supported_formats } = this.exports;
+    if (typeof ch_supported_formats !== "function") {
+      throw new Error(
+        "Invalid ch_fixedwidth.wasm: missing ch_supported_formats. Rebuild with zig build wasm.",
+      );
+    }
+
+    const countPtr = ch_alloc(4);
+    if (countPtr === 0) {
+      throw new ChParseError(5);
+    }
+    try {
+      const tablePtr = ch_supported_formats(countPtr);
+      const count = new DataView(memory.buffer).getUint32(countPtr, true);
+      if (tablePtr === 0 || count === 0) {
+        return [];
+      }
+
+      const formats: SupportedFormat[] = [];
+      for (let i = 0; i < count; i++) {
+        const base = tablePtr + i * SUPPORTED_FORMAT_SIZE;
+        const view = new DataView(memory.buffer, base, SUPPORTED_FORMAT_SIZE);
+        const fileType = view.getInt32(0, true) as ChFileType;
+        const codeCount = Math.min(view.getUint32(4, true), CH_MAX_PRODUCT_CODES);
+        const productCodes: number[] = [];
+        for (let c = 0; c < codeCount; c++) {
+          productCodes.push(view.getUint16(8 + c * 2, true));
+        }
+        const headerPtr = view.getUint32(16, true);
+        const descPtr = view.getUint32(20, true);
+        formats.push({
+          fileType,
+          productCodes,
+          headerIdentifier: readCString(memory, headerPtr),
+          description: readCString(memory, descPtr),
+        });
+      }
+      return formats;
+    } finally {
+      ch_free(countPtr, 4);
+    }
   }
 
   /**

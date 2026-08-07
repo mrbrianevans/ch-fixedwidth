@@ -173,6 +173,20 @@ export function outputKindsForFileType(fileType: ChFileType): CsvBatchKind[] {
   }
 }
 
+/**
+ * One supported bulk file format from `ch_supported_formats`.
+ * Product codes are Companies House product numbers (e.g. 195 and 216).
+ */
+export interface SupportedFormat {
+  fileType: ChFileType;
+  /** Companies House product number(s) for this format. */
+  productCodes: number[];
+  /** 8-byte header magic (e.g. `DDDDSNAP`). */
+  headerIdentifier: string;
+  /** Short human-readable label (e.g. `officers snapshot`). */
+  description: string;
+}
+
 /** One batched CSV chunk from the streaming parser (owned by the host). */
 export interface CsvBatch {
   kind: CsvBatchKind;
@@ -218,6 +232,11 @@ export interface ChWasmExports {
   ch_parse(inputPtr: number, inputLen: number, outPtr: number): number;
   ch_parse_result_free(resultPtr: number): void;
   ch_buffer_free(bufPtr: number): void;
+  /**
+   * Pointer to a static array of `ChSupportedFormat` (wasm32 layout).
+   * When `outCountPtr` is non-zero, writes the entry count as a `usize` (u32).
+   */
+  ch_supported_formats?(outCountPtr: number): number;
   ch_stream_create?(configPtr: number): number;
   ch_stream_destroy?(streamPtr: number): void;
   ch_stream_feed?(streamPtr: number, dataPtr: number, len: number): number;

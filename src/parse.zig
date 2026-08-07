@@ -9,7 +9,8 @@
 //! line. Callers identify the product from that magic, then branch to the
 //! matching body parser. Implemented: officers snapshot (`DDDDSNAP`), officers
 //! update (`DDDDUPDT`), disqualified persons (`DISQUALS`), and liquidation
-//! daily updates (`LIQNFORM`).
+//! daily updates (`LIQNFORM`). Use `supportedFormats()` for the catalogue of
+//! product codes, header identifiers, and short descriptions.
 
 const std = @import("std");
 const unicode = std.unicode;
@@ -91,6 +92,14 @@ pub const FileType = enum(i32) {
     /// Product 197 — liquidation daily updates (form groups).
     liquidation = 3,
 
+    /// All recognised products in stable enum order (matches C ABI `CH_FILE_*`).
+    pub const all = [_]FileType{
+        .officers_snapshot,
+        .officers_update,
+        .disqualifications,
+        .liquidation,
+    };
+
     /// 8-byte header identifier for this product.
     pub fn identifier(self: FileType) []const u8 {
         return switch (self) {
@@ -101,13 +110,44 @@ pub const FileType = enum(i32) {
         };
     }
 
-    /// Short human-readable product name (for logs / errors).
+    /// Companies House product number(s) that use this file format.
+    /// Snapshot products 195 and 216 share the same layout and header magic.
+    pub fn productCodes(self: FileType) []const u16 {
+        return switch (self) {
+            .officers_snapshot => &.{ 195, 216 },
+            .officers_update => &.{198},
+            .disqualifications => &.{192},
+            .liquidation => &.{197},
+        };
+    }
+
+    /// Short human-readable label (e.g. "officers snapshot", "disqualifications").
+    pub fn description(self: FileType) []const u8 {
+        return switch (self) {
+            .officers_snapshot => "officers snapshot",
+            .officers_update => "officers update",
+            .disqualifications => "disqualifications",
+            .liquidation => "liquidations",
+        };
+    }
+
+    /// Longer product name for logs / errors (includes product numbers).
     pub fn displayName(self: FileType) []const u8 {
         return switch (self) {
             .officers_snapshot => "officers snapshot (Prod 195/216)",
             .officers_update => "officers update (Prod 198)",
             .disqualifications => "disqualified persons (Prod 192)",
             .liquidation => "liquidation daily updates (Prod 197)",
+        };
+    }
+
+    /// Metadata for this product (codes, header magic, short description).
+    pub fn supportedFormat(self: FileType) SupportedFormat {
+        return .{
+            .file_type = self,
+            .product_codes = self.productCodes(),
+            .header_identifier = self.identifier(),
+            .description = self.description(),
         };
     }
 
@@ -162,6 +202,31 @@ pub const FileType = enum(i32) {
         return std.meta.intToEnum(FileType, v) catch null;
     }
 };
+
+/// One supported bulk file format: product code(s), header magic, and short label.
+pub const SupportedFormat = struct {
+    file_type: FileType,
+    /// Companies House product numbers (e.g. 195 and 216 for the officers snapshot).
+    product_codes: []const u16,
+    /// 8-byte header identifier at the start of the file.
+    header_identifier: []const u8,
+    /// Short human-readable description (e.g. "officers snapshot").
+    description: []const u8,
+};
+
+/// Static catalogue of formats with an implemented body parser (enum order).
+pub const supported_formats = [_]SupportedFormat{
+    FileType.officers_snapshot.supportedFormat(),
+    FileType.officers_update.supportedFormat(),
+    FileType.disqualifications.supportedFormat(),
+    FileType.liquidation.supportedFormat(),
+};
+
+/// Return the list of file formats this library can parse.
+/// Entries are process-lifetime static data; do not free.
+pub fn supportedFormats() []const SupportedFormat {
+    return &supported_formats;
+}
 
 pub const officers_snapshot_header_id = "DDDDSNAP";
 pub const officers_update_header_id = "DDDDUPDT";

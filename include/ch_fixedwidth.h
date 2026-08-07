@@ -46,6 +46,27 @@ typedef struct ChBuffer {
 #define CH_OUTPUT_PRACTITIONERS 6
 #define CH_OUTPUT_FREE_TEXT 7
 
+/** Max product numbers per format entry (officers snapshot has two: 195, 216). */
+#define CH_MAX_PRODUCT_CODES 4
+
+/**
+ * One supported bulk file format (static strings; do not free).
+ *
+ * | file_type | product_codes | header | description |
+ * |-----------|---------------|--------|-------------|
+ * | 0 snapshot | 195, 216 | DDDDSNAP | officers snapshot |
+ * | 1 update | 198 | DDDDUPDT | officers update |
+ * | 2 disqual | 192 | DISQUALS | disqualifications |
+ * | 3 liquidation | 197 | LIQNFORM | liquidations |
+ */
+typedef struct ChSupportedFormat {
+    int32_t file_type;
+    uint32_t product_code_count;
+    uint16_t product_codes[CH_MAX_PRODUCT_CODES];
+    const char *header_identifier;
+    const char *description;
+} ChSupportedFormat;
+
 /**
  * One-shot parse result. Unused kinds have empty buffers and zero counts.
  *
@@ -100,6 +121,13 @@ typedef struct ChParseResult {
 #define CH_ERR_ROW_TOO_LARGE 9
 /** Prod 197 form group exceeded max practitioners or free-text lines */
 #define CH_ERR_RECORD_LIMIT 10
+
+/**
+ * Return a pointer to a static array of supported file formats.
+ * When out_count is non-NULL, it is set to the number of entries.
+ * The pointer is valid for the process lifetime; do not free.
+ */
+const ChSupportedFormat *ch_supported_formats(size_t *out_count);
 
 /**
  * Parse a full fixed-width document in memory into named CSV documents.

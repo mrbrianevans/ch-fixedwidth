@@ -8,6 +8,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const document = @import("document.zig");
+const parse = @import("parse.zig");
 const stream_mod = @import("stream.zig");
 
 /// Opaque heap buffer returned to C/WASM callers.
@@ -22,6 +23,24 @@ pub const CH_FILE_OFFICERS_SNAPSHOT: i32 = 0;
 pub const CH_FILE_OFFICERS_UPDATE: i32 = 1;
 pub const CH_FILE_DISQUALIFICATIONS: i32 = 2;
 pub const CH_FILE_LIQUIDATION: i32 = 3;
+
+/// Max product numbers stored per format entry (snapshot has two: 195, 216).
+pub const CH_MAX_PRODUCT_CODES: usize = 4;
+
+/// One supported file format (static strings; do not free).
+/// Layout is stable for C and wasm32 hosts.
+pub const ChSupportedFormat = extern struct {
+    /// `CH_FILE_*` product id.
+    file_type: i32 = CH_FILE_UNKNOWN,
+    /// Number of valid entries in `product_codes` (1..CH_MAX_PRODUCT_CODES).
+    product_code_count: u32 = 0,
+    /// Companies House product numbers; only the first `product_code_count` are set.
+    product_codes: [CH_MAX_PRODUCT_CODES]u16 = .{0} ** CH_MAX_PRODUCT_CODES,
+    /// NUL-terminated 8-byte header magic (static).
+    header_identifier: [*:0]const u8 = "",
+    /// NUL-terminated short description (static).
+    description: [*:0]const u8 = "",
+};
 
 /// Output kind; matches `parse.OutputKind` / `CH_OUTPUT_*`.
 pub const CH_OUTPUT_COMPANIES: i32 = 0;
@@ -137,6 +156,43 @@ fn bufferFromSlice(s: []u8) ChBuffer {
 /// Free a buffer previously filled by `ch_parse`.
 pub export fn ch_buffer_free(buf: ?*ChBuffer) void {
     if (buf) |b| freeBuffer(b);
+}
+
+fn toCSupportedFormat(fmt: parse.SupportedFormat) ChSupportedFormat {
+    // Header ids and descriptions are string literals (NUL-terminated in the binary).
+    const header_z: [*:0]const u8 = @ptrCast(fmt.header_identifier.ptr);
+    const desc_z: [*:0]const u8 = @ptrCast(fmt.description.ptr);
+    var out: ChSupportedFormat = .{
+        .file_type = @intFromEnum(fmt.file_type),
+        .product_code_count = 0,
+        .product_codes = .{0} ** CH_MAX_PRODUCT_CODES,
+        .header_identifier = header_z,
+        .description = desc_z,
+    };
+    const n = @min(fmt.product_codes.len, CH_MAX_PRODUCT_CODES);
+    out.product_code_count = @intCast(n);
+    for (fmt.product_codes[0..n], 0..) |code, i| {
+        out.product_codes[i] = code;
+    }
+    return out;
+}
+
+/// Static table built once for the C/WASM ABI (process lifetime).
+const c_supported_formats_table = blk: {
+    @setEvalBranchQuota(1000);
+    var table: [parse.supported_formats.len]ChSupportedFormat = undefined;
+    for (parse.supported_formats, 0..) |fmt, i| {
+        table[i] = toCSupportedFormat(fmt);
+    }
+    break :blk table;
+};
+
+/// Return a pointer to a static array of supported file formats.
+/// Sets `*out_count` to the number of entries when `out_count` is non-null.
+/// The pointer is valid for the process lifetime; do not free.
+pub export fn ch_supported_formats(out_count: ?*usize) [*]const ChSupportedFormat {
+    if (out_count) |c| c.* = c_supported_formats_table.len;
+    return &c_supported_formats_table;
 }
 
 /// Free all CSV buffers in a parse result.

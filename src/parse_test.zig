@@ -38,6 +38,70 @@ test "identifyFileType maps known header magics" {
     try std.testing.expect(parse.FileType.liquidation.isImplemented());
 }
 
+test "supportedFormats lists product codes, headers, and descriptions" {
+    const formats = parse.supportedFormats();
+    try std.testing.expectEqual(@as(usize, 4), formats.len);
+    try std.testing.expectEqual(parse.FileType.all.len, formats.len);
+
+    try std.testing.expectEqual(parse.FileType.officers_snapshot, formats[0].file_type);
+    try std.testing.expectEqualSlices(u16, &.{ 195, 216 }, formats[0].product_codes);
+    try std.testing.expectEqualStrings("DDDDSNAP", formats[0].header_identifier);
+    try std.testing.expectEqualStrings("officers snapshot", formats[0].description);
+
+    try std.testing.expectEqual(parse.FileType.officers_update, formats[1].file_type);
+    try std.testing.expectEqualSlices(u16, &.{198}, formats[1].product_codes);
+    try std.testing.expectEqualStrings("DDDDUPDT", formats[1].header_identifier);
+    try std.testing.expectEqualStrings("officers update", formats[1].description);
+
+    try std.testing.expectEqual(parse.FileType.disqualifications, formats[2].file_type);
+    try std.testing.expectEqualSlices(u16, &.{192}, formats[2].product_codes);
+    try std.testing.expectEqualStrings("DISQUALS", formats[2].header_identifier);
+    try std.testing.expectEqualStrings("disqualifications", formats[2].description);
+
+    try std.testing.expectEqual(parse.FileType.liquidation, formats[3].file_type);
+    try std.testing.expectEqualSlices(u16, &.{197}, formats[3].product_codes);
+    try std.testing.expectEqualStrings("LIQNFORM", formats[3].header_identifier);
+    try std.testing.expectEqualStrings("liquidations", formats[3].description);
+
+    // FileType helpers stay consistent with the catalogue.
+    for (formats) |fmt| {
+        try std.testing.expectEqualStrings(fmt.file_type.identifier(), fmt.header_identifier);
+        try std.testing.expectEqualStrings(fmt.file_type.description(), fmt.description);
+        try std.testing.expectEqualSlices(u16, fmt.file_type.productCodes(), fmt.product_codes);
+    }
+}
+
+test "ch_supported_formats C ABI matches Zig catalogue" {
+    var count: usize = 0;
+    const table = c_api.ch_supported_formats(&count);
+    try std.testing.expectEqual(@as(usize, 4), count);
+
+    try std.testing.expectEqual(@as(i32, c_api.CH_FILE_OFFICERS_SNAPSHOT), table[0].file_type);
+    try std.testing.expectEqual(@as(u32, 2), table[0].product_code_count);
+    try std.testing.expectEqual(@as(u16, 195), table[0].product_codes[0]);
+    try std.testing.expectEqual(@as(u16, 216), table[0].product_codes[1]);
+    try std.testing.expectEqualStrings("DDDDSNAP", std.mem.span(table[0].header_identifier));
+    try std.testing.expectEqualStrings("officers snapshot", std.mem.span(table[0].description));
+
+    try std.testing.expectEqual(@as(i32, c_api.CH_FILE_OFFICERS_UPDATE), table[1].file_type);
+    try std.testing.expectEqual(@as(u32, 1), table[1].product_code_count);
+    try std.testing.expectEqual(@as(u16, 198), table[1].product_codes[0]);
+    try std.testing.expectEqualStrings("DDDDUPDT", std.mem.span(table[1].header_identifier));
+    try std.testing.expectEqualStrings("officers update", std.mem.span(table[1].description));
+
+    try std.testing.expectEqual(@as(i32, c_api.CH_FILE_DISQUALIFICATIONS), table[2].file_type);
+    try std.testing.expectEqual(@as(u32, 1), table[2].product_code_count);
+    try std.testing.expectEqual(@as(u16, 192), table[2].product_codes[0]);
+    try std.testing.expectEqualStrings("DISQUALS", std.mem.span(table[2].header_identifier));
+    try std.testing.expectEqualStrings("disqualifications", std.mem.span(table[2].description));
+
+    try std.testing.expectEqual(@as(i32, c_api.CH_FILE_LIQUIDATION), table[3].file_type);
+    try std.testing.expectEqual(@as(u32, 1), table[3].product_code_count);
+    try std.testing.expectEqual(@as(u16, 197), table[3].product_codes[0]);
+    try std.testing.expectEqualStrings("LIQNFORM", std.mem.span(table[3].header_identifier));
+    try std.testing.expectEqualStrings("liquidations", std.mem.span(table[3].description));
+}
+
 test "parseHeader extracts run and date for all known products" {
     const snap = try parse.parseHeader("DDDDSNAP425720260706");
     try std.testing.expectEqual(parse.FileType.officers_snapshot, snap.file_type);

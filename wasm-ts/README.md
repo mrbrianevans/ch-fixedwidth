@@ -20,7 +20,9 @@ Produces `zig-out/ch_fixedwidth.wasm`.
 
 Header magic selects the product. Batches and one-shot results use **named** kinds (`companies`, `persons`, `disqualifications`, `exemptions`, `variations`, `forms`, `practitioners`, `free_text`) — never reusing companies/persons for unrelated tables.
 
-Helpers: `outputFileName`, `outputKindsForFileType`, `ChFileType`, `ChOutputKind`.
+Helpers: `outputFileName`, `outputKindsForFileType`, `parser.supportedFormats()`, `ChFileType`, `ChOutputKind`.
+
+`supportedFormats()` returns product code(s), 8-byte header magic, and a short description for each implemented format (from the WASM `ch_supported_formats` catalogue).
 
 ## Usage
 
@@ -62,6 +64,8 @@ try {
 import { ChFixedWidthParser } from "@ch-fixedwidth/wasm-ts";
 
 const parser = await ChFixedWidthParser.create({ wasmBytes });
+const formats = parser.supportedFormats();
+// [{ fileType, productCodes: [195, 216], headerIdentifier: "DDDDSNAP", description: "officers snapshot" }, …]
 const result = parser.parse(documentBytes);
 // result.fileType, result.companiesCsv / formsCsv / …, counts
 ```

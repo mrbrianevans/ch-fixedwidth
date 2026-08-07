@@ -11,6 +11,7 @@ Multi-product release of **ch-fixedwidth**. Breaking C/WASM/TypeScript API clean
 
 ### Added
 
+- `supportedFormats()` / `ch_supported_formats` catalogue: product code(s), header identifier, and short description for each implemented format (Zig, C ABI, WASM/TypeScript)
 - Header-based product dispatch: the first 8-byte header identifier selects the body parser
 - **Product 198** (`DDDDUPDT`) officers update parser
 - **Product 192** (`DISQUALS`) disqualified persons parser (four named CSVs)

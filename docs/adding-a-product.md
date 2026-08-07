@@ -16,7 +16,7 @@ Before writing code, gather a complete specification. Incomplete specs are the u
 |------|----------------|
 | **8-byte header magic** | Exact ASCII string at the start of the first line (e.g. `DDDDSNAP`). Must be unique among supported products. |
 | **Header layout after magic** | Current products share run number (4 chars) + production date (8 chars) for a 20-byte header. Document any divergence. |
-| **Product number / name** | For docs, logs, and `FileType.displayName()` (e.g. “Prod 199 — …”). |
+| **Product number / name** | For docs, logs, `FileType.productCodes()` / `description()`, and `FileType.displayName()` (e.g. “Prod 199 — …”). Wire into `supported_formats` via `FileType.supportedFormat()`. |
 
 ### 1.2 Record model
 
@@ -126,7 +126,7 @@ Work roughly top-down. Zig `switch` exhaustiveness will force most call sites to
 
 1. Constant for the 8-byte magic.
 2. `FileType` variant with stable `i32` value (append; do not renumber existing ABI values).
-3. Wire `identifier`, `displayName`, `isImplemented`, `outputKinds`, `csvHeader` (and any product-specific header helpers).
+3. Wire `identifier`, `productCodes`, `description`, `displayName`, `isImplemented`, `outputKinds`, `csvHeader` (and any product-specific header helpers). Append to `FileType.all` and `supported_formats`.
 4. `identifyFileType` / header parsing for the new magic.
 5. Line classification (`classify…Line` or extend an existing classifier carefully).
 6. Field extractors + `format…Row` writers; CSV header string constants.
@@ -153,14 +153,14 @@ Usually **no product-specific code**: `parseDocument` already feeds `Stream` and
 
 ### Phase F — C ABI and WASM
 
-1. `include/ch_fixedwidth.h`: `CH_FILE_*` and any new `CH_OUTPUT_*`; document filled fields in `ChParseResult` / `ChStreamStats`.
-2. `src/c_api.zig`: keep `extern struct` layouts in sync (counts then buffers). **wasm32 layout sizes must match** what TypeScript reads.
+1. `include/ch_fixedwidth.h`: `CH_FILE_*` and any new `CH_OUTPUT_*`; document filled fields in `ChParseResult` / `ChStreamStats` and the `ch_supported_formats` table.
+2. `src/c_api.zig`: keep `extern struct` layouts in sync (counts then buffers). **wasm32 layout sizes must match** what TypeScript reads. The `c_supported_formats_table` is rebuilt from `parse.supported_formats`.
 3. Rebuild: `zig build test` and `zig build wasm -Doptimize=ReleaseFast`.
 
 ### Phase G — TypeScript host (`wasm-ts/`)
 
 1. `ChFileType` / `ChOutputKind` and `csvBatchKindFromCode`.
-2. `outputFileStem` / `outputKindsForFileType`.
+2. `outputFileStem` / `outputKindsForFileType`; `ChFixedWidthParser.supportedFormats()` reads the WASM catalogue.
 3. `ParseResult` / `StreamStats` fields; **struct byte offsets** in `parser.ts` / `stream.ts` if the C layout grew.
 4. Local CLI already writes by batch kind; confirm new kinds get correct filenames.
 5. Tests against the mini fixture (one-shot and tiny-chunk stream).

@@ -35,6 +35,37 @@ async function wasmBytes(): Promise<ArrayBuffer> {
   return wasmFile.arrayBuffer();
 }
 
+test("supportedFormats lists product codes, headers, and descriptions", async () => {
+  const parser = await ChFixedWidthParser.create({ wasmBytes: await wasmBytes() });
+  const formats = parser.supportedFormats();
+
+  expect(formats).toHaveLength(4);
+  expect(formats[0]).toEqual({
+    fileType: ChFileType.OfficersSnapshot,
+    productCodes: [195, 216],
+    headerIdentifier: "DDDDSNAP",
+    description: "officers snapshot",
+  });
+  expect(formats[1]).toEqual({
+    fileType: ChFileType.OfficersUpdate,
+    productCodes: [198],
+    headerIdentifier: "DDDDUPDT",
+    description: "officers update",
+  });
+  expect(formats[2]).toEqual({
+    fileType: ChFileType.Disqualifications,
+    productCodes: [192],
+    headerIdentifier: "DISQUALS",
+    description: "disqualifications",
+  });
+  expect(formats[3]).toEqual({
+    fileType: ChFileType.Liquidation,
+    productCodes: [197],
+    headerIdentifier: "LIQNFORM",
+    description: "liquidations",
+  });
+});
+
 test("parse mini snapshot via WASM (one-shot)", async () => {
   const parser = await ChFixedWidthParser.create({ wasmBytes: await wasmBytes() });
   const input = await Bun.file(fixturePath).text();
