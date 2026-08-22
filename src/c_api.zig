@@ -137,6 +137,10 @@ pub const CH_ERR_NOT_IMPLEMENTED: c_int = 8;
 pub const CH_ERR_ROW_TOO_LARGE: c_int = 9;
 /// Prod 197 form group exceeded max practitioners or free-text lines.
 pub const CH_ERR_RECORD_LIMIT: c_int = 10;
+/// Unknown record type / unclassified body line.
+pub const CH_ERR_UNKNOWN_RECORD: c_int = 11;
+/// Field longer than its fixed slot (no silent truncation).
+pub const CH_ERR_FIELD_OVERFLOW: c_int = 12;
 
 fn gpa() std.mem.Allocator {
     if (comptime builtin.cpu.arch.isWasm()) {
@@ -155,6 +159,8 @@ fn mapStreamErr(err: stream_mod.ParseError) c_int {
         error.AlreadyFinished, error.FeedAfterTrailer => CH_ERR_STREAM_STATE,
         error.RowTooLarge => CH_ERR_ROW_TOO_LARGE,
         error.RecordLimitExceeded => CH_ERR_RECORD_LIMIT,
+        error.UnknownRecord => CH_ERR_UNKNOWN_RECORD,
+        error.FieldOverflow => CH_ERR_FIELD_OVERFLOW,
     };
 }
 
@@ -259,6 +265,9 @@ pub export fn ch_parse(
             error.OutOfMemory => CH_ERR_OUT_OF_MEMORY,
             error.RowTooLarge => CH_ERR_ROW_TOO_LARGE,
             error.RecordLimitExceeded => CH_ERR_RECORD_LIMIT,
+            error.UnknownRecord => CH_ERR_UNKNOWN_RECORD,
+            error.FieldOverflow => CH_ERR_FIELD_OVERFLOW,
+            error.FeedAfterTrailer => CH_ERR_STREAM_STATE,
         };
     };
 

@@ -17,6 +17,9 @@ pub const ParseError = error{
     OutOfMemory,
     RowTooLarge,
     RecordLimitExceeded,
+    UnknownRecord,
+    FieldOverflow,
+    FeedAfterTrailer,
 };
 
 /// In-memory CSV outputs for a parsed bulk file.
@@ -59,8 +62,10 @@ fn mapStreamErr(err: stream_mod.ParseError) ParseError {
         error.OutOfMemory => error.OutOfMemory,
         error.RowTooLarge => error.RowTooLarge,
         error.RecordLimitExceeded => error.RecordLimitExceeded,
-        // One-shot never leaves the stream mid-finish in these states.
-        error.AlreadyFinished, error.FeedAfterTrailer => error.UnsupportedFileType,
+        error.UnknownRecord => error.UnknownRecord,
+        error.FieldOverflow => error.FieldOverflow,
+        error.FeedAfterTrailer => error.FeedAfterTrailer,
+        error.AlreadyFinished => error.UnsupportedFileType,
     };
 }
 

@@ -264,12 +264,42 @@ test "formatUpdatePersonRow extracts fixed and chevron fields" {
     try std.testing.expect(csv[csv.len - 1] == '\n');
 }
 
+test "LiqForm applyRecord reports unknown tags and fails on field overflow" {
+    var form: parse.LiqForm = .{};
+    try std.testing.expectEqual(parse.LiqForm.Apply.applied, try form.applyRecord("FM600"));
+    try std.testing.expectEqual(parse.LiqForm.Apply.unknown_tag, try form.applyRecord("ZZNOTAREALTAG"));
+
+    var long: [104]u8 = undefined;
+    long[0] = 'N';
+    long[1] = 'A';
+    @memset(long[2..], 'X');
+    try std.testing.expectError(error.FieldOverflow, form.applyRecord(&long));
+}
+
+test "parseDocument warns on unknown liquidation tag and still succeeds" {
+    const input =
+        \\LIQNFORM000120260731
+        \\FM600
+        \\RN00777722
+        \\ZZWEIRD
+        \\9999999900000003
+        \\
+    ;
+    var result = try document.parseDocument(std.testing.allocator, input);
+    defer result.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(i32, 1), result.warning_count);
+    try std.testing.expect(std.mem.indexOf(u8, result.lastWarningSlice(), "ZZ") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.lastWarningSlice(), "600") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.lastWarningSlice(), "00777722") != null);
+    try std.testing.expectEqual(@as(i32, 1), result.rowCount(.forms));
+}
+
 test "LiqForm applyRecord fails when practitioner limit exceeded" {
     var form: parse.LiqForm = .{};
-    try form.applyRecord("FM0001");
+    _ = try form.applyRecord("FM0001");
     var i: usize = 0;
     while (i < parse.liq_max_practitioners) : (i += 1) {
-        try form.applyRecord("NPNAME<ADDR");
+        _ = try form.applyRecord("NPNAME<ADDR");
     }
     try std.testing.expectError(error.RecordLimitExceeded, form.applyRecord("NPONE MORE"));
 }
@@ -605,6 +635,48 @@ test "C ABI stream feed/finish on mini fixture" {
     }
     try std.testing.expectEqual(@as(usize, 2), got_companies);
     try std.testing.expectEqual(@as(usize, 3), got_persons);
+}
+
+test "officers unknown type byte fails the parse" {
+    const bad =
+        \\DDDDSNAP425720260706
+        \\029052131D                      00010013WGFA LIMITED<
+        \\02905213X302900006800001Y       19940307
+        \\9999999900000002
+        \\
+    ;
+    try std.testing.expectError(error.UnknownRecord, document.parseDocument(std.testing.allocator, bad));
+}
+
+test "extra data after officers trailer fails the parse" {
+    const bad =
+        \\DDDDSNAP425720260706
+        \\029052131D                      00010013WGFA LIMITED<
+        \\9999999900000001
+        \\GARBAGE
+        \\
+    ;
+    try std.testing.expectError(error.FeedAfterTrailer, document.parseDocument(std.testing.allocator, bad));
+}
+
+test "disqual unknown type byte fails the parse" {
+    const bad =
+        \\DISQUALS000120240501
+        \\9NOTAREALRECORD
+        \\DISQUALS/00000000/00000000/00000000/00000000/00000000
+        \\
+    ;
+    try std.testing.expectError(error.UnknownRecord, document.parseDocument(std.testing.allocator, bad));
+}
+
+test "stream warn records count and last message" {
+    const allocator = std.testing.allocator;
+    var s = stream_mod.Stream.init(allocator, .{});
+    defer s.deinit();
+    s.warn("unknown tag ZZ on form 600 company 00777722");
+    s.warn("second");
+    try std.testing.expectEqual(@as(i32, 2), s.warning_count);
+    try std.testing.expectEqualStrings("second", s.lastWarningSlice());
 }
 
 test "C ABI kind-indexed layout: counts start at 16, csv at 80" {

@@ -14,6 +14,10 @@ export const ChErrorCode = {
   RowTooLarge: 9,
   /** Prod 197 form group exceeded max practitioners or free-text lines. */
   RecordLimit: 10,
+  /** Unknown record type / unclassified body line. */
+  UnknownRecord: 11,
+  /** Field longer than its fixed slot. */
+  FieldOverflow: 12,
 } as const;
 
 export type ChErrorCode = (typeof ChErrorCode)[keyof typeof ChErrorCode];
@@ -63,6 +67,8 @@ const ERROR_MESSAGES: Record<number, string> = {
   [ChErrorCode.RowTooLarge]: "CSV row exceeds maximum formatted size",
   [ChErrorCode.RecordLimit]:
     "Form group exceeded maximum practitioners or free-text lines",
+  [ChErrorCode.UnknownRecord]: "Unknown record type or unclassified body line",
+  [ChErrorCode.FieldOverflow]: "Field exceeds its fixed slot capacity",
 };
 
 export class ChParseError extends Error {

@@ -135,6 +135,10 @@ typedef struct ChParseResult {
 #define CH_ERR_ROW_TOO_LARGE 9
 /** Prod 197 form group exceeded max practitioners or free-text lines */
 #define CH_ERR_RECORD_LIMIT 10
+/** Unknown record type / unclassified body line */
+#define CH_ERR_UNKNOWN_RECORD 11
+/** Field longer than its fixed slot (no silent truncation) */
+#define CH_ERR_FIELD_OVERFLOW 12
 
 /**
  * Return a pointer to a static array of supported file formats.

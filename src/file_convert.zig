@@ -252,10 +252,18 @@ fn runWorker(ctx: *WorkerCtx) !WorkerResult {
 
         if (row.len >= 8 and std.mem.eql(u8, row[0..8], parse.trailer_record_identifier)) {
             result.trailer_count = parse.parseTrailerCount(row);
-            break;
+            // Keep reading: extra non-whitespace after the trailer is an error.
+            continue;
         }
 
-        if (row.len <= 8) continue;
+        if (result.trailer_count != null) {
+            for (row) |c| {
+                if (c != ' ' and c != '\t') return error.FeedAfterTrailer;
+            }
+            continue;
+        }
+
+        if (row.len <= 8) return error.UnknownRecord;
 
         // Officers snapshot / update body (record type at byte 8).
         switch (row[8]) {
@@ -267,7 +275,7 @@ fn runWorker(ctx: *WorkerCtx) !WorkerResult {
                 try writePersonRow(&persons_out, ctx.file_type, row);
                 result.persons += 1;
             },
-            else => {},
+            else => return error.UnknownRecord,
         }
     }
 
@@ -550,6 +558,10 @@ fn printStreamSummary(s: *const stream_mod.Stream) void {
     }
 }
 
+fn printStreamWarning(_: ?*anyopaque, message: []const u8) void {
+    std.debug.print("warning: {s}\n", .{message});
+}
+
 /// Stream input from `reader` into product-specific CSVs under `output_folder`.
 /// Uses the shared `stream.Stream` body parser (same as one-shot / WASM).
 /// Caller must ensure `output_folder` exists. Same output layout as a local file run.
@@ -575,6 +587,7 @@ pub fn processFromReader(
         .batch_rows = 0, // defaults
         .batch_bytes = write_buffer_size,
     });
+    s.setWarnHandler(printStreamWarning, null);
     // Arena-backed; no explicit deinit required for process lifetime.
 
     var outs: [parse.OutputKind.all.len]?CsvOut = .{null} ** parse.OutputKind.all.len;

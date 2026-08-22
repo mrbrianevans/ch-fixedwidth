@@ -26,6 +26,10 @@ pub const ParseError = error{
     RowTooLarge,
     /// Prod 197 form group exceeded max practitioners or free-text lines.
     RecordLimitExceeded,
+    /// Unknown record type byte / unclassified body line (non-197 products).
+    UnknownRecord,
+    /// A tagged field was longer than its slot capacity.
+    FieldOverflow,
 };
 
 /// Streaming batch kind — same values as `parse.OutputKind` / C `CH_OUTPUT_*`.
@@ -89,6 +93,8 @@ pub const Stream = struct {
     /// Non-fatal diagnostics (e.g. unknown Prod 197 tags). Hard errors still fail the run.
     warning_count: i32 = 0,
     last_warning: [256]u8 = [_]u8{0} ** 256,
+    warn_fn: ?*const fn (ctx: ?*anyopaque, message: []const u8) void = null,
+    warn_ctx: ?*anyopaque = null,
 
     magic: [parse.header_identifier_len]u8 = undefined,
     magic_len: u8 = 0,
@@ -117,6 +123,29 @@ pub const Stream = struct {
 
     pub fn countOf(self: *const Stream, kind: BatchKind) i32 {
         return self.kinds[kind.index()].count;
+    }
+
+    /// Optional callback invoked for every warning (CLI prints to stderr).
+    /// `warning_count` / `last_warning` are always updated.
+    pub fn setWarnHandler(
+        self: *Stream,
+        func: ?*const fn (ctx: ?*anyopaque, message: []const u8) void,
+        ctx: ?*anyopaque,
+    ) void {
+        self.warn_fn = func;
+        self.warn_ctx = ctx;
+    }
+
+    pub fn lastWarningSlice(self: *const Stream) []const u8 {
+        return std.mem.sliceTo(&self.last_warning, 0);
+    }
+
+    pub fn warn(self: *Stream, message: []const u8) void {
+        self.warning_count += 1;
+        self.last_warning = [_]u8{0} ** 256;
+        const n = @min(message.len, self.last_warning.len - 1);
+        if (n > 0) @memcpy(self.last_warning[0..n], message[0..n]);
+        if (self.warn_fn) |f| f(self.warn_ctx, message);
     }
 
     /// Feed the next chunk of input bytes. Drain with `nextBatch` afterward.
@@ -291,7 +320,7 @@ pub const Stream = struct {
                 } catch return error.RowTooLarge;
                 try self.appendFormattedRow(.persons, file_type.personsCsvHeader(), n);
             },
-            .other => {},
+            .other => return error.UnknownRecord,
         }
     }
 
@@ -317,6 +346,28 @@ pub const Stream = struct {
         self.liq_form.reset();
     }
 
+    fn applyLiqRecord(self: *Stream, row: []const u8) ParseError!void {
+        const outcome = self.liq_form.applyRecord(row) catch |err| switch (err) {
+            error.RecordLimitExceeded => return error.RecordLimitExceeded,
+            error.FieldOverflow => return error.FieldOverflow,
+        };
+        if (outcome == .unknown_tag) self.warnLiqUnknown(row);
+        self.liq_data_records += 1;
+    }
+
+    fn warnLiqUnknown(self: *Stream, row: []const u8) void {
+        const tag = if (row.len >= 2) row[0..2] else row;
+        const form = self.liq_form.formNumber();
+        const company = self.liq_form.companyNumber();
+        var buf: [192]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "unknown tag {s} on form {s} company {s}", .{
+            tag,
+            if (form.len == 0) "-" else form,
+            if (company.len == 0) "-" else company,
+        }) catch "unknown tag";
+        self.warn(msg);
+    }
+
     fn handleLiqLine(self: *Stream, row: []const u8) ParseError!void {
         switch (parse.classifyLiqLine(row)) {
             .header => {
@@ -334,14 +385,12 @@ pub const Stream = struct {
             },
             .form => {
                 try self.emitLiqFormToBuffers();
-                self.liq_form.applyRecord(row) catch return error.RecordLimitExceeded;
-                self.liq_data_records += 1;
+                try self.applyLiqRecord(row);
             },
             .data => {
-                self.liq_form.applyRecord(row) catch return error.RecordLimitExceeded;
-                self.liq_data_records += 1;
+                try self.applyLiqRecord(row);
             },
-            .other => {},
+            .other => return error.UnknownRecord,
         }
     }
 
@@ -378,7 +427,7 @@ pub const Stream = struct {
                 const n = parse.formatVariationRow(&self.row_buf, row) catch return error.RowTooLarge;
                 try self.appendFormattedRow(.variations, parse.variations_header, n);
             },
-            .other => {},
+            .other => return error.UnknownRecord,
         }
     }
 
