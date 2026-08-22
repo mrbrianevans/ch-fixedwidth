@@ -244,7 +244,11 @@ pub const companies_header =
     "Company Number,Company Status,Number of Officers,Company Name\n";
 pub const persons_header =
     "Company Number,App Date Origin,Appointment Type,Person number,Corporate indicator,Appointment Date,Resignation Date,Person Postcode,Partial Date of Birth,Full Date of Birth,Title,Forenames,Surname,Honours,Care_of,PO_box,Address line 1,Address line 2,Post_town,County,Country,Occupation,Nationality,Resident Country\n";
-/// Prod 198 update person row CSV header (fixed fields + 14 named chevron fields).
+/// Prod 198 update person row CSV header.
+/// Distinct from the snapshot `persons_header`: update rows carry old/new
+/// identifiers (appointment type, person number, postcode) plus change/update
+/// dates. Trailing chevron fillers after the 14 named variable fields are omitted
+/// only while proven empty (see docs/Prod198_Update.md); a non-empty filler fails.
 pub const update_persons_header =
     "Company Number,App Date Origin,Res Date Origin,Correction Indicator,Corporate Indicator,Old Appointment Type,New Appointment Type,Old Person Number,New Person Number,Partial Date of Birth,Full Date of Birth,Old Person Postcode,New Person Postcode,Appointment Date,Resignation Date,Change Date,Update Date,New Title,New Forenames,New Surname,New Honours,Care Of,PO Box,New Address Line 1,New Address Line 2,New Post Town,New County,New Country,Occupation,New Nationality,New Residential Country\n";
 
@@ -625,8 +629,9 @@ fn csvNeedsQuote(s: []const u8) bool {
     return false;
 }
 
-/// CSV row formatting failed because the destination buffer is too small.
-pub const FormatError = error{RowTooLarge};
+/// CSV row formatting failed because the destination buffer is too small,
+/// or because the input held fields outside the published output schema.
+pub const FormatError = error{ RowTooLarge, ExtraChevronData };
 
 /// Append a field that may need CSV quoting. Returns `error.RowTooLarge` if
 /// the write would exceed `dest.len` (never writes past the end).
@@ -879,8 +884,9 @@ pub fn formatPersonRow(dest: []u8, row: []const u8) FormatError!usize {
 }
 
 /// Format an update person record (Prod 198 / `DDDDUPDT`) as one CSV line.
-/// Fixed layout per docs/Prod198_Update.md; variable data has 27 chevrons of
-/// which the first 14 named fields are exported (trailing fillers omitted).
+/// Fixed layout per docs/Prod198_Update.md. Variable data has 27 chevron fields;
+/// the published CSV exports the 14 named ones. Non-empty trailing fillers fail
+/// closed (`error.ExtraChevronData`) so omission cannot silently drop data.
 /// `dest` must be large enough (typically `max_csv_row_bytes`); never overflows.
 pub fn formatUpdatePersonRow(dest: []u8, row: []const u8) FormatError!usize {
     const v = FieldView.init(row);
@@ -906,10 +912,22 @@ pub fn formatUpdatePersonRow(dest: []u8, row: []const u8) FormatError!usize {
     };
     var fixed: [ranges.len][]const u8 = undefined;
     fillFixed(v, &ranges, &fixed);
-    var var_parts: [14][]const u8 = undefined;
+    var var_parts: [32][]const u8 = undefined;
     const var_len: usize = @intCast(v.atoi(107, 111));
-    splitChevron(v.get(111, 111 + var_len), var_parts[0..]);
-    return writeCsvFields(dest, &fixed, &var_parts);
+    const variable = v.get(111, 111 + var_len);
+    var chevron_fields: usize = 0;
+    if (variable.len > 0) {
+        chevron_fields = 1;
+        for (variable) |c| {
+            if (c == '<') chevron_fields += 1;
+        }
+    }
+    if (chevron_fields > var_parts.len) return error.ExtraChevronData;
+    splitChevron(variable, var_parts[0..]);
+    for (var_parts[14..]) |part| {
+        if (part.len > 0) return error.ExtraChevronData;
+    }
+    return writeCsvFields(dest, &fixed, var_parts[0..14]);
 }
 
 fn writeCsvFields(dest: []u8, fixed: []const []const u8, var_parts: []const []const u8) FormatError!usize {

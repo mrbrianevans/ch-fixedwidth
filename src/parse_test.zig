@@ -251,6 +251,12 @@ test "parseDocument mini update fixture matches expected CSV" {
     try std.testing.expectEqualStrings(expected_update_persons, result.csv(.persons));
 }
 
+test "formatUpdatePersonRow fails when a trailing chevron filler is non-empty" {
+    const row = "0426797621     0101186084280001186084280003196906                  TR27 5ET20100329        20260724202607240150MR<WARREN<DIXON<<<<ADDR<<TOWN<COUNTY<ENGLAND<MANAGER<BRITISH<UK<NOPE<<<<<<<<<<<";
+    var dest: [parse.max_csv_row_bytes]u8 = undefined;
+    try std.testing.expectError(error.ExtraChevronData, parse.formatUpdatePersonRow(&dest, row));
+}
+
 test "formatUpdatePersonRow extracts fixed and chevron fields" {
     const row = "0426797621     0101186084280001186084280003196906                  TR27 5ET20100329        20260724202607240146MR<WARREN ALAN<DIXON<<<<C/O CALLOOSE CARAVAN PARK 16 CALLOOSE LANE W<LEEDSTOWN<HAYLE<CORNWALL<ENGLAND<MANAGER<BRITISH<UNITED KINGDOM<<<<<<<<<<<<<<";
     var dest: [parse.max_csv_row_bytes]u8 = undefined;

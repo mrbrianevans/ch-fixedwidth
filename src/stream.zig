@@ -317,7 +317,10 @@ pub const Stream = struct {
                     .officers_snapshot => parse.formatPersonRow(&self.row_buf, row),
                     .officers_update => parse.formatUpdatePersonRow(&self.row_buf, row),
                     .disqualifications, .liquidation => unreachable,
-                } catch return error.RowTooLarge;
+                } catch |err| switch (err) {
+                    error.RowTooLarge => return error.RowTooLarge,
+                    error.ExtraChevronData => return error.FieldOverflow,
+                };
                 try self.appendFormattedRow(.persons, file_type.personsCsvHeader(), n);
             },
             .other => return error.UnknownRecord,

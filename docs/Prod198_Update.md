@@ -1,6 +1,6 @@
 # Companies House Product 198 - Company Appointments Update
 
-> **Status: implemented.** Library, CLI, and WASM accept update files (`DDDDUPDT`, product 198) and emit company + person CSVs with the full update person column set.
+> **Status: implemented.** Library, CLI, and WASM accept update files (`DDDDUPDT`, product 198) and emit company + person CSVs. **Person columns are not the snapshot (195/216) schema**: update rows carry old/new identifiers and change/update dates. Company columns match the snapshot company record (same on-disk layout).
 
 **File Type**: Update (`DDDDUPDT` header)
 
@@ -63,7 +63,13 @@
 | 92    | 99  | 8      | Change Date | Date | |
 | 100   | 107 | 8      | Update Date | Date | |
 | 108   | 111 | 4      | Variable Data Length | Numeric | |
-| 112   | ... | var    | Variable Data | String | 27 `<` fields (New Title/Forenames/Surname/Honours/CareOf/POBox/Addr1/Addr2/PostTown/County/Country/Occupation/NewNat/NewUsualRes + fillers) |
+| 112   | ... | var    | Variable Data | String | 27 `<` fields (14 named + trailing fillers) |
+
+**Published person CSV** (product-specific; do not reuse snapshot headers): Company Number, App Date Origin, Res Date Origin, Correction Indicator, Corporate Indicator, Old/New Appointment Type, Old/New Person Number, Partial/Full DOB, Old/New Person Postcode, Appointment Date, Resignation Date, Change Date, Update Date, then the 14 named chevrons (New Title, New Forenames, New Surname, New Honours, Care Of, PO Box, New Address Line 1–2, New Post Town, New County, New Country, Occupation, New Nationality, New Residential Country).
+
+**Trailing chevron fillers (fields 15–27):** omitted from the published schema after a bulk proof on `Prod198_4271` (12 239 person rows, 0 non-empty fillers; max split width 28 from a trailing delimiter). A non-empty filler **fails the parse** (`ExtraChevronData` / `CH_ERR_FIELD_OVERFLOW`) so this omission cannot silently drop data.
+
+**Company filler bytes 11–32:** spec-named unused filler; not exported (same published company schema as the snapshot).
 
 **Parser Notes**: Match on Company + Old Type + Old Person Number. Apply logic for new appointments, resignations, changes, corrections, merges, etc. (per source doc sections 4.2-4.9). Nominee corrections have Company=spaces and Person Numbers starting with `9`.
 
