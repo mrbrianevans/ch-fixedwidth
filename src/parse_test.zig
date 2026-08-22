@@ -186,6 +186,20 @@ test "appendField quotes commas and doubles quotes" {
     try std.testing.expectEqualStrings("\"a,b\"\"c\"", dest[0..n]);
 }
 
+test "sliceChars uses Unicode character offsets for multi-byte UTF-8" {
+    const s = "CAFÉ LTD";
+    try std.testing.expectEqualStrings("É", parse.sliceChars(s, 3, 4));
+    try std.testing.expectEqualStrings("CAFÉ", parse.sliceChars(s, 0, 4));
+}
+
+test "formatCompanyRow exports a multi-byte UTF-8 company name" {
+    // Name length is 9 characters: C A F É   L T D <
+    const row = "029052131D                      00010009CAFÉ LTD<";
+    var dest: [parse.max_csv_row_bytes]u8 = undefined;
+    const n = try parse.formatCompanyRow(&dest, row);
+    try std.testing.expectEqualStrings("02905213,D,1,CAFÉ LTD\n", dest[0..n]);
+}
+
 test "appendField and formatCompanyRow reject undersized dest" {
     var tiny: [4]u8 = undefined;
     try std.testing.expectError(error.RowTooLarge, parse.appendField(&tiny, 0, "hello"));

@@ -24,6 +24,14 @@ const liqPath = join(repoRoot, "src", "testdata", "mini_liquidation.dat");
 const expectedLiqForms = join(repoRoot, "src", "testdata", "expected_liq_forms.csv");
 const expectedLiqPrac = join(repoRoot, "src", "testdata", "expected_liq_practitioners.csv");
 const expectedLiqFt = join(repoRoot, "src", "testdata", "expected_liq_free_text.csv");
+const updatePath = join(repoRoot, "src", "testdata", "mini_update.dat");
+const expectedUpdateCompanies = join(repoRoot, "src", "testdata", "expected_update_companies.csv");
+const expectedUpdatePersons = join(repoRoot, "src", "testdata", "expected_update_persons.csv");
+const disqualPath = join(repoRoot, "src", "testdata", "mini_disqual.dat");
+const expectedDisqualPersons = join(repoRoot, "src", "testdata", "expected_disqual_persons.csv");
+const expectedDisqualifications = join(repoRoot, "src", "testdata", "expected_disqualifications.csv");
+const expectedExemptions = join(repoRoot, "src", "testdata", "expected_exemptions.csv");
+const expectedVariations = join(repoRoot, "src", "testdata", "expected_variations.csv");
 
 async function wasmBytes(): Promise<ArrayBuffer> {
   const wasmFile = Bun.file(wasmPath);
@@ -145,6 +153,38 @@ test("parse mini liquidation uses forms/practitioners/free_text kinds", async ()
   expect(result.formsCsv).toBe(await Bun.file(expectedLiqForms).text());
   expect(result.practitionersCsv).toBe(await Bun.file(expectedLiqPrac).text());
   expect(result.freeTextCsv).toBe(await Bun.file(expectedLiqFt).text());
+});
+
+test("parse mini update (prod 198) uses update person columns", async () => {
+  const parser = await ChFixedWidthParser.create({ wasmBytes: await wasmBytes() });
+  const input = await Bun.file(updatePath).text();
+  const result = parser.parse(input);
+
+  expect(result.fileType).toBe(ChFileType.OfficersUpdate);
+  expect(result.companies).toBe(4);
+  expect(result.persons).toBe(9);
+  expect(result.trailerCount).toBe(13);
+  expect(result.warningCount).toBe(0);
+  expect(result.companiesCsv).toBe(await Bun.file(expectedUpdateCompanies).text());
+  expect(result.personsCsv).toBe(await Bun.file(expectedUpdatePersons).text());
+  expect(result.personsCsv.startsWith("Company Number,App Date Origin,Res Date Origin,")).toBe(true);
+});
+
+test("parse mini disqualifications (prod 192) emits four kinds", async () => {
+  const parser = await ChFixedWidthParser.create({ wasmBytes: await wasmBytes() });
+  const input = await Bun.file(disqualPath).text();
+  const result = parser.parse(input);
+
+  expect(result.fileType).toBe(ChFileType.Disqualifications);
+  expect(result.persons).toBe(3);
+  expect(result.disqualifications).toBe(3);
+  expect(result.exemptions).toBe(2);
+  expect(result.variations).toBe(1);
+  expect(result.trailerCount).toBe(9);
+  expect(result.personsCsv).toBe(await Bun.file(expectedDisqualPersons).text());
+  expect(result.disqualificationsCsv).toBe(await Bun.file(expectedDisqualifications).text());
+  expect(result.exemptionsCsv).toBe(await Bun.file(expectedExemptions).text());
+  expect(result.variationsCsv).toBe(await Bun.file(expectedVariations).text());
 });
 
 test("outputFileName stems match CLI conventions", () => {
