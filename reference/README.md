@@ -57,7 +57,7 @@ For test runs, I suggest running on a small file initially to check the output i
 
 | Parser | File | How to run | Lines of code\* |
 |--------|------|------------|----------------:|
-| Zig (native, current) | `../` (`zig build`) | `zig build -Doptimize=ReleaseFast` then `./zig-out/bin/parser <input.dat> <output_folder>` | — |
+| Zig (native, current) | `../` (`zig build`) | `zig build -Doptimize=ReleaseFast` then `./zig-out/bin/ch-fixedwidth <input.dat> <output_folder>` | — |
 | Go (fast) | `parser.go` | `go build -o parser.exe parser.go` then `.\parser.exe <input.dat> <output_folder>` | 436 |
 | Go (simple) | `simple_parser.go` | `go build -o simple_parser.exe simple_parser.go` then `.\simple_parser.exe …` | 290 |
 | Python | `parser.py` | `uv run python .\parser.py <input.dat> <output_folder>` | 177 |

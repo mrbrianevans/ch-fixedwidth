@@ -24,7 +24,7 @@ zig build wasm -Doptimize=ReleaseFast     # freestanding WASM
 zig fmt --check .
 ```
 
-CLI binary: `./zig-out/bin/parser` (or `parser.exe` on Windows).
+CLI binary: `./zig-out/bin/ch-fixedwidth` (or `ch-fixedwidth.exe` on Windows).
 
 ### Remote URL, stdin, and directory input (CLI only)
 
@@ -38,6 +38,20 @@ The native CLI accepts a local file path, a **directory** of `.dat` files, an `h
 
 WASM and the C ABI are unchanged (no network or directory fan-out).
 
+### Bulk verification (local)
+
+Full Companies House extracts are gitignored (`Prod*.dat` / `Prod*.txt`). For a release gate, convert a local copy of each product and confirm trailer match plus zero unexpected warnings:
+
+```bash
+zig build -Doptimize=ReleaseFast
+./zig-out/bin/ch-fixedwidth path/to/Prod216_….dat ./output/bulk
+./zig-out/bin/ch-fixedwidth path/to/Prod198_….dat ./output/bulk
+./zig-out/bin/ch-fixedwidth path/to/Prod192_….dat ./output/bulk
+./zig-out/bin/ch-fixedwidth path/to/Prod197_….dat ./output/bulk
+```
+
+Prod 198 trailing chevron fillers were proven empty on `Prod198_4271` (12 239 person rows). Re-run that check if the published person schema is questioned.
+
 Smoke tests:
 
 ```bash
@@ -45,16 +59,16 @@ Smoke tests:
 bun scripts/serve-testdata.ts
 # other terminal
 zig build -Doptimize=ReleaseFast
-./zig-out/bin/parser http://127.0.0.1:8765/mini_snapshot.dat ./output/remote_test
+./zig-out/bin/ch-fixedwidth http://127.0.0.1:8765/mini_snapshot.dat ./output/remote_test
 
 # Stdin stream
-./zig-out/bin/parser - ./output/stdin_test < src/testdata/mini_snapshot.dat
+./zig-out/bin/ch-fixedwidth - ./output/stdin_test < src/testdata/mini_snapshot.dat
 
 # Directory of files (each .dat → product-specific CSVs)
 mkdir -p ./output/dir_in
 cp src/testdata/mini_snapshot.dat ./output/dir_in/a.dat
 cp src/testdata/mini_snapshot.dat ./output/dir_in/b.dat
-./zig-out/bin/parser ./output/dir_in ./output/dir_out
+./zig-out/bin/ch-fixedwidth ./output/dir_in ./output/dir_out
 ```
 
 ## Library API

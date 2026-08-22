@@ -262,12 +262,13 @@ Record-type mix on that same file (illustrative): `FM`/`RN`/`NA`/`DR`/`ID` alway
 
 1. **Dispatch**: first 8 bytes `LIQNFORM`.
 2. **Form-group model**: each `FM` starts a group; the previous group is flushed when the next `FM` or the trailer is seen.
-3. **Unknown tags**: ignored for field capture but still counted toward the trailer total.
-4. **Chevrons**: `NP` rows split on `<` into Name + up to five address lines; `RE` is kept as a single registered-office string (chevrons preserved).
-5. **Dates**: data-record dates are exported as in the file (`DDMMCCYY`); header production date remains `CCYYMMDD`.
-6. **Trailer validation**: every non-header/non-trailer line counts; total must match the trailer’s 8-digit count.
-7. **CLI sequential only** (form-group state cannot be split across workers like officers products).
-8. **CSV outputs** (CLI filenames and `OutputKind` / `CH_OUTPUT_*` — never overloaded onto companies/persons):
+3. **Unknown tags**: logged as warnings (`unknown tag XX on form … company …`) and still counted toward the trailer. The run succeeds (exit 0) if the trailer matches. This is **not** a complete V4.6d per-form sequence parser.
+4. **Field overflow**: single-value slots, `NP`, `FT`, and `RE` fail closed (`CH_ERR_FIELD_OVERFLOW` / `CH_ERR_RECORD_LIMIT`); values are never truncated.
+5. **Chevrons**: `NP` rows split on `<` into Name + up to five address lines; `RE` is kept as a single registered-office string (chevrons preserved).
+6. **Dates**: data-record dates are exported as in the file (`DDMMCCYY`); header production date remains `CCYYMMDD`.
+7. **Trailer validation**: every non-header/non-trailer line counts; total must match the trailer’s 8-digit count.
+8. **CLI sequential only** (form-group state cannot be split across workers like officers products).
+9. **CSV outputs** (CLI filenames and `OutputKind` / `CH_OUTPUT_*` — never overloaded onto companies/persons):
 
 | CLI file | Output kind | Content |
 |----------|-------------|---------|

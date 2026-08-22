@@ -1,7 +1,7 @@
 const std = @import("std");
 
 /// Keep in sync with `build.zig.zon`, `CHANGELOG.md`, and package.json versions.
-const library_version = "0.1.0";
+const library_version = "0.2.0";
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});

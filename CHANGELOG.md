@@ -5,6 +5,33 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] — 2026-08-22
+
+Last breaking 0.x cut on the path to a freezeable 1.0 ([issue #8](https://github.com/mrbrianevans/ch-fixedwidth/issues/8)).
+
+### Added
+
+- CLI `--help` / `-h` and `--version` / `-V` from `libraryInfo()` (semver + git SHA)
+- Kind-indexed `ChParseResult` / `ChStreamStats` (`CH_MAX_OUTPUT_KINDS` = 16) so a later product can add a CSV kind without growing the struct
+- `warning_count` and `last_warning` on parse results and stream stats; CLI prints each warning to stderr
+- Fail-closed unknown officers/disqualification type bytes and extra data after a trailer
+- Prod 197 unknown tags: warn (tag + form + company) and continue; field overflow fails
+- UTF-8 character-offset goldens; wasm-ts tests for products 192 and 198
+- `docs/stability.md`, `CONTRIBUTING.md`
+
+### Changed
+
+- **Breaking:** CLI binary and release assets renamed `parser` → `ch-fixedwidth`
+- **Breaking:** C/WASM/TS one-shot result and stream stats are kind-indexed arrays, not eight named fields
+- Prod 198 person schema is documented as distinct from snapshot 195/216; non-empty trailing chevron fillers fail the parse
+- Adding a product in 1.x is an additive minor (append a kind id); renumbering kinds or changing existing CSV columns is a major
+
+### Notes
+
+- `@ch-fixedwidth/wasm-ts` remains private; publish later against this ABI
+- Prod 197 is tag-driven, not a complete V4.6d sequence parser
+- Exit 0 on 197 still allows unknown-tag warnings
+
 ## [0.1.0] — 2026-08-01
 
 Multi-product release of **ch-fixedwidth**. Breaking C/WASM/TypeScript API cleanup so output kinds are never overloaded across products.

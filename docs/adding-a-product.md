@@ -52,7 +52,7 @@ Before writing code, gather a complete specification. Incomplete specs are the u
 | **Expected CSVs** | Golden files for each output kind (headers + rows). |
 | **Optional large sample** | Local-only for perf; gitignored `*.dat` is fine. |
 
-If the format is only partially documented, prefer documenting unknowns in `docs/ProdNNN_….md` and fail closed (skip unknown lines only when the trailer definition still matches).
+If the format is only partially documented, prefer documenting unknowns in `docs/ProdNNN_….md` and fail closed. Prod 197 is the exception: unknown tags warn and continue (see [stability.md](stability.md)).
 
 ---
 
@@ -95,7 +95,7 @@ Hosts must not invent product logic: they consume `OutputKind` batches / `ParseR
 - **Reuse** only when the **same semantic entity and compatible columns** already exist (e.g. another officers-like persons table with the same or deliberately extended schema documented as such).
 - **Add a new kind** when the table is a different entity or incompatible schema (e.g. forms ≠ companies). Never map “roughly similar” data into the wrong name.
 
-New kinds require **breaking** C/WASM/TS layout updates (`ChParseResult`, `ChStreamStats`, enums). That is acceptable on a minor version bump; document it in `CHANGELOG.md`.
+New kinds are **additive minors** in 1.x: append a `CH_OUTPUT_*` id and fill the corresponding slot in the kind-indexed `counts` / `csv` tables (`CH_MAX_OUTPUT_KINDS` = 16). Do not renumber existing ids. Growing the cap, or changing CSV columns for an existing kind, is a **major**. See [stability.md](stability.md).
 
 ### 3.2 Sequential vs parallel CLI path
 
@@ -153,15 +153,15 @@ Usually **no product-specific code**: `parseDocument` already feeds `Stream` and
 
 ### Phase F — C ABI and WASM
 
-1. `include/ch_fixedwidth.h`: `CH_FILE_*` and any new `CH_OUTPUT_*`; document filled fields in `ChParseResult` / `ChStreamStats` and the `ch_library_info` / `ch_supported_formats` tables.
-2. `src/c_api.zig`: keep `extern struct` layouts in sync (counts then buffers). **wasm32 layout sizes must match** what TypeScript reads. The `c_supported_formats_table` is rebuilt from `parse.supported_formats`; version/git come from `build_options`.
+1. `include/ch_fixedwidth.h`: append `CH_FILE_*` / `CH_OUTPUT_*` (do not renumber). Fill `counts[kind]` / `csv[kind]`; unused slots stay zero/empty.
+2. `src/c_api.zig`: keep `extern struct` layouts in sync. **wasm32 layout sizes must match** what TypeScript reads. Compile-time assert `OutputKind.all.len <= CH_MAX_OUTPUT_KINDS`.
 3. Rebuild: `zig build test` and `zig build wasm -Doptimize=ReleaseFast`.
 
 ### Phase G — TypeScript host (`wasm-ts/`)
 
 1. `ChFileType` / `ChOutputKind` and `csvBatchKindFromCode`.
 2. `outputFileStem` / `outputKindsForFileType`; `ChFixedWidthParser.libraryInfo()` / `supportedFormats()` read the WASM catalogue.
-3. `ParseResult` / `StreamStats` fields; **struct byte offsets** in `parser.ts` / `stream.ts` if the C layout grew.
+3. `ParseResult` / `StreamStats` named aliases and `csvBatchKindFromCode`; kind-indexed `counts[]` already has spare slots up to `CH_MAX_OUTPUT_KINDS`.
 4. Local CLI already writes by batch kind; confirm new kinds get correct filenames.
 5. Tests against the mini fixture (one-shot and tiny-chunk stream).
 
@@ -201,7 +201,7 @@ zig build test
 zig build wasm -Doptimize=ReleaseFast
 cd wasm-ts && bun test
 # optional
-./zig-out/bin/parser src/testdata/mini_<name>.dat ./output/manual
+./zig-out/bin/ch-fixedwidth src/testdata/mini_<name>.dat ./output/manual
 ```
 
 Correctness beats performance. Optimise only after golden fixtures match.
