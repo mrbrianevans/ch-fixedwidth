@@ -17,72 +17,39 @@ pub const ParseError = error{
     OutOfMemory,
     RowTooLarge,
     RecordLimitExceeded,
+    UnknownRecord,
+    FieldOverflow,
+    FeedAfterTrailer,
 };
 
 /// In-memory CSV outputs for a parsed bulk file.
 ///
-/// Unused kinds have empty CSV slices and zero row counts. Products map as:
-/// - Officers (195/216/198): companies + persons
-/// - Disqualifications (192): persons + disqualifications + exemptions + variations
-/// - Liquidation (197): forms + practitioners + free_text
+/// Kind-indexed: `csvs[kind.index()]` / `counts[kind.index()]`. Unused kinds
+/// have empty CSV slices and zero row counts.
 pub const ParseResult = struct {
     file_type: parse.FileType,
     trailer_count: i32,
+    warning_count: i32 = 0,
+    last_warning: [256]u8 = [_]u8{0} ** 256,
 
-    companies_csv: []u8,
-    persons_csv: []u8,
-    disqualifications_csv: []u8,
-    exemptions_csv: []u8,
-    variations_csv: []u8,
-    forms_csv: []u8,
-    practitioners_csv: []u8,
-    free_text_csv: []u8,
-
-    companies: i32,
-    persons: i32,
-    disqualifications: i32,
-    exemptions: i32,
-    variations: i32,
-    forms: i32,
-    practitioners: i32,
-    free_text: i32,
+    csvs: [parse.OutputKind.all.len][]u8,
+    counts: [parse.OutputKind.all.len]i32,
 
     pub fn deinit(self: *ParseResult, allocator: std.mem.Allocator) void {
-        allocator.free(self.companies_csv);
-        allocator.free(self.persons_csv);
-        allocator.free(self.disqualifications_csv);
-        allocator.free(self.exemptions_csv);
-        allocator.free(self.variations_csv);
-        allocator.free(self.forms_csv);
-        allocator.free(self.practitioners_csv);
-        allocator.free(self.free_text_csv);
+        for (self.csvs) |slice| allocator.free(slice);
         self.* = undefined;
     }
 
     pub fn csv(self: *const ParseResult, kind: parse.OutputKind) []const u8 {
-        return switch (kind) {
-            .companies => self.companies_csv,
-            .persons => self.persons_csv,
-            .disqualifications => self.disqualifications_csv,
-            .exemptions => self.exemptions_csv,
-            .variations => self.variations_csv,
-            .forms => self.forms_csv,
-            .practitioners => self.practitioners_csv,
-            .free_text => self.free_text_csv,
-        };
+        return self.csvs[kind.index()];
     }
 
     pub fn rowCount(self: *const ParseResult, kind: parse.OutputKind) i32 {
-        return switch (kind) {
-            .companies => self.companies,
-            .persons => self.persons,
-            .disqualifications => self.disqualifications,
-            .exemptions => self.exemptions,
-            .variations => self.variations,
-            .forms => self.forms,
-            .practitioners => self.practitioners,
-            .free_text => self.free_text,
-        };
+        return self.counts[kind.index()];
+    }
+
+    pub fn lastWarningSlice(self: *const ParseResult) []const u8 {
+        return std.mem.sliceTo(&self.last_warning, 0);
     }
 };
 
@@ -95,17 +62,11 @@ fn mapStreamErr(err: stream_mod.ParseError) ParseError {
         error.OutOfMemory => error.OutOfMemory,
         error.RowTooLarge => error.RowTooLarge,
         error.RecordLimitExceeded => error.RecordLimitExceeded,
-        // One-shot never leaves the stream mid-finish in these states.
-        error.AlreadyFinished, error.FeedAfterTrailer => error.UnsupportedFileType,
+        error.UnknownRecord => error.UnknownRecord,
+        error.FieldOverflow => error.FieldOverflow,
+        error.FeedAfterTrailer => error.FeedAfterTrailer,
+        error.AlreadyFinished => error.UnsupportedFileType,
     };
-}
-
-fn csvOf(slices: *const [parse.OutputKind.all.len][]u8, kind: parse.OutputKind) []u8 {
-    return slices[kind.index()];
-}
-
-fn countOf(counts: *const [parse.OutputKind.all.len]i32, kind: parse.OutputKind) i32 {
-    return counts[kind.index()];
 }
 
 /// Parse a full fixed-width buffer into named CSV outputs.
@@ -157,24 +118,15 @@ pub fn parseDocument(allocator: std.mem.Allocator, input: []const u8) ParseError
     // Ownership of slices moves into the result; cancel slice errdefer.
     n_owned = 0;
 
+    var last_warning: [256]u8 = [_]u8{0} ** 256;
+    last_warning = s.last_warning;
+
     return .{
         .file_type = file_type,
         .trailer_count = trailer_count,
-        .companies_csv = csvOf(&slices, .companies),
-        .persons_csv = csvOf(&slices, .persons),
-        .disqualifications_csv = csvOf(&slices, .disqualifications),
-        .exemptions_csv = csvOf(&slices, .exemptions),
-        .variations_csv = csvOf(&slices, .variations),
-        .forms_csv = csvOf(&slices, .forms),
-        .practitioners_csv = csvOf(&slices, .practitioners),
-        .free_text_csv = csvOf(&slices, .free_text),
-        .companies = countOf(&counts, .companies),
-        .persons = countOf(&counts, .persons),
-        .disqualifications = countOf(&counts, .disqualifications),
-        .exemptions = countOf(&counts, .exemptions),
-        .variations = countOf(&counts, .variations),
-        .forms = countOf(&counts, .forms),
-        .practitioners = countOf(&counts, .practitioners),
-        .free_text = countOf(&counts, .free_text),
+        .warning_count = s.warning_count,
+        .last_warning = last_warning,
+        .csvs = slices,
+        .counts = counts,
     };
 }

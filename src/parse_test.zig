@@ -186,6 +186,20 @@ test "appendField quotes commas and doubles quotes" {
     try std.testing.expectEqualStrings("\"a,b\"\"c\"", dest[0..n]);
 }
 
+test "sliceChars uses Unicode character offsets for multi-byte UTF-8" {
+    const s = "CAFÉ LTD";
+    try std.testing.expectEqualStrings("É", parse.sliceChars(s, 3, 4));
+    try std.testing.expectEqualStrings("CAFÉ", parse.sliceChars(s, 0, 4));
+}
+
+test "formatCompanyRow exports a multi-byte UTF-8 company name" {
+    // Name length is 9 characters: C A F É   L T D <
+    const row = "029052131D                      00010009CAFÉ LTD<";
+    var dest: [parse.max_csv_row_bytes]u8 = undefined;
+    const n = try parse.formatCompanyRow(&dest, row);
+    try std.testing.expectEqualStrings("02905213,D,1,CAFÉ LTD\n", dest[0..n]);
+}
+
 test "appendField and formatCompanyRow reject undersized dest" {
     var tiny: [4]u8 = undefined;
     try std.testing.expectError(error.RowTooLarge, parse.appendField(&tiny, 0, "hello"));
@@ -198,12 +212,13 @@ test "parseDocument mini fixture matches expected CSV" {
     var result = try document.parseDocument(allocator, mini_snapshot);
     defer result.deinit(allocator);
 
-    try std.testing.expectEqual(@as(i32, 2), result.companies);
-    try std.testing.expectEqual(@as(i32, 3), result.persons);
+    try std.testing.expectEqual(@as(i32, 2), result.rowCount(.companies));
+    try std.testing.expectEqual(@as(i32, 3), result.rowCount(.persons));
     try std.testing.expectEqual(@as(i32, 5), result.trailer_count);
+    try std.testing.expectEqual(@as(i32, 0), result.warning_count);
 
-    try std.testing.expectEqualStrings(expected_companies, result.companies_csv);
-    try std.testing.expectEqualStrings(expected_persons, result.persons_csv);
+    try std.testing.expectEqualStrings(expected_companies, result.csv(.companies));
+    try std.testing.expectEqualStrings(expected_persons, result.csv(.persons));
 }
 
 test "parseDocument trailer mismatch" {
@@ -242,12 +257,18 @@ test "parseDocument mini update fixture matches expected CSV" {
     var result = try document.parseDocument(allocator, mini_update);
     defer result.deinit(allocator);
 
-    try std.testing.expectEqual(@as(i32, 4), result.companies);
-    try std.testing.expectEqual(@as(i32, 9), result.persons);
+    try std.testing.expectEqual(@as(i32, 4), result.rowCount(.companies));
+    try std.testing.expectEqual(@as(i32, 9), result.rowCount(.persons));
     try std.testing.expectEqual(@as(i32, 13), result.trailer_count);
 
-    try std.testing.expectEqualStrings(expected_update_companies, result.companies_csv);
-    try std.testing.expectEqualStrings(expected_update_persons, result.persons_csv);
+    try std.testing.expectEqualStrings(expected_update_companies, result.csv(.companies));
+    try std.testing.expectEqualStrings(expected_update_persons, result.csv(.persons));
+}
+
+test "formatUpdatePersonRow fails when a trailing chevron filler is non-empty" {
+    const row = "0426797621     0101186084280001186084280003196906                  TR27 5ET20100329        20260724202607240150MR<WARREN<DIXON<<<<ADDR<<TOWN<COUNTY<ENGLAND<MANAGER<BRITISH<UK<NOPE<<<<<<<<<<<";
+    var dest: [parse.max_csv_row_bytes]u8 = undefined;
+    try std.testing.expectError(error.ExtraChevronData, parse.formatUpdatePersonRow(&dest, row));
 }
 
 test "formatUpdatePersonRow extracts fixed and chevron fields" {
@@ -263,12 +284,42 @@ test "formatUpdatePersonRow extracts fixed and chevron fields" {
     try std.testing.expect(csv[csv.len - 1] == '\n');
 }
 
+test "LiqForm applyRecord reports unknown tags and fails on field overflow" {
+    var form: parse.LiqForm = .{};
+    try std.testing.expectEqual(parse.LiqForm.Apply.applied, try form.applyRecord("FM600"));
+    try std.testing.expectEqual(parse.LiqForm.Apply.unknown_tag, try form.applyRecord("ZZNOTAREALTAG"));
+
+    var long: [104]u8 = undefined;
+    long[0] = 'N';
+    long[1] = 'A';
+    @memset(long[2..], 'X');
+    try std.testing.expectError(error.FieldOverflow, form.applyRecord(&long));
+}
+
+test "parseDocument warns on unknown liquidation tag and still succeeds" {
+    const input =
+        \\LIQNFORM000120260731
+        \\FM600
+        \\RN00777722
+        \\ZZWEIRD
+        \\9999999900000003
+        \\
+    ;
+    var result = try document.parseDocument(std.testing.allocator, input);
+    defer result.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(i32, 1), result.warning_count);
+    try std.testing.expect(std.mem.indexOf(u8, result.lastWarningSlice(), "ZZ") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.lastWarningSlice(), "600") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.lastWarningSlice(), "00777722") != null);
+    try std.testing.expectEqual(@as(i32, 1), result.rowCount(.forms));
+}
+
 test "LiqForm applyRecord fails when practitioner limit exceeded" {
     var form: parse.LiqForm = .{};
-    try form.applyRecord("FM0001");
+    _ = try form.applyRecord("FM0001");
     var i: usize = 0;
     while (i < parse.liq_max_practitioners) : (i += 1) {
-        try form.applyRecord("NPNAME<ADDR");
+        _ = try form.applyRecord("NPNAME<ADDR");
     }
     try std.testing.expectError(error.RecordLimitExceeded, form.applyRecord("NPONE MORE"));
 }
@@ -302,16 +353,16 @@ test "parseDocument mini disqual fixture matches expected CSV" {
     var result = try document.parseDocument(allocator, mini_disqual);
     defer result.deinit(allocator);
 
-    try std.testing.expectEqual(@as(i32, 3), result.persons);
-    try std.testing.expectEqual(@as(i32, 3), result.disqualifications);
-    try std.testing.expectEqual(@as(i32, 2), result.exemptions);
-    try std.testing.expectEqual(@as(i32, 1), result.variations);
+    try std.testing.expectEqual(@as(i32, 3), result.rowCount(.persons));
+    try std.testing.expectEqual(@as(i32, 3), result.rowCount(.disqualifications));
+    try std.testing.expectEqual(@as(i32, 2), result.rowCount(.exemptions));
+    try std.testing.expectEqual(@as(i32, 1), result.rowCount(.variations));
     try std.testing.expectEqual(@as(i32, 9), result.trailer_count);
 
-    try std.testing.expectEqualStrings(expected_disqual_persons, result.persons_csv);
-    try std.testing.expectEqualStrings(expected_disqualifications, result.disqualifications_csv);
-    try std.testing.expectEqualStrings(expected_exemptions, result.exemptions_csv);
-    try std.testing.expectEqualStrings(expected_variations, result.variations_csv);
+    try std.testing.expectEqualStrings(expected_disqual_persons, result.csv(.persons));
+    try std.testing.expectEqualStrings(expected_disqualifications, result.csv(.disqualifications));
+    try std.testing.expectEqualStrings(expected_exemptions, result.csv(.exemptions));
+    try std.testing.expectEqualStrings(expected_variations, result.csv(.variations));
 }
 
 test "stream matches snapshot on mini disqual with tiny chunks" {
@@ -385,15 +436,15 @@ test "parseDocument mini liquidation fixture matches expected CSV" {
     defer result.deinit(allocator);
 
     try std.testing.expectEqual(parse.FileType.liquidation, result.file_type);
-    try std.testing.expectEqual(@as(i32, 8), result.forms);
-    try std.testing.expectEqual(@as(i32, 7), result.practitioners);
-    try std.testing.expectEqual(@as(i32, 3), result.free_text);
-    try std.testing.expectEqual(@as(i32, 0), result.companies);
+    try std.testing.expectEqual(@as(i32, 8), result.rowCount(.forms));
+    try std.testing.expectEqual(@as(i32, 7), result.rowCount(.practitioners));
+    try std.testing.expectEqual(@as(i32, 3), result.rowCount(.free_text));
+    try std.testing.expectEqual(@as(i32, 0), result.rowCount(.companies));
     try std.testing.expectEqual(@as(i32, 61), result.trailer_count);
 
-    try std.testing.expectEqualStrings(expected_liq_forms, result.forms_csv);
-    try std.testing.expectEqualStrings(expected_liq_practitioners, result.practitioners_csv);
-    try std.testing.expectEqualStrings(expected_liq_free_text, result.free_text_csv);
+    try std.testing.expectEqualStrings(expected_liq_forms, result.csv(.forms));
+    try std.testing.expectEqualStrings(expected_liq_practitioners, result.csv(.practitioners));
+    try std.testing.expectEqualStrings(expected_liq_free_text, result.csv(.free_text));
 }
 
 test "stream matches document on mini liquidation with tiny chunks" {
@@ -450,14 +501,15 @@ test "C ABI ch_parse on mini fixture" {
 
     try std.testing.expectEqual(c_api.CH_OK, rc);
     try std.testing.expectEqual(@as(i32, c_api.CH_FILE_OFFICERS_SNAPSHOT), out.file_type);
-    try std.testing.expectEqual(@as(i32, 2), out.companies);
-    try std.testing.expectEqual(@as(i32, 3), out.persons);
+    try std.testing.expectEqual(@as(i32, 2), out.counts[@intCast(c_api.CH_OUTPUT_COMPANIES)]);
+    try std.testing.expectEqual(@as(i32, 3), out.counts[@intCast(c_api.CH_OUTPUT_PERSONS)]);
     try std.testing.expectEqual(@as(i32, 5), out.trailer_count);
-    try std.testing.expectEqual(@as(i32, 0), out.forms);
-    try std.testing.expect(out.companies_csv.data != null);
-    try std.testing.expect(out.persons_csv.data != null);
-    try std.testing.expect(out.companies_csv.len > 0);
-    try std.testing.expect(out.persons_csv.len > 0);
+    try std.testing.expectEqual(@as(i32, 0), out.counts[@intCast(c_api.CH_OUTPUT_FORMS)]);
+    try std.testing.expectEqual(@as(i32, 0), out.warning_count);
+    try std.testing.expect(out.csv[@intCast(c_api.CH_OUTPUT_COMPANIES)].data != null);
+    try std.testing.expect(out.csv[@intCast(c_api.CH_OUTPUT_PERSONS)].data != null);
+    try std.testing.expect(out.csv[@intCast(c_api.CH_OUTPUT_COMPANIES)].len > 0);
+    try std.testing.expect(out.csv[@intCast(c_api.CH_OUTPUT_PERSONS)].len > 0);
 }
 
 test "C ABI rejects null args" {
@@ -582,9 +634,10 @@ test "C ABI stream feed/finish on mini fixture" {
     var stats: c_api.ChStreamStats = .{};
     c_api.ch_stream_stats(s, &stats);
     try std.testing.expectEqual(@as(i32, c_api.CH_FILE_OFFICERS_SNAPSHOT), stats.file_type);
-    try std.testing.expectEqual(@as(i32, 2), stats.companies);
-    try std.testing.expectEqual(@as(i32, 3), stats.persons);
+    try std.testing.expectEqual(@as(i32, 2), stats.counts[@intCast(c_api.CH_OUTPUT_COMPANIES)]);
+    try std.testing.expectEqual(@as(i32, 3), stats.counts[@intCast(c_api.CH_OUTPUT_PERSONS)]);
     try std.testing.expectEqual(@as(i32, 5), stats.trailer_count);
+    try std.testing.expectEqual(@as(i32, 0), stats.warning_count);
 
     var got_companies: usize = 0;
     var got_persons: usize = 0;
@@ -602,4 +655,61 @@ test "C ABI stream feed/finish on mini fixture" {
     }
     try std.testing.expectEqual(@as(usize, 2), got_companies);
     try std.testing.expectEqual(@as(usize, 3), got_persons);
+}
+
+test "officers unknown type byte fails the parse" {
+    const bad =
+        \\DDDDSNAP425720260706
+        \\029052131D                      00010013WGFA LIMITED<
+        \\02905213X302900006800001Y       19940307
+        \\9999999900000002
+        \\
+    ;
+    try std.testing.expectError(error.UnknownRecord, document.parseDocument(std.testing.allocator, bad));
+}
+
+test "extra data after officers trailer fails the parse" {
+    const bad =
+        \\DDDDSNAP425720260706
+        \\029052131D                      00010013WGFA LIMITED<
+        \\9999999900000001
+        \\GARBAGE
+        \\
+    ;
+    try std.testing.expectError(error.FeedAfterTrailer, document.parseDocument(std.testing.allocator, bad));
+}
+
+test "disqual unknown type byte fails the parse" {
+    const bad =
+        \\DISQUALS000120240501
+        \\9NOTAREALRECORD
+        \\DISQUALS/00000000/00000000/00000000/00000000/00000000
+        \\
+    ;
+    try std.testing.expectError(error.UnknownRecord, document.parseDocument(std.testing.allocator, bad));
+}
+
+test "stream warn records count and last message" {
+    const allocator = std.testing.allocator;
+    var s = stream_mod.Stream.init(allocator, .{});
+    defer s.deinit();
+    s.warn("unknown tag ZZ on form 600 company 00777722");
+    s.warn("second");
+    try std.testing.expectEqual(@as(i32, 2), s.warning_count);
+    try std.testing.expectEqualStrings("second", s.lastWarningSlice());
+}
+
+test "C ABI kind-indexed layout: counts start at 16, csv at 80" {
+    try std.testing.expectEqual(@as(usize, 0), @offsetOf(c_api.ChParseResult, "file_type"));
+    try std.testing.expectEqual(@as(usize, 4), @offsetOf(c_api.ChParseResult, "trailer_count"));
+    try std.testing.expectEqual(@as(usize, 8), @offsetOf(c_api.ChParseResult, "warning_count"));
+    try std.testing.expectEqual(@as(usize, 12), @offsetOf(c_api.ChParseResult, "reserved"));
+    try std.testing.expectEqual(@as(usize, 16), @offsetOf(c_api.ChParseResult, "counts"));
+    try std.testing.expectEqual(@as(usize, 80), @offsetOf(c_api.ChParseResult, "csv"));
+    try std.testing.expectEqual(
+        @offsetOf(c_api.ChParseResult, "csv") + @sizeOf([c_api.CH_MAX_OUTPUT_KINDS]c_api.ChBuffer),
+        @offsetOf(c_api.ChParseResult, "last_warning"),
+    );
+    try std.testing.expectEqual(@as(usize, 16), @offsetOf(c_api.ChStreamStats, "counts"));
+    try std.testing.expectEqual(@as(usize, 80), @offsetOf(c_api.ChStreamStats, "last_warning"));
 }

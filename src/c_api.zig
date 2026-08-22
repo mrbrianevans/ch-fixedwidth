@@ -55,7 +55,7 @@ pub const ChLibraryInfo = extern struct {
     format_count: usize = 0,
 };
 
-/// Output kind; matches `parse.OutputKind` / `CH_OUTPUT_*`.
+/// Output kind; matches `parse.OutputKind` / `CH_OUTPUT_*`. Append-only.
 pub const CH_OUTPUT_COMPANIES: i32 = 0;
 pub const CH_OUTPUT_PERSONS: i32 = 1;
 pub const CH_OUTPUT_DISQUALIFICATIONS: i32 = 2;
@@ -65,27 +65,35 @@ pub const CH_OUTPUT_FORMS: i32 = 5;
 pub const CH_OUTPUT_PRACTITIONERS: i32 = 6;
 pub const CH_OUTPUT_FREE_TEXT: i32 = 7;
 
-/// One-shot parse result. Unused product outputs are empty buffers / zero counts.
-/// Layout: counts first (fixed), then CSV buffers (pointer-sized).
+/// Kind-indexed table capacity. Matches `CH_MAX_OUTPUT_KINDS`.
+pub const CH_MAX_OUTPUT_KINDS: usize = 16;
+pub const CH_WARNING_MESSAGE_MAX: usize = 256;
+
+comptime {
+    if (parse.OutputKind.all.len > CH_MAX_OUTPUT_KINDS) {
+        @compileError("OutputKind catalogue exceeds CH_MAX_OUTPUT_KINDS");
+    }
+}
+
+fn copyWarning(dest: *[CH_WARNING_MESSAGE_MAX]u8, src: []const u8) void {
+    dest.* = [_]u8{0} ** CH_WARNING_MESSAGE_MAX;
+    const n = @min(src.len, CH_WARNING_MESSAGE_MAX - 1);
+    if (n > 0) @memcpy(dest.*[0..n], src[0..n]);
+}
+
+fn warningSlice(buf: *const [CH_WARNING_MESSAGE_MAX]u8) []const u8 {
+    return std.mem.sliceTo(buf, 0);
+}
+
+/// One-shot parse result. Kind-indexed counts/csv; unused slots empty.
 pub const ChParseResult = extern struct {
     file_type: i32 = CH_FILE_UNKNOWN,
     trailer_count: i32 = 0,
-    companies: i32 = 0,
-    persons: i32 = 0,
-    disqualifications: i32 = 0,
-    exemptions: i32 = 0,
-    variations: i32 = 0,
-    forms: i32 = 0,
-    practitioners: i32 = 0,
-    free_text: i32 = 0,
-    companies_csv: ChBuffer = .{},
-    persons_csv: ChBuffer = .{},
-    disqualifications_csv: ChBuffer = .{},
-    exemptions_csv: ChBuffer = .{},
-    variations_csv: ChBuffer = .{},
-    forms_csv: ChBuffer = .{},
-    practitioners_csv: ChBuffer = .{},
-    free_text_csv: ChBuffer = .{},
+    warning_count: i32 = 0,
+    reserved: i32 = 0,
+    counts: [CH_MAX_OUTPUT_KINDS]i32 = [_]i32{0} ** CH_MAX_OUTPUT_KINDS,
+    csv: [CH_MAX_OUTPUT_KINDS]ChBuffer = [_]ChBuffer{.{}} ** CH_MAX_OUTPUT_KINDS,
+    last_warning: [CH_WARNING_MESSAGE_MAX]u8 = [_]u8{0} ** CH_WARNING_MESSAGE_MAX,
 };
 
 pub const ChStreamConfig = extern struct {
@@ -103,18 +111,14 @@ pub const ChCsvBatch = extern struct {
     kind: i32 = 0,
 };
 
-/// Streaming row counts and product id after header is known.
+/// Streaming row counts, warnings, and product id after header is known.
 pub const ChStreamStats = extern struct {
     file_type: i32 = CH_FILE_UNKNOWN,
     trailer_count: i32 = 0,
-    companies: i32 = 0,
-    persons: i32 = 0,
-    disqualifications: i32 = 0,
-    exemptions: i32 = 0,
-    variations: i32 = 0,
-    forms: i32 = 0,
-    practitioners: i32 = 0,
-    free_text: i32 = 0,
+    warning_count: i32 = 0,
+    reserved: i32 = 0,
+    counts: [CH_MAX_OUTPUT_KINDS]i32 = [_]i32{0} ** CH_MAX_OUTPUT_KINDS,
+    last_warning: [CH_WARNING_MESSAGE_MAX]u8 = [_]u8{0} ** CH_WARNING_MESSAGE_MAX,
 };
 
 // Error codes for C callers (stable ABI).
@@ -133,6 +137,10 @@ pub const CH_ERR_NOT_IMPLEMENTED: c_int = 8;
 pub const CH_ERR_ROW_TOO_LARGE: c_int = 9;
 /// Prod 197 form group exceeded max practitioners or free-text lines.
 pub const CH_ERR_RECORD_LIMIT: c_int = 10;
+/// Unknown record type / unclassified body line.
+pub const CH_ERR_UNKNOWN_RECORD: c_int = 11;
+/// Field longer than its fixed slot (no silent truncation).
+pub const CH_ERR_FIELD_OVERFLOW: c_int = 12;
 
 fn gpa() std.mem.Allocator {
     if (comptime builtin.cpu.arch.isWasm()) {
@@ -151,6 +159,8 @@ fn mapStreamErr(err: stream_mod.ParseError) c_int {
         error.AlreadyFinished, error.FeedAfterTrailer => CH_ERR_STREAM_STATE,
         error.RowTooLarge => CH_ERR_ROW_TOO_LARGE,
         error.RecordLimitExceeded => CH_ERR_RECORD_LIMIT,
+        error.UnknownRecord => CH_ERR_UNKNOWN_RECORD,
+        error.FieldOverflow => CH_ERR_FIELD_OVERFLOW,
     };
 }
 
@@ -225,14 +235,7 @@ pub export fn ch_library_info() *const ChLibraryInfo {
 /// Free all CSV buffers in a parse result.
 pub export fn ch_parse_result_free(result: ?*ChParseResult) void {
     if (result) |r| {
-        freeBuffer(&r.companies_csv);
-        freeBuffer(&r.persons_csv);
-        freeBuffer(&r.disqualifications_csv);
-        freeBuffer(&r.exemptions_csv);
-        freeBuffer(&r.variations_csv);
-        freeBuffer(&r.forms_csv);
-        freeBuffer(&r.practitioners_csv);
-        freeBuffer(&r.free_text_csv);
+        for (&r.csv) |*buf| freeBuffer(buf);
         r.* = .{};
     }
 }
@@ -262,27 +265,22 @@ pub export fn ch_parse(
             error.OutOfMemory => CH_ERR_OUT_OF_MEMORY,
             error.RowTooLarge => CH_ERR_ROW_TOO_LARGE,
             error.RecordLimitExceeded => CH_ERR_RECORD_LIMIT,
+            error.UnknownRecord => CH_ERR_UNKNOWN_RECORD,
+            error.FieldOverflow => CH_ERR_FIELD_OVERFLOW,
+            error.FeedAfterTrailer => CH_ERR_STREAM_STATE,
         };
     };
 
     result.file_type = @intFromEnum(parsed.file_type);
     result.trailer_count = parsed.trailer_count;
-    result.companies = parsed.companies;
-    result.persons = parsed.persons;
-    result.disqualifications = parsed.disqualifications;
-    result.exemptions = parsed.exemptions;
-    result.variations = parsed.variations;
-    result.forms = parsed.forms;
-    result.practitioners = parsed.practitioners;
-    result.free_text = parsed.free_text;
-    result.companies_csv = bufferFromSlice(parsed.companies_csv);
-    result.persons_csv = bufferFromSlice(parsed.persons_csv);
-    result.disqualifications_csv = bufferFromSlice(parsed.disqualifications_csv);
-    result.exemptions_csv = bufferFromSlice(parsed.exemptions_csv);
-    result.variations_csv = bufferFromSlice(parsed.variations_csv);
-    result.forms_csv = bufferFromSlice(parsed.forms_csv);
-    result.practitioners_csv = bufferFromSlice(parsed.practitioners_csv);
-    result.free_text_csv = bufferFromSlice(parsed.free_text_csv);
+    result.warning_count = parsed.warning_count;
+    result.reserved = 0;
+    copyWarning(&result.last_warning, parsed.lastWarningSlice());
+    for (parse.OutputKind.all) |kind| {
+        const i = kind.index();
+        result.counts[i] = parsed.rowCount(kind);
+        result.csv[i] = bufferFromSlice(parsed.csvs[i]);
+    }
     return CH_OK;
 }
 
@@ -373,16 +371,15 @@ pub export fn ch_csv_batch_free(batch: ?*ChCsvBatch) void {
 pub export fn ch_stream_stats(s: ?*const stream_mod.Stream, out: ?*ChStreamStats) void {
     if (s == null or out == null) return;
     const stream = s.?;
-    out.?.* = .{
+    var stats: ChStreamStats = .{
         .file_type = if (stream.file_type) |ft| @intFromEnum(ft) else CH_FILE_UNKNOWN,
         .trailer_count = stream.trailer_count orelse 0,
-        .companies = stream.countOf(.companies),
-        .persons = stream.countOf(.persons),
-        .disqualifications = stream.countOf(.disqualifications),
-        .exemptions = stream.countOf(.exemptions),
-        .variations = stream.countOf(.variations),
-        .forms = stream.countOf(.forms),
-        .practitioners = stream.countOf(.practitioners),
-        .free_text = stream.countOf(.free_text),
+        .warning_count = stream.warning_count,
+        .reserved = 0,
     };
+    copyWarning(&stats.last_warning, warningSlice(&stream.last_warning));
+    for (parse.OutputKind.all) |kind| {
+        stats.counts[kind.index()] = stream.countOf(kind);
+    }
+    out.?.* = stats;
 }

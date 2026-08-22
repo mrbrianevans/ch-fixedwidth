@@ -70,13 +70,13 @@ jobs:
           if [[ "${{ runner.os }}" == "Windows" ]]; then
             EXT=".exe"
           fi
-          if [[ -f "zig-out/bin/parser${EXT}" ]]; then
-            echo "zig-out/bin/parser${EXT}" > .zig_bin
-          elif [[ -f zig-out/bin/parser ]]; then
-            chmod +x zig-out/bin/parser
-            echo "zig-out/bin/parser" > .zig_bin
+          if [[ -f "zig-out/bin/ch-fixedwidth${EXT}" ]]; then
+            echo "zig-out/bin/ch-fixedwidth${EXT}" > .zig_bin
+          elif [[ -f zig-out/bin/ch-fixedwidth ]]; then
+            chmod +x zig-out/bin/ch-fixedwidth
+            echo "zig-out/bin/ch-fixedwidth" > .zig_bin
           else
-            echo "parser binary missing" >&2
+            echo "ch-fixedwidth binary missing" >&2
             ls -laR zig-out || true
             exit 1
           fi

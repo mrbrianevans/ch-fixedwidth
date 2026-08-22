@@ -14,6 +14,10 @@ export const ChErrorCode = {
   RowTooLarge: 9,
   /** Prod 197 form group exceeded max practitioners or free-text lines. */
   RecordLimit: 10,
+  /** Unknown record type / unclassified body line. */
+  UnknownRecord: 11,
+  /** Field longer than its fixed slot. */
+  FieldOverflow: 12,
 } as const;
 
 export type ChErrorCode = (typeof ChErrorCode)[keyof typeof ChErrorCode];
@@ -29,7 +33,7 @@ export const ChFileType = {
 
 export type ChFileType = (typeof ChFileType)[keyof typeof ChFileType];
 
-/** CSV output channel (`CH_OUTPUT_*` / `OutputKind`). */
+/** CSV output channel (`CH_OUTPUT_*` / `OutputKind`). Append-only. */
 export const ChOutputKind = {
   Companies: 0,
   Persons: 1,
@@ -40,6 +44,11 @@ export const ChOutputKind = {
   Practitioners: 6,
   FreeText: 7,
 } as const;
+
+/** Kind-indexed table capacity (`CH_MAX_OUTPUT_KINDS`). Unused slots are 0 / "". */
+export const CH_MAX_OUTPUT_KINDS = 16;
+/** NUL-terminated last warning (`CH_WARNING_MESSAGE_MAX`). */
+export const CH_WARNING_MESSAGE_MAX = 256;
 
 export type ChOutputKindCode = (typeof ChOutputKind)[keyof typeof ChOutputKind];
 
@@ -58,6 +67,8 @@ const ERROR_MESSAGES: Record<number, string> = {
   [ChErrorCode.RowTooLarge]: "CSV row exceeds maximum formatted size",
   [ChErrorCode.RecordLimit]:
     "Form group exceeded maximum practitioners or free-text lines",
+  [ChErrorCode.UnknownRecord]: "Unknown record type or unclassified body line",
+  [ChErrorCode.FieldOverflow]: "Field exceeds its fixed slot capacity",
 };
 
 export class ChParseError extends Error {
@@ -79,11 +90,17 @@ export type SnapshotInput = DocumentInput;
 
 /**
  * Successful in-memory parse result.
- * CSV strings include the header row. Unused product outputs are empty strings / 0.
+ * Kind-indexed `counts` / `csv` (length {@link CH_MAX_OUTPUT_KINDS}).
+ * Named fields are aliases for the current catalogue (kinds 0–7).
+ * CSV strings include the header row. Unused slots are empty strings / 0.
  */
 export interface ParseResult {
   fileType: ChFileType;
   trailerCount: number;
+  warningCount: number;
+  lastWarning: string;
+  counts: number[];
+  csv: string[];
   companiesCsv: string;
   personsCsv: string;
   disqualificationsCsv: string;
@@ -212,6 +229,9 @@ export interface CsvBatch {
 export interface StreamStats {
   fileType: ChFileType;
   trailerCount: number;
+  warningCount: number;
+  lastWarning: string;
+  counts: number[];
   companies: number;
   persons: number;
   disqualifications: number;
@@ -220,6 +240,29 @@ export interface StreamStats {
   forms: number;
   practitioners: number;
   freeText: number;
+}
+
+/** Named kind counts from a kind-indexed `counts` table. */
+export function namedCounts(counts: number[]): {
+  companies: number;
+  persons: number;
+  disqualifications: number;
+  exemptions: number;
+  variations: number;
+  forms: number;
+  practitioners: number;
+  freeText: number;
+} {
+  return {
+    companies: counts[ChOutputKind.Companies] ?? 0,
+    persons: counts[ChOutputKind.Persons] ?? 0,
+    disqualifications: counts[ChOutputKind.Disqualifications] ?? 0,
+    exemptions: counts[ChOutputKind.Exemptions] ?? 0,
+    variations: counts[ChOutputKind.Variations] ?? 0,
+    forms: counts[ChOutputKind.Forms] ?? 0,
+    practitioners: counts[ChOutputKind.Practitioners] ?? 0,
+    freeText: counts[ChOutputKind.FreeText] ?? 0,
+  };
 }
 
 export interface StreamOptions extends LoadOptions {

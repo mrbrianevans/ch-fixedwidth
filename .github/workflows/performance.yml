@@ -82,10 +82,10 @@ jobs:
 
           # Zig native (primary)
           zig build -Doptimize=ReleaseFast
-          if [[ -f "zig-out/bin/parser${EXT}" ]]; then
-            cp "zig-out/bin/parser${EXT}" "parser_zig${EXT}"
-          elif [[ -f zig-out/bin/parser ]]; then
-            cp zig-out/bin/parser parser_zig
+          if [[ -f "zig-out/bin/ch-fixedwidth${EXT}" ]]; then
+            cp "zig-out/bin/ch-fixedwidth${EXT}" "parser_zig${EXT}"
+          elif [[ -f zig-out/bin/ch-fixedwidth ]]; then
+            cp zig-out/bin/ch-fixedwidth parser_zig
             chmod +x parser_zig
           else
             echo "Zig binary not found" >&2

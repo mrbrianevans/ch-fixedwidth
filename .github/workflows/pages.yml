@@ -4,8 +4,6 @@ on:
   push:
     branches:
       - master
-      - production-ready
-      - site
   workflow_dispatch:
 
 permissions:

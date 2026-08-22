@@ -49,10 +49,10 @@ jobs:
         shell: bash
         run: |
           zig build -Doptimize=ReleaseFast -Dtarget=${{ matrix.target }}
-          if [ -f "zig-out/bin/parser${{ matrix.ext }}" ]; then
-            mv "zig-out/bin/parser${{ matrix.ext }}" "parser-${{ matrix.name }}${{ matrix.ext }}"
-          elif [ -f zig-out/bin/parser ]; then
-            mv zig-out/bin/parser "parser-${{ matrix.name }}${{ matrix.ext }}"
+          if [ -f "zig-out/bin/ch-fixedwidth${{ matrix.ext }}" ]; then
+            mv "zig-out/bin/ch-fixedwidth${{ matrix.ext }}" "ch-fixedwidth-${{ matrix.name }}${{ matrix.ext }}"
+          elif [ -f zig-out/bin/ch-fixedwidth ]; then
+            mv zig-out/bin/ch-fixedwidth "ch-fixedwidth-${{ matrix.name }}${{ matrix.ext }}"
           else
             echo "Built binary not found" >&2
             ls -laR zig-out
@@ -62,7 +62,7 @@ jobs:
       - name: Upload CLI to Release
         uses: softprops/action-gh-release@v2
         with:
-          files: parser-${{ matrix.name }}${{ matrix.ext }}
+          files: ch-fixedwidth-${{ matrix.name }}${{ matrix.ext }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 

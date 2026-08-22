@@ -4,7 +4,7 @@ TypeScript host for the freestanding Zig WASM multi-product parser (`ch_fixedwid
 
 Runtime-agnostic: uses only `WebAssembly` and optional `fetch`. No Node/Bun filesystem APIs in the library surface.
 
-> **Not published to npm yet** (`private: true`). The package layout and `exports` are publish-ready; ship a matching `ch_fixedwidth.wasm` (release asset or build artifact) alongside it when you publish.
+> **Not published to npm yet** (`private: true`). The package layout and `exports` are publish-ready; ship a matching `ch_fixedwidth.wasm` (release asset or build artifact) alongside it when you publish. One-shot results and stream stats are **kind-indexed** (`counts[]` / `csv[]`, plus named aliases for kinds 0–7).
 
 ## Prerequisites
 

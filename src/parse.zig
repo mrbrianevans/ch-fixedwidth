@@ -244,7 +244,11 @@ pub const companies_header =
     "Company Number,Company Status,Number of Officers,Company Name\n";
 pub const persons_header =
     "Company Number,App Date Origin,Appointment Type,Person number,Corporate indicator,Appointment Date,Resignation Date,Person Postcode,Partial Date of Birth,Full Date of Birth,Title,Forenames,Surname,Honours,Care_of,PO_box,Address line 1,Address line 2,Post_town,County,Country,Occupation,Nationality,Resident Country\n";
-/// Prod 198 update person row CSV header (fixed fields + 14 named chevron fields).
+/// Prod 198 update person row CSV header.
+/// Distinct from the snapshot `persons_header`: update rows carry old/new
+/// identifiers (appointment type, person number, postcode) plus change/update
+/// dates. Trailing chevron fillers after the 14 named variable fields are omitted
+/// only while proven empty (see docs/Prod198_Update.md); a non-empty filler fails.
 pub const update_persons_header =
     "Company Number,App Date Origin,Res Date Origin,Correction Indicator,Corporate Indicator,Old Appointment Type,New Appointment Type,Old Person Number,New Person Number,Partial Date of Birth,Full Date of Birth,Old Person Postcode,New Person Postcode,Appointment Date,Resignation Date,Change Date,Update Date,New Title,New Forenames,New Surname,New Honours,Care Of,PO Box,New Address Line 1,New Address Line 2,New Post Town,New County,New Country,Occupation,New Nationality,New Residential Country\n";
 
@@ -362,7 +366,7 @@ const LiqTagRule = struct {
     slot: LiqSlot = .form_number,
 };
 
-/// Tag dispatch for Prod 197 records. Unknown tags are ignored.
+/// Tag dispatch for Prod 197 records. Unknown tags are reported as warnings.
 const liq_tag_rules = [_]LiqTagRule{
     .{ .tag = .{ 'F', 'M' }, .action = .set, .slot = .form_number },
     .{ .tag = .{ 'R', 'N' }, .action = .set, .slot = .company_number },
@@ -466,68 +470,68 @@ pub const LiqForm = struct {
         return self.free_texts[i][0..self.free_text_lens[i]];
     }
 
-    fn setSlot(self: *LiqForm, slot: LiqSlot, src: []const u8) void {
+    fn setSlot(self: *LiqForm, slot: LiqSlot, src: []const u8) error{FieldOverflow}!void {
         const i: usize = @intFromEnum(slot);
         const cap = slot.cap();
-        const take = @min(src.len, cap);
-        @memcpy(self.slots[i][0..take], src[0..take]);
-        self.slot_lens[i] = @intCast(take);
+        if (src.len > cap) return error.FieldOverflow;
+        @memcpy(self.slots[i][0..src.len], src[0..src.len]);
+        self.slot_lens[i] = @intCast(src.len);
     }
 
-    fn appendRegisteredOffice(self: *LiqForm, payload: []const u8) void {
+    fn appendRegisteredOffice(self: *LiqForm, payload: []const u8) error{FieldOverflow}!void {
         const i: usize = @intFromEnum(LiqSlot.registered_office);
         const cap = LiqSlot.registered_office.cap();
         if (self.slot_lens[i] == 0) {
-            self.setSlot(.registered_office, payload);
+            try self.setSlot(.registered_office, payload);
             return;
         }
-        if (self.slot_lens[i] >= cap) return;
+        const need = self.slot_lens[i] + 1 + payload.len;
+        if (need > cap) return error.FieldOverflow;
         const space_at = self.slot_lens[i];
-        if (space_at + 1 >= cap) return;
         self.slots[i][space_at] = ' ';
-        self.slot_lens[i] = @intCast(space_at + 1);
-        const room = cap - self.slot_lens[i];
-        const take = @min(payload.len, room);
-        @memcpy(self.slots[i][self.slot_lens[i]..][0..take], payload[0..take]);
-        self.slot_lens[i] += @intCast(take);
+        @memcpy(self.slots[i][space_at + 1 ..][0..payload.len], payload);
+        self.slot_lens[i] = @intCast(need);
     }
 
+    pub const Apply = enum { applied, unknown_tag };
+
     /// Apply one tagged data record to this form (including the opening `FM`).
-    /// Fails with `error.RecordLimitExceeded` when a form group exceeds
-    /// `liq_max_practitioners` or `liq_max_free_texts` (no silent drop).
-    pub fn applyRecord(self: *LiqForm, row: []const u8) error{RecordLimitExceeded}!void {
-        if (row.len < 2) return;
-        const rule = findLiqTagRule(row[0..2]) orelse return;
+    /// Unknown tags return `.unknown_tag` (caller warns; still counts toward trailer).
+    /// Overflow and practitioner/free-text caps fail closed.
+    pub fn applyRecord(self: *LiqForm, row: []const u8) error{ RecordLimitExceeded, FieldOverflow }!Apply {
+        if (row.len < 2) return .unknown_tag;
+        const rule = findLiqTagRule(row[0..2]) orelse return .unknown_tag;
         const payload = if (row.len > 2) trimRightSpaces(row[2..]) else row[0..0];
 
         // Opening FM may arrive before `active` is set.
         if (rule.tag[0] == 'F' and rule.tag[1] == 'M') {
             self.active = true;
-            self.setSlot(.form_number, payload);
-            return;
+            try self.setSlot(.form_number, payload);
+            return .applied;
         }
-        if (!self.active) return;
+        if (!self.active) return .applied;
 
         switch (rule.action) {
-            .set => self.setSlot(rule.slot, payload),
-            .append_re => self.appendRegisteredOffice(payload),
+            .set => try self.setSlot(rule.slot, payload),
+            .append_re => try self.appendRegisteredOffice(payload),
             .push_np => {
                 if (self.practitioner_count >= liq_max_practitioners) return error.RecordLimitExceeded;
+                if (payload.len > liq_field_cap) return error.FieldOverflow;
                 const i = self.practitioner_count;
-                const take = @min(payload.len, liq_field_cap);
-                @memcpy(self.practitioners[i][0..take], payload[0..take]);
-                self.practitioner_lens[i] = @intCast(take);
+                @memcpy(self.practitioners[i][0..payload.len], payload);
+                self.practitioner_lens[i] = @intCast(payload.len);
                 self.practitioner_count += 1;
             },
             .push_ft => {
                 if (self.free_text_count >= liq_max_free_texts) return error.RecordLimitExceeded;
+                if (payload.len > liq_ft_cap) return error.FieldOverflow;
                 const i = self.free_text_count;
-                const take = @min(payload.len, liq_ft_cap);
-                @memcpy(self.free_texts[i][0..take], payload[0..take]);
-                self.free_text_lens[i] = @intCast(take);
+                @memcpy(self.free_texts[i][0..payload.len], payload);
+                self.free_text_lens[i] = @intCast(payload.len);
                 self.free_text_count += 1;
             },
         }
+        return .applied;
     }
 };
 
@@ -625,8 +629,9 @@ fn csvNeedsQuote(s: []const u8) bool {
     return false;
 }
 
-/// CSV row formatting failed because the destination buffer is too small.
-pub const FormatError = error{RowTooLarge};
+/// CSV row formatting failed because the destination buffer is too small,
+/// or because the input held fields outside the published output schema.
+pub const FormatError = error{ RowTooLarge, ExtraChevronData };
 
 /// Append a field that may need CSV quoting. Returns `error.RowTooLarge` if
 /// the write would exceed `dest.len` (never writes past the end).
@@ -879,8 +884,9 @@ pub fn formatPersonRow(dest: []u8, row: []const u8) FormatError!usize {
 }
 
 /// Format an update person record (Prod 198 / `DDDDUPDT`) as one CSV line.
-/// Fixed layout per docs/Prod198_Update.md; variable data has 27 chevrons of
-/// which the first 14 named fields are exported (trailing fillers omitted).
+/// Fixed layout per docs/Prod198_Update.md. Variable data has 27 chevron fields;
+/// the published CSV exports the 14 named ones. Non-empty trailing fillers fail
+/// closed (`error.ExtraChevronData`) so omission cannot silently drop data.
 /// `dest` must be large enough (typically `max_csv_row_bytes`); never overflows.
 pub fn formatUpdatePersonRow(dest: []u8, row: []const u8) FormatError!usize {
     const v = FieldView.init(row);
@@ -906,10 +912,22 @@ pub fn formatUpdatePersonRow(dest: []u8, row: []const u8) FormatError!usize {
     };
     var fixed: [ranges.len][]const u8 = undefined;
     fillFixed(v, &ranges, &fixed);
-    var var_parts: [14][]const u8 = undefined;
+    var var_parts: [32][]const u8 = undefined;
     const var_len: usize = @intCast(v.atoi(107, 111));
-    splitChevron(v.get(111, 111 + var_len), var_parts[0..]);
-    return writeCsvFields(dest, &fixed, &var_parts);
+    const variable = v.get(111, 111 + var_len);
+    var chevron_fields: usize = 0;
+    if (variable.len > 0) {
+        chevron_fields = 1;
+        for (variable) |c| {
+            if (c == '<') chevron_fields += 1;
+        }
+    }
+    if (chevron_fields > var_parts.len) return error.ExtraChevronData;
+    splitChevron(variable, var_parts[0..]);
+    for (var_parts[14..]) |part| {
+        if (part.len > 0) return error.ExtraChevronData;
+    }
+    return writeCsvFields(dest, &fixed, var_parts[0..14]);
 }
 
 fn writeCsvFields(dest: []u8, fixed: []const []const u8, var_parts: []const []const u8) FormatError!usize {

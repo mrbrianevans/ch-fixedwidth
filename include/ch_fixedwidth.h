@@ -36,7 +36,7 @@ typedef struct ChBuffer {
 #define CH_FILE_DISQUALIFICATIONS 2
 #define CH_FILE_LIQUIDATION 3
 
-/** CSV output channel. Matches Zig parse.OutputKind. */
+/** CSV output channel. Matches Zig parse.OutputKind. Append-only; do not renumber. */
 #define CH_OUTPUT_COMPANIES 0
 #define CH_OUTPUT_PERSONS 1
 #define CH_OUTPUT_DISQUALIFICATIONS 2
@@ -45,6 +45,16 @@ typedef struct ChBuffer {
 #define CH_OUTPUT_FORMS 5
 #define CH_OUTPUT_PRACTITIONERS 6
 #define CH_OUTPUT_FREE_TEXT 7
+
+/**
+ * Capacity of kind-indexed count/buffer tables. Unused slots are zero/empty.
+ * New CH_OUTPUT_* values may be appended in a 1.x minor up to this cap.
+ * Growing the cap is a major ABI break.
+ */
+#define CH_MAX_OUTPUT_KINDS 16
+
+/** NUL-terminated last warning message (UTF-8). */
+#define CH_WARNING_MESSAGE_MAX 256
 
 /** Max product numbers per format entry (officers snapshot has two: 195, 216). */
 #define CH_MAX_PRODUCT_CODES 4
@@ -79,35 +89,28 @@ typedef struct ChLibraryInfo {
 } ChLibraryInfo;
 
 /**
- * One-shot parse result. Unused kinds have empty buffers and zero counts.
+ * One-shot parse result. Kind-indexed: counts[k] / csv[k] for CH_OUTPUT_* k.
+ * Unused kinds (and slots above the current catalogue) are zero / empty.
  *
- * Layout (wasm32 and native): ten int32 counts, then eight ChBuffer fields.
+ * `reserved` is alignment padding and must be zero. `last_warning` is
+ * NUL-terminated UTF-8; empty when warning_count is 0.
  *
- * | Product | Filled outputs |
- * |---------|----------------|
- * | Officers 195/216/198 | companies, persons |
- * | Disqualifications 192 | persons, disqualifications, exemptions, variations |
- * | Liquidation 197 | forms, practitioners, free_text |
+ * wasm32 layout (pointers and usize are 4 bytes):
+ *   i32 file_type, trailer_count, warning_count, reserved          (16)
+ *   i32 counts[16]                                                 (64)  → 80
+ *   ChBuffer csv[16]  (ptr+len × 16)                              (128) → 208
+ *   char last_warning[256]                                        (256) → 464
+ *
+ * Native 64-bit is the same field order; ChBuffer is 16 bytes so csv[] is larger.
  */
 typedef struct ChParseResult {
     int32_t file_type;
     int32_t trailer_count;
-    int32_t companies;
-    int32_t persons;
-    int32_t disqualifications;
-    int32_t exemptions;
-    int32_t variations;
-    int32_t forms;
-    int32_t practitioners;
-    int32_t free_text;
-    ChBuffer companies_csv;
-    ChBuffer persons_csv;
-    ChBuffer disqualifications_csv;
-    ChBuffer exemptions_csv;
-    ChBuffer variations_csv;
-    ChBuffer forms_csv;
-    ChBuffer practitioners_csv;
-    ChBuffer free_text_csv;
+    int32_t warning_count;
+    int32_t reserved;
+    int32_t counts[CH_MAX_OUTPUT_KINDS];
+    ChBuffer csv[CH_MAX_OUTPUT_KINDS];
+    char last_warning[CH_WARNING_MESSAGE_MAX];
 } ChParseResult;
 
 /** Success */
@@ -132,6 +135,10 @@ typedef struct ChParseResult {
 #define CH_ERR_ROW_TOO_LARGE 9
 /** Prod 197 form group exceeded max practitioners or free-text lines */
 #define CH_ERR_RECORD_LIMIT 10
+/** Unknown record type / unclassified body line */
+#define CH_ERR_UNKNOWN_RECORD 11
+/** Field longer than its fixed slot (no silent truncation) */
+#define CH_ERR_FIELD_OVERFLOW 12
 
 /**
  * Return a pointer to a static array of supported file formats.
@@ -185,18 +192,17 @@ typedef struct ChCsvBatch {
     int32_t kind;
 } ChCsvBatch;
 
-/** Cumulative stats for an active stream. */
+/**
+ * Cumulative stats for an active stream. Kind-indexed like ChParseResult
+ * (no CSV buffers). wasm32: 16 + 64 + 256 = 336 bytes.
+ */
 typedef struct ChStreamStats {
     int32_t file_type;
     int32_t trailer_count;
-    int32_t companies;
-    int32_t persons;
-    int32_t disqualifications;
-    int32_t exemptions;
-    int32_t variations;
-    int32_t forms;
-    int32_t practitioners;
-    int32_t free_text;
+    int32_t warning_count;
+    int32_t reserved;
+    int32_t counts[CH_MAX_OUTPUT_KINDS];
+    char last_warning[CH_WARNING_MESSAGE_MAX];
 } ChStreamStats;
 
 /** Opaque stream parser. */
