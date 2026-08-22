@@ -1,7 +1,10 @@
 import { getExports, instantiateWasm, requireStreamExports } from "./load.ts";
 import {
+  CH_MAX_OUTPUT_KINDS,
+  CH_WARNING_MESSAGE_MAX,
   ChParseError,
   csvBatchKindFromCode,
+  namedCounts,
   type ChFileType,
   type ChWasmExports,
   type CsvBatch,
@@ -14,8 +17,15 @@ import {
 const CONFIG_SIZE = 8;
 /** wasm32 layout of ChCsvBatch */
 const BATCH_SIZE = 16;
-/** wasm32 layout of ChStreamStats (10 × i32) */
-const STATS_SIZE = 40;
+/**
+ * wasm32 layout of ChStreamStats:
+ * i32 file_type, trailer_count, warning_count, reserved (16)
+ * i32 counts[16] (64) → 80
+ * char last_warning[256] → 336
+ */
+const STATS_SIZE = 336;
+const OFF_STATS_COUNTS = 16;
+const OFF_STATS_WARNING = 80;
 
 function toBytes(input: Uint8Array | ArrayBuffer | string): Uint8Array {
   if (typeof input === "string") {
@@ -137,17 +147,23 @@ export class ChFixedWidthStream {
       new Uint8Array(memory.buffer, ptr, STATS_SIZE).fill(0);
       ch_stream_stats!(this.streamPtr, ptr);
       const view = new DataView(memory.buffer, ptr, STATS_SIZE);
+      const counts: number[] = [];
+      for (let k = 0; k < CH_MAX_OUTPUT_KINDS; k++) {
+        counts.push(view.getInt32(OFF_STATS_COUNTS + k * 4, true));
+      }
+      const warnBytes = new Uint8Array(memory.buffer, ptr + OFF_STATS_WARNING, CH_WARNING_MESSAGE_MAX);
+      let warnEnd = 0;
+      while (warnEnd < warnBytes.length && warnBytes[warnEnd] !== 0) warnEnd++;
+      const lastWarning = new TextDecoder("utf-8", { fatal: false }).decode(
+        warnBytes.subarray(0, warnEnd),
+      );
       return {
         fileType: view.getInt32(0, true) as ChFileType,
         trailerCount: view.getInt32(4, true),
-        companies: view.getInt32(8, true),
-        persons: view.getInt32(12, true),
-        disqualifications: view.getInt32(16, true),
-        exemptions: view.getInt32(20, true),
-        variations: view.getInt32(24, true),
-        forms: view.getInt32(28, true),
-        practitioners: view.getInt32(32, true),
-        freeText: view.getInt32(36, true),
+        warningCount: view.getInt32(8, true),
+        lastWarning,
+        counts,
+        ...namedCounts(counts),
       };
     } finally {
       ch_free(ptr, STATS_SIZE);

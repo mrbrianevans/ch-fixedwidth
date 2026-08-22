@@ -86,6 +86,10 @@ pub const Stream = struct {
     finished: bool = false,
     saw_trailer: bool = false,
 
+    /// Non-fatal diagnostics (e.g. unknown Prod 197 tags). Hard errors still fail the run.
+    warning_count: i32 = 0,
+    last_warning: [256]u8 = [_]u8{0} ** 256,
+
     magic: [parse.header_identifier_len]u8 = undefined,
     magic_len: u8 = 0,
     file_type: ?parse.FileType = null,

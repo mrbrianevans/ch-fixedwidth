@@ -1,6 +1,10 @@
 import { getExports, instantiateWasm } from "./load.ts";
 import {
+  CH_MAX_OUTPUT_KINDS,
+  CH_WARNING_MESSAGE_MAX,
+  ChOutputKind,
   ChParseError,
+  namedCounts,
   type ChFileType,
   type ChWasmExports,
   type DocumentInput,
@@ -11,10 +15,19 @@ import {
 } from "./types.ts";
 
 /**
- * wasm32 layout of ChParseResult:
- * 10× i32 counts (40) + 8× ChBuffer ptr+len (8×8 = 64) = 104.
+ * wasm32 layout of ChParseResult (kind-indexed):
+ * i32 file_type, trailer_count, warning_count, reserved     (16)
+ * i32 counts[16]                                            (64) → 80
+ * ChBuffer csv[16] (ptr+len × 16)                          (128) → 208
+ * char last_warning[256]                                   (256) → 464
  */
-const PARSE_RESULT_SIZE = 104;
+const PARSE_RESULT_SIZE = 464;
+const OFF_FILE_TYPE = 0;
+const OFF_TRAILER = 4;
+const OFF_WARNING_COUNT = 8;
+const OFF_COUNTS = 16;
+const OFF_CSV = 80;
+const OFF_LAST_WARNING = 208;
 
 /**
  * wasm32 layout of ChSupportedFormat:
@@ -29,24 +42,6 @@ const CH_MAX_PRODUCT_CODES = 4;
  * ptr version (0) + ptr git_commit (4) + ptr formats (8) + usize format_count (12) = 16.
  */
 const LIBRARY_INFO_SIZE = 16;
-const OFF_FILE_TYPE = 0;
-const OFF_TRAILER = 4;
-const OFF_COMPANIES = 8;
-const OFF_PERSONS = 12;
-const OFF_DISQ = 16;
-const OFF_EXEMPT = 20;
-const OFF_VAR = 24;
-const OFF_FORMS = 28;
-const OFF_PRAC = 32;
-const OFF_FREE = 36;
-const OFF_COMPANIES_CSV = 40;
-const OFF_PERSONS_CSV = 48;
-const OFF_DISQ_CSV = 56;
-const OFF_EXEMPT_CSV = 64;
-const OFF_VAR_CSV = 72;
-const OFF_FORMS_CSV = 80;
-const OFF_PRAC_CSV = 88;
-const OFF_FREE_CSV = 96;
 
 function toBytes(input: DocumentInput): Uint8Array {
   if (typeof input === "string") {
@@ -216,25 +211,32 @@ export class ChFixedWidthParser {
       }
 
       const view = new DataView(memory.buffer, resultPtr, PARSE_RESULT_SIZE);
+      const counts: number[] = [];
+      const csv: string[] = [];
+      for (let k = 0; k < CH_MAX_OUTPUT_KINDS; k++) {
+        counts.push(readI32(view, OFF_COUNTS + k * 4));
+        csv.push(readCsv(memory, view, OFF_CSV + k * 8));
+      }
+      const named = namedCounts(counts);
       return {
         fileType: readI32(view, OFF_FILE_TYPE) as ChFileType,
         trailerCount: readI32(view, OFF_TRAILER),
-        companies: readI32(view, OFF_COMPANIES),
-        persons: readI32(view, OFF_PERSONS),
-        disqualifications: readI32(view, OFF_DISQ),
-        exemptions: readI32(view, OFF_EXEMPT),
-        variations: readI32(view, OFF_VAR),
-        forms: readI32(view, OFF_FORMS),
-        practitioners: readI32(view, OFF_PRAC),
-        freeText: readI32(view, OFF_FREE),
-        companiesCsv: readCsv(memory, view, OFF_COMPANIES_CSV),
-        personsCsv: readCsv(memory, view, OFF_PERSONS_CSV),
-        disqualificationsCsv: readCsv(memory, view, OFF_DISQ_CSV),
-        exemptionsCsv: readCsv(memory, view, OFF_EXEMPT_CSV),
-        variationsCsv: readCsv(memory, view, OFF_VAR_CSV),
-        formsCsv: readCsv(memory, view, OFF_FORMS_CSV),
-        practitionersCsv: readCsv(memory, view, OFF_PRAC_CSV),
-        freeTextCsv: readCsv(memory, view, OFF_FREE_CSV),
+        warningCount: readI32(view, OFF_WARNING_COUNT),
+        lastWarning: readCString(
+          memory,
+          resultPtr + OFF_LAST_WARNING,
+        ).slice(0, CH_WARNING_MESSAGE_MAX),
+        counts,
+        csv,
+        ...named,
+        companiesCsv: csv[ChOutputKind.Companies] ?? "",
+        personsCsv: csv[ChOutputKind.Persons] ?? "",
+        disqualificationsCsv: csv[ChOutputKind.Disqualifications] ?? "",
+        exemptionsCsv: csv[ChOutputKind.Exemptions] ?? "",
+        variationsCsv: csv[ChOutputKind.Variations] ?? "",
+        formsCsv: csv[ChOutputKind.Forms] ?? "",
+        practitionersCsv: csv[ChOutputKind.Practitioners] ?? "",
+        freeTextCsv: csv[ChOutputKind.FreeText] ?? "",
       };
     } finally {
       ch_parse_result_free(resultPtr);
