@@ -160,7 +160,7 @@ jobs:
           run_one "Go"                 "${GO_BIN}" "${INPUT_FILE}" "out_go"
           run_one "Python"             python "${PY_SCRIPT}" "${INPUT_FILE}" "out_py"
           run_one "TypeScript (Bun)"   bun run reference/parser.ts "${INPUT_FILE}" "out_ts"
-          run_one "Zig (native)"       "${ZIG_BIN}" "${INPUT_FILE}" "out_zig"
+          run_one "Zig (native)"       "${ZIG_BIN}" -o "out_zig" "${INPUT_FILE}"
 
           echo "Raw results:"
           cat "${RESULTS}"

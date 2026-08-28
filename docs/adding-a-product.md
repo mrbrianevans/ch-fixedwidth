@@ -201,7 +201,7 @@ zig build test
 zig build wasm -Doptimize=ReleaseFast
 cd wasm-ts && bun test
 # optional
-./zig-out/bin/ch-fixedwidth src/testdata/mini_<name>.dat ./output/manual
+./zig-out/bin/ch-fixedwidth -o ./output/manual src/testdata/mini_<name>.dat
 ```
 
 Correctness beats performance. Optimise only after golden fixtures match.

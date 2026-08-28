@@ -10,9 +10,9 @@ Decisions: [issue #8](https://github.com/mrbrianevans/ch-fixedwidth/issues/8).
 | Surface | Frozen |
 |---------|--------|
 | CLI binary name | `ch-fixedwidth` |
-| Invocation | `ch-fixedwidth <input> <output_folder>` plus `--help` / `--version` |
+| Invocation | `ch-fixedwidth [-workers N] -o DIR <input>` plus `--help` / `--version` |
 | Input kinds | file, directory of `*.dat`, `http(s)://`, `-` (stdin) |
-| Output | directory of CSVs (created if missing) |
+| Output | directory given with `-o` (created if missing; no cwd default) |
 | Filenames | `{stem}_data_{basename}.csv` (stdin basename `stdin`) |
 | CSV headers | exact strings per **product** (198 persons ≠ 195/216 persons) |
 | Success | exit 0 and trailer counts match |
@@ -25,7 +25,7 @@ New bulk products in 1.x are **minors**: append a `CH_OUTPUT_*` / `CH_FILE_*` id
 
 ## What is a major after 1.0
 
-- Renaming the binary or the two-argument CLI form
+- Renaming the binary or the `-o DIR` CLI form
 - Renaming or reordering CSV columns for an existing product/kind
 - Renumbering `CH_FILE_*` / `CH_OUTPUT_*` / `CH_ERR_*`
 - Growing `CH_MAX_OUTPUT_KINDS` or changing `ChParseResult` / `ChStreamStats` field order
@@ -36,7 +36,7 @@ New bulk products in 1.x are **minors**: append a `CH_OUTPUT_*` / `CH_FILE_*` id
 - Browser converter UX (it consumes wasm-ts)
 - npm publish of `@ch-fixedwidth/wasm-ts` (package stays private until a later publish against this ABI)
 - Zig module internals (`ParseResult` arrays, `Stream` fields)
-- `--help` wording (flags and the two-argument form stay)
+- `--help` wording (flags and the `-o DIR` form stay)
 
 ## Honesty rules
 

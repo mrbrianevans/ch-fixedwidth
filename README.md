@@ -44,21 +44,24 @@ Freestanding WASM is published as `ch_fixedwidth-wasm32-freestanding.wasm`. The 
 ```bash
 ch-fixedwidth --help
 ch-fixedwidth --version
-ch-fixedwidth <input.dat|input_dir/|http(s)://.../file.dat|-> <output_folder>
+ch-fixedwidth [-workers N] -o DIR <input.dat|input_dir/|http(s)://.../file.dat|->
 ```
 
 | Argument | Description |
 |----------|-------------|
+| `-o DIR` | Directory for CSV output (required; created if missing). Not defaulted to the current directory. |
+| `-workers N` | Optional officers seek-split thread count (default: CPU count, max 32) |
 | Input | A `.dat` file, a directory of `.dat` files, an `http://` / `https://` URL, or `-` (stdin) |
-| `output_folder` | Directory for CSV output (created if missing) |
+
+Flags must come before the positional input.
 
 Examples:
 
 ```bash
-ch-fixedwidth Prod216_4257_ew_6.dat ./output
-ch-fixedwidth ./bulk/ ./output
-ch-fixedwidth https://example.com/data/Prod216_4257_ew_6.dat ./output
-ch-fixedwidth - ./output < Prod216_4257_ew_6.dat
+ch-fixedwidth -o ./output Prod216_4257_ew_6.dat
+ch-fixedwidth -workers 8 -o ./output ./bulk/
+ch-fixedwidth -o ./output https://example.com/data/Prod216_4257_ew_6.dat
+ch-fixedwidth -o ./output - < Prod216_4257_ew_6.dat
 ```
 
 Remote URLs and stdin are converted as a stream (the full file is not buffered to disk first). Directory input converts each top-level `.dat` one at a time.
@@ -85,7 +88,7 @@ Requires [Zig](https://ziglang.org/) 0.16+.
 
 ```bash
 zig build -Doptimize=ReleaseFast
-./zig-out/bin/ch-fixedwidth <input> <output_folder>
+./zig-out/bin/ch-fixedwidth -o <output_folder> <input>
 ```
 
 ```bash

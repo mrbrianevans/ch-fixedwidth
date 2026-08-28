@@ -95,7 +95,7 @@ jobs:
 
           start=$(python -c 'import time; print(time.perf_counter())')
           set +e
-          "${ZIG_BIN}" "${INPUT_FILE}" "${OUTDIR}" >"${OUTDIR}/stdout.log" 2>"${OUTDIR}/stderr.log"
+          "${ZIG_BIN}" -o "${OUTDIR}" "${INPUT_FILE}" >"${OUTDIR}/stdout.log" 2>"${OUTDIR}/stderr.log"
           status=$?
           set -e
           end=$(python -c 'import time; print(time.perf_counter())')

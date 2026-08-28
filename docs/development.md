@@ -26,13 +26,15 @@ zig fmt --check .
 
 CLI binary: `./zig-out/bin/ch-fixedwidth` (or `ch-fixedwidth.exe` on Windows).
 
+Invocation: `ch-fixedwidth [-workers N] -o DIR <input>`. `-o` is required. Optional `-workers N` caps officers seek-split threads (default: CPU count, max 32). Stdin and remote URLs stay sequential.
+
 ### Remote URL, stdin, and directory input (CLI only)
 
 The native CLI accepts a local file path, a **directory** of `.dat` files, an `http://` / `https://` URL, or `-` (stdin). Path kind is confirmed with a filesystem `stat` (heuristics: `.dat` → file; trailing `/` or no `.dat` extension → likely directory).
 
 | Input | Pipeline |
 |-------|----------|
-| Single local file | Multi-threaded seek split for officers products when multiple CPUs are available; sequential for 192 / 197 |
+| Single local file | Multi-threaded seek split for officers products (`-workers N` or CPU count); sequential for 192 / 197 |
 | Directory of `.dat` | Lists top-level `*.dat` only; processes **one file at a time** with the same per-file strategy as a single file. See [DDR-directory-parallelism.md](DDR-directory-parallelism.md) |
 | Remote URL / stdin | Sequential streaming via `processFromReader` (no parallel seeks) |
 
@@ -44,10 +46,10 @@ Full Companies House extracts are gitignored (`Prod*.dat` / `Prod*.txt`). For a 
 
 ```bash
 zig build -Doptimize=ReleaseFast
-./zig-out/bin/ch-fixedwidth path/to/Prod216_….dat ./output/bulk
-./zig-out/bin/ch-fixedwidth path/to/Prod198_….dat ./output/bulk
-./zig-out/bin/ch-fixedwidth path/to/Prod192_….dat ./output/bulk
-./zig-out/bin/ch-fixedwidth path/to/Prod197_….dat ./output/bulk
+./zig-out/bin/ch-fixedwidth -o ./output/bulk path/to/Prod216_….dat
+./zig-out/bin/ch-fixedwidth -o ./output/bulk path/to/Prod198_….dat
+./zig-out/bin/ch-fixedwidth -o ./output/bulk path/to/Prod192_….dat
+./zig-out/bin/ch-fixedwidth -o ./output/bulk path/to/Prod197_….dat
 ```
 
 Prod 198 trailing chevron fillers were proven empty on `Prod198_4271` (12 239 person rows). Re-run that check if the published person schema is questioned.
@@ -59,16 +61,16 @@ Smoke tests:
 bun scripts/serve-testdata.ts
 # other terminal
 zig build -Doptimize=ReleaseFast
-./zig-out/bin/ch-fixedwidth http://127.0.0.1:8765/mini_snapshot.dat ./output/remote_test
+./zig-out/bin/ch-fixedwidth -o ./output/remote_test http://127.0.0.1:8765/mini_snapshot.dat
 
 # Stdin stream
-./zig-out/bin/ch-fixedwidth - ./output/stdin_test < src/testdata/mini_snapshot.dat
+./zig-out/bin/ch-fixedwidth -o ./output/stdin_test - < src/testdata/mini_snapshot.dat
 
 # Directory of files (each .dat → product-specific CSVs)
 mkdir -p ./output/dir_in
 cp src/testdata/mini_snapshot.dat ./output/dir_in/a.dat
 cp src/testdata/mini_snapshot.dat ./output/dir_in/b.dat
-./zig-out/bin/ch-fixedwidth ./output/dir_in ./output/dir_out
+./zig-out/bin/ch-fixedwidth -o ./output/dir_out ./output/dir_in
 ```
 
 ## Library API
