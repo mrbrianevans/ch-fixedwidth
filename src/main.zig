@@ -54,9 +54,11 @@ fn printHelp() void {
     std.debug.print(
         \\
         \\Exit codes:
-        \\  0  Success (trailer counts match). Prod 197 unknown tags are
-        \\     warnings on stderr; they do not change the exit code.
-        \\  1  Failure (unknown record, overflow, trailer mismatch, I/O, …)
+        \\  0    Success (trailer counts match). Prod 197 unknown tags are
+        \\       warnings on stderr; they do not change the exit code.
+        \\  1    Failure (unknown record, overflow, trailer mismatch, I/O, …)
+        \\  2    Usage (no args, extra args, unknown flag, missing -o, …)
+        \\  130  Interrupted (Ctrl-C)
         \\
         \\A failed run leaves whatever CSVs were already written.
         \\
@@ -195,10 +197,16 @@ pub fn main(init: std.process.Init) void {
         std.process.exit(1);
     };
 
+    // No-args is usage: print help, exit 2. `-h`/`-V` are handled below and stay 0.
+    if (args.len < 2) {
+        printHelp();
+        std.process.exit(2);
+    }
+
     const action = parseArgs(args) catch |err| {
         printParseError(err);
         printHelp();
-        std.process.exit(1);
+        std.process.exit(2);
     };
 
     switch (action) {
