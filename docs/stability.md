@@ -56,6 +56,10 @@ Adding a CLI **input kind** that does not change existing invocations (the `-o D
 
 CLI warnings go to stderr. C/WASM/TS expose `warning_count` and `last_warning` on the result/stats. Exit 0 does not mean every 197 tag was captured.
 
+## Bulk smoke
+
+The daily job in `.github/workflows/ch-bulk-smoke.yml` is the latest-file exit-0 gate for products 192, 197, 198, and 216. It does not freeze catalogue URLs or shard names.
+
 ## CLI defaults on failure
 
 - A failed run leaves whatever CSVs were already written.

@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Remote `.dat` GET retries on 429, 5xx, and connection failures (connect / send / headers) with exponential backoff (5 attempts, 200 ms base, 10 s cap). Integer `Retry-After` is honoured, capped at 60 s. 4xx other than 429, and a failed body stream, are not retried.
+- Daily CH bulk smoke workflow (08:00 UTC): latest prod192 / prod197 / prod198 plus one prod216 shard streamed from Companies Catalogue; `workflow_dispatch` can convert every 216 shard.
 
 ### Changed
 
