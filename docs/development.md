@@ -36,7 +36,7 @@ The native CLI accepts a local file path, a **directory** of `.dat` files, an `h
 |-------|----------|
 | Single local file | Multi-threaded seek split for officers products (`--workers N` or `min(CPU count, 32)`); sequential for 192 / 197 |
 | Directory of `.dat` | Lists top-level `*.dat` only; processes **one file at a time** with the same per-file strategy as a single file. See [DDR-directory-parallelism.md](DDR-directory-parallelism.md) |
-| Remote URL / stdin | Sequential streaming via `processFromReader` (no parallel seeks) |
+| Remote URL / stdin | Sequential streaming via `processFromReader` (no parallel seeks). Remote GET retries 429, 5xx, and connect/send/header failures with exponential backoff (5 attempts, 200 ms base, 10 s cap; integer `Retry-After` up to 60 s) |
 
 WASM and the C ABI are unchanged (no network or directory fan-out).
 

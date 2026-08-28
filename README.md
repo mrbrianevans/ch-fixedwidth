@@ -64,7 +64,7 @@ ch-fixedwidth -o ./output https://example.com/data/Prod216_4257_ew_6.dat
 ch-fixedwidth -o ./output - < Prod216_4257_ew_6.dat
 ```
 
-Remote URLs and stdin are converted as a stream (the full file is not buffered to disk first). Directory input converts each top-level `.dat` one at a time.
+Remote URLs and stdin are converted as a stream (the full file is not buffered to disk first). Directory input converts each top-level `.dat` one at a time. A remote GET is retried on 429, 5xx, and connection errors (exponential backoff, up to five attempts).
 
 ### Exit codes
 
