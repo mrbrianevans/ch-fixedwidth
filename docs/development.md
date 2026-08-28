@@ -26,7 +26,7 @@ zig fmt --check .
 
 CLI binary: `./zig-out/bin/ch-fixedwidth` (or `ch-fixedwidth.exe` on Windows).
 
-Invocation: `ch-fixedwidth [-workers N] -o DIR <input>`. `-o` is required. Optional `-workers N` caps officers seek-split threads (default: CPU count, max 32). Stdin and remote URLs stay sequential.
+Invocation: `ch-fixedwidth [--workers N] -o DIR <input>`. `-o` is required. Optional `--workers N` caps officers seek-split threads (default: `min(CPU count, 32)`). Products 192 / 197, stdin, and remote URLs stay sequential.
 
 ### Remote URL, stdin, and directory input (CLI only)
 
@@ -34,7 +34,7 @@ The native CLI accepts a local file path, a **directory** of `.dat` files, an `h
 
 | Input | Pipeline |
 |-------|----------|
-| Single local file | Multi-threaded seek split for officers products (`-workers N` or CPU count); sequential for 192 / 197 |
+| Single local file | Multi-threaded seek split for officers products (`--workers N` or `min(CPU count, 32)`); sequential for 192 / 197 |
 | Directory of `.dat` | Lists top-level `*.dat` only; processes **one file at a time** with the same per-file strategy as a single file. See [DDR-directory-parallelism.md](DDR-directory-parallelism.md) |
 | Remote URL / stdin | Sequential streaming via `processFromReader` (no parallel seeks) |
 

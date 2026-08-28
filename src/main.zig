@@ -1,7 +1,7 @@
 //! CLI entry point: local file/directory, HTTP(S) URL, or stdin (`-`) in, CSV files out.
 //! Parsing logic lives in the `ch_fixedwidth` library.
 //!
-//! Invocation: `ch-fixedwidth [-workers N] -o DIR <input>`
+//! Invocation: `ch-fixedwidth [--workers N] -o DIR <input>`
 //! `-o` is required (no cwd default). Flags must precede the positional input.
 
 const std = @import("std");
@@ -64,14 +64,15 @@ fn printHelp() void {
         \\Usage:
         \\  ch-fixedwidth --version
         \\  ch-fixedwidth --help
-        \\  ch-fixedwidth [-workers N] -o DIR <input>
+        \\  ch-fixedwidth [--workers N] -o DIR <input>
         \\
         \\Options:
-        \\  -o DIR           Output directory (required; created if missing).
-        \\                   There is no default; the current directory is not used.
-        \\  -workers N       Officers seek-split worker threads (default: CPU count, max 32)
-        \\  -h, --help       Show this help
-        \\  -V, --version    Print version and git commit
+        \\  -o DIR                 Output directory (required; created if missing).
+        \\                         There is no default; the current directory is not used.
+        \\  -workers, --workers N  Officers seek-split threads (default: min(CPU count, 32)).
+        \\                         Ignored for products 192 and 197.
+        \\  -h, --help             Show this help
+        \\  -V, --version          Print version and git commit
         \\
         \\Flags must come before the positional <input>.
         \\
