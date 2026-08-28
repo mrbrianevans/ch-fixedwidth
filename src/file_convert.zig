@@ -810,9 +810,97 @@ pub fn processDirectory(
     return if (any_failed) 1 else 0;
 }
 
+const http_retry_max_attempts: u8 = 5;
+const http_retry_base_ms: u64 = 200;
+const http_retry_max_ms: u64 = 10_000;
+const http_retry_after_cap_s: u64 = 60;
+
+fn isRetryableHttpStatus(status: http.Status) bool {
+    return status == .too_many_requests or status.class() == .server_error;
+}
+
+/// Transport failures that are worth another GET. Protocol/config errors are not.
+fn isRetryableTransportError(err: anyerror) bool {
+    return switch (err) {
+        error.Canceled,
+        error.OutOfMemory,
+        error.UnsupportedUriScheme,
+        error.UriMissingHost,
+        error.CertificateBundleLoadFailure,
+        error.HttpHeadersInvalid,
+        error.TooManyHttpRedirects,
+        error.RedirectRequiresResend,
+        error.HttpRedirectLocationMissing,
+        error.HttpRedirectLocationOversize,
+        error.HttpRedirectLocationInvalid,
+        error.HttpContentEncodingUnsupported,
+        error.HttpChunkInvalid,
+        error.HttpChunkTruncated,
+        error.HttpHeadersOversize,
+        => false,
+        else => true,
+    };
+}
+
+fn backoffMilliseconds(failed_attempt: u8) u64 {
+    const shift: u6 = @intCast(@min(failed_attempt, 16));
+    const scaled = http_retry_base_ms * (@as(u64, 1) << shift);
+    return @min(scaled, http_retry_max_ms);
+}
+
+/// Integer `Retry-After` delay in seconds, capped. HTTP-date values are ignored.
+fn parseRetryAfterSeconds(head: http.Client.Response.Head) ?u64 {
+    var it = head.iterateHeaders();
+    while (it.next()) |header| {
+        if (!std.ascii.eqlIgnoreCase(header.name, "retry-after")) continue;
+        const trimmed = std.mem.trim(u8, header.value, " \t");
+        const seconds = std.fmt.parseInt(u64, trimmed, 10) catch return null;
+        return @min(seconds, http_retry_after_cap_s);
+    }
+    return null;
+}
+
+fn retryWaitMilliseconds(failed_attempt: u8, retry_after_s: ?u64) u64 {
+    if (retry_after_s) |seconds| {
+        return seconds * std.time.ms_per_s;
+    }
+    return backoffMilliseconds(failed_attempt);
+}
+
+fn sleepHttpRetry(io: Io, wait_ms: u64, reason: []const u8, failed_attempt: u8) !void {
+    const next_attempt = failed_attempt + 2; // 1-based attempt we will make after sleeping
+    std.debug.print(
+        "Retrying download in {d} ms ({s}; attempt {d}/{d})\n",
+        .{ wait_ms, reason, next_attempt, http_retry_max_attempts },
+    );
+    if (wait_ms == 0) return;
+    const ms: i64 = std.math.cast(i64, wait_ms) orelse std.math.maxInt(i64);
+    try Io.sleep(io, .fromMilliseconds(ms), .real);
+}
+
+fn maybeRetryTransport(
+    io: Io,
+    err: anyerror,
+    phase: []const u8,
+    attempt: u8,
+    url: []const u8,
+) !bool {
+    if (!isRetryableTransportError(err) or attempt + 1 >= http_retry_max_attempts) {
+        std.debug.print("Error {s} for '{s}': {s}\n", .{ phase, url, @errorName(err) });
+        return false;
+    }
+    var reason_buf: [64]u8 = undefined;
+    const reason = std.fmt.bufPrint(&reason_buf, "{s}: {s}", .{ phase, @errorName(err) }) catch @errorName(err);
+    try sleepHttpRetry(io, backoffMilliseconds(attempt), reason, attempt);
+    return true;
+}
+
 /// Stream-download `url` over HTTP(S) and convert to CSV under `output_folder`.
 /// Uses a single sequential pipeline (no parallel seeks). Output matches a local-file run
 /// with the same basename.
+///
+/// The GET is retried with exponential backoff on 429, 5xx, and transport
+/// failures (connect / send / headers). Mid-body stream errors are not retried.
 pub fn processFromRemoteUrl(
     io: Io,
     arena: std.mem.Allocator,
@@ -839,39 +927,63 @@ pub fn processFromRemoteUrl(
     };
     defer client.deinit();
 
-    // Prefer identity so large snapshots are not recompressed on the wire when avoidable.
-    var req = client.request(.GET, uri, .{
-        .headers = .{
-            .accept_encoding = .{ .override = "identity" },
-            .user_agent = .{ .override = "ch-fixedwidth-parser" },
-        },
-        .keep_alive = false,
-    }) catch |err| {
-        std.debug.print("Error connecting to URL: {s}\n", .{@errorName(err)});
-        return 1;
-    };
-    defer req.deinit();
-
-    req.sendBodiless() catch |err| {
-        std.debug.print("Error sending HTTP request: {s}\n", .{@errorName(err)});
-        return 1;
-    };
+    var req: http.Client.Request = undefined;
+    var req_live = false;
+    defer if (req_live) req.deinit();
 
     var redirect_buf: [8 * 1024]u8 = undefined;
-    var response = req.receiveHead(&redirect_buf) catch |err| {
-        std.debug.print("Error receiving HTTP headers: {s}\n", .{@errorName(err)});
-        return 1;
-    };
+    var response: http.Client.Response = undefined;
 
-    if (response.head.status.class() != .success) {
-        std.debug.print(
-            "Error: HTTP {d} {s} for {s}\n",
-            .{
-                @intFromEnum(response.head.status),
-                response.head.status.phrase() orelse "",
-                url,
+    var attempt: u8 = 0;
+    while (attempt < http_retry_max_attempts) {
+        if (req_live) {
+            req.deinit();
+            req_live = false;
+        }
+
+        req = client.request(.GET, uri, .{
+            .headers = .{
+                .accept_encoding = .{ .override = "identity" },
+                .user_agent = .{ .override = "ch-fixedwidth-parser" },
             },
-        );
+            .keep_alive = false,
+        }) catch |err| {
+            if (!try maybeRetryTransport(io, err, "connecting", attempt, url)) return 1;
+            attempt += 1;
+            continue;
+        };
+        req_live = true;
+
+        req.sendBodiless() catch |err| {
+            if (!try maybeRetryTransport(io, err, "sending HTTP request", attempt, url)) return 1;
+            attempt += 1;
+            continue;
+        };
+
+        response = req.receiveHead(&redirect_buf) catch |err| {
+            if (!try maybeRetryTransport(io, err, "receiving HTTP headers", attempt, url)) return 1;
+            attempt += 1;
+            continue;
+        };
+
+        if (response.head.status.class() == .success) break;
+
+        const status = response.head.status;
+        const status_int = @intFromEnum(status);
+        if (!isRetryableHttpStatus(status) or attempt + 1 >= http_retry_max_attempts) {
+            std.debug.print(
+                "Error: HTTP {d} {s} for {s}\n",
+                .{ status_int, status.phrase() orelse "", url },
+            );
+            return 1;
+        }
+
+        var reason_buf: [32]u8 = undefined;
+        const reason = std.fmt.bufPrint(&reason_buf, "HTTP {d}", .{status_int}) catch "HTTP error";
+        const wait_ms = retryWaitMilliseconds(attempt, parseRetryAfterSeconds(response.head));
+        try sleepHttpRetry(io, wait_ms, reason, attempt);
+        attempt += 1;
+    } else {
         return 1;
     }
 
@@ -948,6 +1060,65 @@ test "resolveWorkerCount clamps and defaults" {
     const auto = resolveWorkerCount(null);
     try std.testing.expect(auto >= 1);
     try std.testing.expect(auto <= max_workers);
+}
+
+test "isRetryableHttpStatus covers 429 and 5xx only" {
+    try std.testing.expect(isRetryableHttpStatus(.too_many_requests));
+    try std.testing.expect(isRetryableHttpStatus(.internal_server_error));
+    try std.testing.expect(isRetryableHttpStatus(.bad_gateway));
+    try std.testing.expect(isRetryableHttpStatus(.service_unavailable));
+    try std.testing.expect(isRetryableHttpStatus(.gateway_timeout));
+    try std.testing.expect(!isRetryableHttpStatus(.ok));
+    try std.testing.expect(!isRetryableHttpStatus(.not_found));
+    try std.testing.expect(!isRetryableHttpStatus(.forbidden));
+    try std.testing.expect(!isRetryableHttpStatus(.moved_permanently));
+}
+
+test "isRetryableTransportError retries connection failures" {
+    try std.testing.expect(isRetryableTransportError(error.ConnectionRefused));
+    try std.testing.expect(isRetryableTransportError(error.NetworkUnreachable));
+    try std.testing.expect(isRetryableTransportError(error.ReadFailed));
+    try std.testing.expect(isRetryableTransportError(error.WriteFailed));
+    try std.testing.expect(isRetryableTransportError(error.UnknownHostName));
+    try std.testing.expect(!isRetryableTransportError(error.Canceled));
+    try std.testing.expect(!isRetryableTransportError(error.UnsupportedUriScheme));
+    try std.testing.expect(!isRetryableTransportError(error.HttpHeadersInvalid));
+    try std.testing.expect(!isRetryableTransportError(error.TooManyHttpRedirects));
+}
+
+test "backoffMilliseconds doubles from 200 ms and caps" {
+    try std.testing.expectEqual(@as(u64, 200), backoffMilliseconds(0));
+    try std.testing.expectEqual(@as(u64, 400), backoffMilliseconds(1));
+    try std.testing.expectEqual(@as(u64, 800), backoffMilliseconds(2));
+    try std.testing.expectEqual(@as(u64, 1600), backoffMilliseconds(3));
+    try std.testing.expectEqual(http_retry_max_ms, backoffMilliseconds(16));
+}
+
+test "parseRetryAfterSeconds reads delay-seconds and caps" {
+    const with_retry = "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 7\r\n\r\n";
+    const head = try http.Client.Response.Head.parse(with_retry);
+    try std.testing.expectEqual(@as(?u64, 7), parseRetryAfterSeconds(head));
+
+    const mixed_case = "HTTP/1.1 503 Service Unavailable\r\nretry-after: 12\r\n\r\n";
+    const head2 = try http.Client.Response.Head.parse(mixed_case);
+    try std.testing.expectEqual(@as(?u64, 12), parseRetryAfterSeconds(head2));
+
+    const huge = "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 99999\r\n\r\n";
+    const head3 = try http.Client.Response.Head.parse(huge);
+    try std.testing.expectEqual(@as(?u64, http_retry_after_cap_s), parseRetryAfterSeconds(head3));
+
+    const http_date = "HTTP/1.1 429 Too Many Requests\r\nRetry-After: Wed, 21 Oct 2015 07:28:00 GMT\r\n\r\n";
+    const head4 = try http.Client.Response.Head.parse(http_date);
+    try std.testing.expectEqual(@as(?u64, null), parseRetryAfterSeconds(head4));
+
+    const none = "HTTP/1.1 503 Service Unavailable\r\n\r\n";
+    const head5 = try http.Client.Response.Head.parse(none);
+    try std.testing.expectEqual(@as(?u64, null), parseRetryAfterSeconds(head5));
+}
+
+test "retryWaitMilliseconds prefers Retry-After over exponential" {
+    try std.testing.expectEqual(@as(u64, 7000), retryWaitMilliseconds(0, 7));
+    try std.testing.expectEqual(@as(u64, 200), retryWaitMilliseconds(0, null));
 }
 
 test "isRemoteUrl detects http and https" {
