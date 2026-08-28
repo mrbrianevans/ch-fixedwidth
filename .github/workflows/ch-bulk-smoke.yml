@@ -1,0 +1,167 @@
+# Daily “latest of each product exits 0” gate.
+#
+# Converts the latest Companies Catalogue files for products 192, 197, 198, and
+# 216. Product 195 uses the same snapshot parser as 216 and is skipped.
+# Cron converts one 216 shard (smallest by size_bytes, currently …_ni.dat).
+# workflow_dispatch with full_216 converts every 216 path (~13 GB).
+#
+# Scheduled workflows run from the default branch. Files are streamed; nothing
+# is committed or uploaded.
+name: CH bulk smoke
+
+on:
+  schedule:
+    - cron: "0 8 * * *" # UTC, after Companies House overnight drop
+  workflow_dispatch:
+    inputs:
+      full_216:
+        description: Convert every Prod 216 shard (~13 GB). Daily cron uses the smallest shard only.
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ch-bulk-smoke
+  cancel-in-progress: false
+
+jobs:
+  smoke:
+    name: Latest product files exit 0
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ github.event.inputs.full_216 == 'true' && 240 || 90 }}
+
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: "0.16.0"
+
+      - name: Build (ReleaseSafe)
+        run: zig build -Doptimize=ReleaseSafe
+
+      - name: Fetch latest.json and select URLs
+        env:
+          FULL_216: ${{ github.event.inputs.full_216 == 'true' && 'true' || 'false' }}
+        run: |
+          set -euo pipefail
+          curl -fsS https://s3.companiescatalogue.co.uk/latest.json -o "$RUNNER_TEMP/latest.json"
+          python3 - "$RUNNER_TEMP/latest.json" "$RUNNER_TEMP/urls.tsv" "$FULL_216" <<'PY'
+          import json
+          import sys
+
+          catalogue = "https://s3.companiescatalogue.co.uk"
+          keep = ("prod192", "prod197", "prod198", "prod216")
+          src, dest, full_216_flag = sys.argv[1], sys.argv[2], sys.argv[3]
+          full_216 = full_216_flag.lower() == "true"
+
+          with open(src, encoding="utf-8") as f:
+              products = json.load(f)
+
+          by_code = {p["product_code"]: p for p in products}
+          missing = [code for code in keep if code not in by_code]
+          if missing:
+              sys.exit("latest.json missing product_code(s): " + ", ".join(missing))
+
+          rows = []
+          for code in ("prod192", "prod197", "prod198"):
+              paths = by_code[code].get("latest_paths") or []
+              if not paths:
+                  sys.exit(f"latest.json has no latest_paths for {code}")
+              for item in paths:
+                  path = item["path"]
+                  rows.append((code, catalogue + path, item.get("size_bytes", 0)))
+
+          paths_216 = by_code["prod216"].get("latest_paths") or []
+          if not paths_216:
+              sys.exit("latest.json has no latest_paths for prod216")
+          if full_216:
+              chosen_216 = paths_216
+          else:
+              chosen_216 = [min(paths_216, key=lambda p: p.get("size_bytes") or 0)]
+          for item in chosen_216:
+              rows.append(("prod216", catalogue + item["path"], item.get("size_bytes", 0)))
+
+          with open(dest, "w", encoding="utf-8") as out:
+              for code, url, size in rows:
+                  out.write(f"{code}\t{url}\t{size}\n")
+                  print(f"{code}\t{size}\t{url}")
+          PY
+
+      - name: Convert each latest file
+        run: |
+          set -euo pipefail
+          BIN=./zig-out/bin/ch-fixedwidth
+          if [[ ! -x "$BIN" ]]; then
+            echo "ch-fixedwidth binary missing at $BIN" >&2
+            ls -la zig-out/bin || true
+            exit 1
+          fi
+
+          converted=0
+          skipped=0
+          declare -A converted_by
+          converted_by=([prod192]=0 [prod197]=0 [prod198]=0 [prod216]=0)
+
+          {
+            echo "## CH bulk smoke"
+            echo
+            echo "| Product | URL | Result |"
+            echo "|---------|-----|--------|"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          while IFS=$'\t' read -r code url size; do
+            [[ -n "$url" ]] || continue
+            echo "::group::${code} ${url}"
+            out="$RUNNER_TEMP/out"
+            log="$RUNNER_TEMP/cli.log"
+            rm -rf "$out"
+            mkdir -p "$out"
+            set +e
+            "$BIN" -o "$out" "$url" >"$log" 2>&1
+            code_exit=$?
+            set -e
+            if [[ "$code_exit" -eq 0 ]]; then
+              echo "exit 0 (trailer match)"
+              converted=$((converted + 1))
+              converted_by[$code]=$((converted_by[$code] + 1))
+              echo "| \`${code}\` | \`${url}\` | exit 0 |" >> "$GITHUB_STEP_SUMMARY"
+            elif grep -qE 'HTTP[[:space:]]+404' "$log"; then
+              echo "::notice::Skipping 404 ${url}"
+              skipped=$((skipped + 1))
+              cat "$log" || true
+              echo "| \`${code}\` | \`${url}\` | skipped 404 |" >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "::error::ch-fixedwidth exited ${code_exit} for ${url}"
+              cat "$log" || true
+              echo "| \`${code}\` | \`${url}\` | **fail** (exit ${code_exit}) |" >> "$GITHUB_STEP_SUMMARY"
+              echo "::endgroup::"
+              exit 1
+            fi
+            rm -rf "$out"
+            echo "::endgroup::"
+          done < "$RUNNER_TEMP/urls.tsv"
+
+          {
+            echo
+            echo "Converted ${converted} file(s); skipped ${skipped} 404(s)."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [[ "$converted" -eq 0 ]]; then
+            echo "No files converted successfully" >&2
+            exit 1
+          fi
+
+          for code in prod192 prod197 prod198 prod216; do
+            if [[ "${converted_by[$code]}" -eq 0 ]]; then
+              echo "::warning::No successful convert for ${code} (all paths 404 or absent)"
+            fi
+          done
