@@ -44,13 +44,13 @@ Freestanding WASM is published as `ch_fixedwidth-wasm32-freestanding.wasm`. The 
 ```bash
 ch-fixedwidth --help
 ch-fixedwidth --version
-ch-fixedwidth [-workers N] -o DIR <input.dat|input_dir/|http(s)://.../file.dat|->
+ch-fixedwidth [--workers N] -o DIR <input.dat|input_dir/|http(s)://.../file.dat|->
 ```
 
 | Argument | Description |
 |----------|-------------|
 | `-o DIR` | Directory for CSV output (required; created if missing). Not defaulted to the current directory. |
-| `-workers N` | Optional officers seek-split thread count (default: CPU count, max 32) |
+| `--workers N` | Optional officers seek-split thread count (default: `min(CPU count, 32)`; ignored for 192 / 197) |
 | Input | A `.dat` file, a directory of `.dat` files, an `http://` / `https://` URL, or `-` (stdin) |
 
 Flags must come before the positional input.
@@ -64,14 +64,16 @@ ch-fixedwidth -o ./output https://example.com/data/Prod216_4257_ew_6.dat
 ch-fixedwidth -o ./output - < Prod216_4257_ew_6.dat
 ```
 
-Remote URLs and stdin are converted as a stream (the full file is not buffered to disk first). Directory input converts each top-level `.dat` one at a time.
+Remote URLs and stdin are converted as a stream (the full file is not buffered to disk first). Directory input converts each top-level `.dat` one at a time. A remote GET is retried on 429, 5xx, and connection errors (exponential backoff, up to five attempts).
 
 ### Exit codes
 
 | Code | Meaning |
 |------|---------|
-| 0 | Trailer counts matched. Prod 197 unknown tags are **warnings on stderr**; they do not fail the run. |
+| 0 | Trailer counts matched. Prod 197 unknown tags are **warnings on stderr**; they do not fail the run. `-h` / `-V` also exit 0. |
 | 1 | Failure (unknown record type, field overflow, trailer mismatch, I/O, …) |
+| 2 | Usage (no args, extra args, unknown flag, missing `-o`, …) |
+| 130 | Interrupted (Ctrl-C) |
 
 A failed run leaves whatever CSVs were already written.
 

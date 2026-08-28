@@ -26,7 +26,7 @@ zig fmt --check .
 
 CLI binary: `./zig-out/bin/ch-fixedwidth` (or `ch-fixedwidth.exe` on Windows).
 
-Invocation: `ch-fixedwidth [-workers N] -o DIR <input>`. `-o` is required. Optional `-workers N` caps officers seek-split threads (default: CPU count, max 32). Stdin and remote URLs stay sequential.
+Invocation: `ch-fixedwidth [--workers N] -o DIR <input>`. `-o` is required. Optional `--workers N` caps officers seek-split threads (default: `min(CPU count, 32)`). Products 192 / 197, stdin, and remote URLs stay sequential.
 
 ### Remote URL, stdin, and directory input (CLI only)
 
@@ -34,15 +34,17 @@ The native CLI accepts a local file path, a **directory** of `.dat` files, an `h
 
 | Input | Pipeline |
 |-------|----------|
-| Single local file | Multi-threaded seek split for officers products (`-workers N` or CPU count); sequential for 192 / 197 |
+| Single local file | Multi-threaded seek split for officers products (`--workers N` or `min(CPU count, 32)`); sequential for 192 / 197 |
 | Directory of `.dat` | Lists top-level `*.dat` only; processes **one file at a time** with the same per-file strategy as a single file. See [DDR-directory-parallelism.md](DDR-directory-parallelism.md) |
-| Remote URL / stdin | Sequential streaming via `processFromReader` (no parallel seeks) |
+| Remote URL / stdin | Sequential streaming via `processFromReader` (no parallel seeks). Remote GET retries 429, 5xx, and connect/send/header failures with exponential backoff (5 attempts, 200 ms base, 10 s cap; integer `Retry-After` up to 60 s) |
 
 WASM and the C ABI are unchanged (no network or directory fan-out).
 
-### Bulk verification (local)
+### Bulk verification
 
-Full Companies House extracts are gitignored (`Prod*.dat` / `Prod*.txt`). For a release gate, convert a local copy of each product and confirm trailer match plus zero unexpected warnings:
+Daily CI (`.github/workflows/ch-bulk-smoke.yml`) is the “latest of each product exits 0” gate. It runs at 08:00 UTC from the default branch: `curl` [latest.json](https://s3.companiescatalogue.co.uk/latest.json), keep `prod192` / `prod197` / `prod198` / `prod216` (`is_ingested` is ignored), and stream each selected path through `ch-fixedwidth -o "$RUNNER_TEMP/out" "$URL"`. Exit 0 is a trailer match. HTTP 404 skips that file with a notice; any other non-zero fails the job. Cron converts one 216 shard (smallest `size_bytes`); `workflow_dispatch` with `full_216` converts all nine (~13 GB). Product 195 is skipped (same snapshot parser as 216). Nothing is committed or uploaded (`*.dat` is gitignored).
+
+Full Companies House extracts are gitignored (`Prod*.dat` / `Prod*.txt`). For a local release check, convert a copy of each product and confirm trailer match plus zero unexpected warnings:
 
 ```bash
 zig build -Doptimize=ReleaseFast

@@ -10,18 +10,24 @@ Decisions: [issue #8](https://github.com/mrbrianevans/ch-fixedwidth/issues/8).
 | Surface | Frozen |
 |---------|--------|
 | CLI binary name | `ch-fixedwidth` |
-| Invocation | `ch-fixedwidth [-workers N] -o DIR <input>` plus `--help` / `--version` |
-| Input kinds | file, directory of `*.dat`, `http(s)://`, `-` (stdin) |
+| Invocation | `ch-fixedwidth [--workers N] -o DIR <input>` plus `--help` / `--version` |
+| Input kinds | file, directory of `*.dat`, `http(s)://`, `-` (stdin). Adding a kind that does not change existing invocations is a **minor**. |
 | Output | directory given with `-o` (created if missing; no cwd default) |
 | Filenames | `{stem}_data_{basename}.csv` (stdin basename `stdin`) |
 | CSV headers | exact strings per **product** (198 persons ≠ 195/216 persons) |
 | Success | exit 0 and trailer counts match |
+| Usage | exit 2 (no args, extra args, unknown flag, missing `-o`, …). `-h` / `-V` stay 0 |
 | Failure | exit 1 (code 1 remains the generic failure) |
+| Interrupt | exit 130 (Ctrl-C) |
 | C / WASM integers | `CH_FILE_*`, `CH_OUTPUT_*`, `CH_ERR_*` — append-only |
 | C / WASM structs | kind-indexed `ChParseResult` / `ChStreamStats` (`CH_MAX_OUTPUT_KINDS` = 16) |
 | TypeScript host | `@ch-fixedwidth/wasm-ts` layout and named aliases for kinds 0–7 |
 
 New bulk products in 1.x are **minors**: append a `CH_OUTPUT_*` / `CH_FILE_*` id and fill an unused slot. Hosts that do not know the id ignore the slot.
+
+Adding a CLI **input kind** that does not change existing invocations (the `-o DIR` form still works the same way for file / directory / URL / stdin) is a **minor**. Changing those invocations, or requiring a new flag for current inputs, is a major.
+
+`--workers N` defaults to `min(CPU count, 32)` for officers seek-split. Products 192 and 197 ignore it (sequential). The flag is part of the frozen CLI.
 
 ## What is a major after 1.0
 
@@ -36,7 +42,7 @@ New bulk products in 1.x are **minors**: append a `CH_OUTPUT_*` / `CH_FILE_*` id
 - Browser converter UX (it consumes wasm-ts)
 - npm publish of `@ch-fixedwidth/wasm-ts` (package stays private until a later publish against this ABI)
 - Zig module internals (`ParseResult` arrays, `Stream` fields)
-- `--help` wording (flags and the `-o DIR` form stay)
+- `--help` wording (flags and the `-o DIR` form stay; new input kinds are minors)
 
 ## Honesty rules
 
@@ -49,6 +55,10 @@ New bulk products in 1.x are **minors**: append a `CH_OUTPUT_*` / `CH_FILE_*` id
 | Prod 197 per-form V4.6d sequence | Not validated. This is not a complete sequence parser. |
 
 CLI warnings go to stderr. C/WASM/TS expose `warning_count` and `last_warning` on the result/stats. Exit 0 does not mean every 197 tag was captured.
+
+## Bulk smoke
+
+The daily job in `.github/workflows/ch-bulk-smoke.yml` is the latest-file exit-0 gate for products 192, 197, 198, and 216. It does not freeze catalogue URLs or shard names.
 
 ## CLI defaults on failure
 

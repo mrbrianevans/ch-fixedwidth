@@ -1,11 +1,56 @@
 //! CLI entry point: local file/directory, HTTP(S) URL, or stdin (`-`) in, CSV files out.
 //! Parsing logic lives in the `ch_fixedwidth` library.
 //!
-//! Invocation: `ch-fixedwidth [-workers N] -o DIR <input>`
+//! Invocation: `ch-fixedwidth [--workers N] -o DIR <input>`
 //! `-o` is required (no cwd default). Flags must precede the positional input.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const ch = @import("ch_fixedwidth");
+
+/// Shell convention for SIGINT (128 + 2). Installed so Windows Ctrl-C matches POSIX.
+const interrupt_exit_code: u8 = 130;
+
+fn installInterruptExit() void {
+    if (comptime builtin.os.tag == .windows) {
+        const windows = std.os.windows;
+        const HandlerFn = *const fn (ctrl_type: windows.DWORD) callconv(.winapi) windows.BOOL;
+        const k32 = struct {
+            extern "kernel32" fn SetConsoleCtrlHandler(
+                handler: ?HandlerFn,
+                add: windows.BOOL,
+            ) callconv(.winapi) windows.BOOL;
+
+            fn handler(ctrl_type: windows.DWORD) callconv(.winapi) windows.BOOL {
+                // 0 = CTRL_C_EVENT, 1 = CTRL_BREAK_EVENT
+                if (ctrl_type == 0 or ctrl_type == 1) {
+                    std.process.exit(interrupt_exit_code);
+                }
+                return .FALSE;
+            }
+        };
+        _ = k32.SetConsoleCtrlHandler(&k32.handler, .TRUE);
+        return;
+    }
+
+    if (comptime switch (builtin.os.tag) {
+        .wasi, .uefi, .freestanding, .other => false,
+        else => true,
+    }) {
+        const posix = std.posix;
+        const Handler = struct {
+            fn sigint(_: posix.SIG) callconv(.c) void {
+                std.process.exit(interrupt_exit_code);
+            }
+        };
+        const act: posix.Sigaction = .{
+            .handler = .{ .handler = Handler.sigint },
+            .mask = posix.sigemptyset(),
+            .flags = 0,
+        };
+        posix.sigaction(posix.SIG.INT, &act, null);
+    }
+}
 
 fn printVersion() void {
     const info = ch.libraryInfo();
@@ -19,14 +64,15 @@ fn printHelp() void {
         \\Usage:
         \\  ch-fixedwidth --version
         \\  ch-fixedwidth --help
-        \\  ch-fixedwidth [-workers N] -o DIR <input>
+        \\  ch-fixedwidth [--workers N] -o DIR <input>
         \\
         \\Options:
-        \\  -o DIR           Output directory (required; created if missing).
-        \\                   There is no default; the current directory is not used.
-        \\  -workers N       Officers seek-split worker threads (default: CPU count, max 32)
-        \\  -h, --help       Show this help
-        \\  -V, --version    Print version and git commit
+        \\  -o DIR                 Output directory (required; created if missing).
+        \\                         There is no default; the current directory is not used.
+        \\  -workers, --workers N  Officers seek-split threads (default: min(CPU count, 32)).
+        \\                         Ignored for products 192 and 197.
+        \\  -h, --help             Show this help
+        \\  -V, --version          Print version and git commit
         \\
         \\Flags must come before the positional <input>.
         \\
@@ -189,6 +235,8 @@ fn printParseError(err: ParseError) void {
 }
 
 pub fn main(init: std.process.Init) void {
+    installInterruptExit();
+
     const arena = init.arena.allocator();
     const io = init.io;
 
