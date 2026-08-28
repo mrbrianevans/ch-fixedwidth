@@ -667,14 +667,24 @@ fn processSingle(
     return processFromReader(io, arena, &file_reader.interface, output_folder, base_name);
 }
 
+fn resolveWorkerCount(requested: ?usize) usize {
+    if (requested) |n| {
+        return @max(1, @min(n, max_workers));
+    }
+    const cpu_count = Thread.getCpuCount() catch 1;
+    return @max(1, @min(cpu_count, max_workers));
+}
+
 /// Convert one local fixed-width file (assumes `output_folder` already exists).
 /// On multi-core native builds, officers products split the file across workers.
 /// Prod 192 / 197 always use the sequential path (multi-CSV / form-group state).
+/// `worker_count` of `null` uses CPU count (capped at `max_workers`).
 fn processOneLocalFile(
     io: Io,
     arena: std.mem.Allocator,
     input_path: []const u8,
     output_folder: []const u8,
+    worker_count: ?usize,
 ) !u8 {
     const base_name = baseInputName(input_path);
 
@@ -698,8 +708,7 @@ fn processOneLocalFile(
         }
     }
 
-    const cpu_count = Thread.getCpuCount() catch 1;
-    const n_workers = @max(1, @min(cpu_count, max_workers));
+    const n_workers = resolveWorkerCount(worker_count);
 
     if (n_workers <= 1) {
         return processSingle(io, arena, input_path, output_folder, base_name);
@@ -711,17 +720,19 @@ fn processOneLocalFile(
 /// `output_folder`. Returns a process exit code (0 = success).
 ///
 /// Prefer `processInput` when the argument may be a path, directory, URL, or stdin.
+/// `worker_count` of `null` uses CPU count (capped at `max_workers`).
 pub fn processLocalFile(
     io: Io,
     arena: std.mem.Allocator,
     input_path: []const u8,
     output_folder: []const u8,
+    worker_count: ?usize,
 ) !u8 {
     Io.Dir.cwd().createDirPath(io, output_folder) catch |err| {
         std.debug.print("Error creating output directory: {s}\n", .{@errorName(err)});
         return 1;
     };
-    return processOneLocalFile(io, arena, input_path, output_folder);
+    return processOneLocalFile(io, arena, input_path, output_folder, worker_count);
 }
 
 /// List non-directory entries under `dir_path` whose names end with `.dat`
@@ -764,11 +775,13 @@ pub fn listDatFilesInDir(
 /// Files are processed **one at a time**. On multi-core native builds each officers
 /// file uses the same within-file seek split as a single-file CLI argument (option B).
 /// See `docs/DDR-directory-parallelism.md`.
+/// `worker_count` of `null` uses CPU count (capped at `max_workers`).
 pub fn processDirectory(
     io: Io,
     arena: std.mem.Allocator,
     dir_path: []const u8,
     output_folder: []const u8,
+    worker_count: ?usize,
 ) !u8 {
     Io.Dir.cwd().createDirPath(io, output_folder) catch |err| {
         std.debug.print("Error creating output directory: {s}\n", .{@errorName(err)});
@@ -787,7 +800,7 @@ pub fn processDirectory(
     for (files) |file_path| {
         std.debug.print("Processing {s}\n", .{file_path});
         // One file at a time with full within-file multi-threading (same as lone file input).
-        const code = processOneLocalFile(io, arena, file_path, output_folder) catch |err| {
+        const code = processOneLocalFile(io, arena, file_path, output_folder, worker_count) catch |err| {
             std.debug.print("Fatal error processing {s}: {s}\n", .{ file_path, @errorName(err) });
             any_failed = true;
             continue;
@@ -894,11 +907,15 @@ pub fn processFromStdin(
 
 /// Convert a local file path, directory of `.dat` files, HTTP(S) URL, or stdin (`-`)
 /// into CSV files under `output_folder`. Returns a process exit code (0 = success).
+///
+/// `worker_count` applies to local officers files (seek-split). Stdin, remote URLs,
+/// and products 192 / 197 stay sequential. `null` uses CPU count (capped at `max_workers`).
 pub fn processInput(
     io: Io,
     arena: std.mem.Allocator,
     input: []const u8,
     output_folder: []const u8,
+    worker_count: ?usize,
 ) !u8 {
     if (isStdinInput(input)) {
         return processFromStdin(io, arena, output_folder);
@@ -918,9 +935,19 @@ pub fn processInput(
     };
 
     return switch (kind) {
-        .directory => processDirectory(io, arena, input, output_folder),
-        .file => processLocalFile(io, arena, input, output_folder),
+        .directory => processDirectory(io, arena, input, output_folder, worker_count),
+        .file => processLocalFile(io, arena, input, output_folder, worker_count),
     };
+}
+
+test "resolveWorkerCount clamps and defaults" {
+    try std.testing.expectEqual(@as(usize, 1), resolveWorkerCount(1));
+    try std.testing.expectEqual(@as(usize, 1), resolveWorkerCount(0));
+    try std.testing.expectEqual(@as(usize, max_workers), resolveWorkerCount(max_workers + 8));
+    try std.testing.expectEqual(@as(usize, 4), resolveWorkerCount(4));
+    const auto = resolveWorkerCount(null);
+    try std.testing.expect(auto >= 1);
+    try std.testing.expect(auto <= max_workers);
 }
 
 test "isRemoteUrl detects http and https" {
@@ -1114,7 +1141,7 @@ test "processDirectory converts each .dat to company and person CSVs" {
     const in_dir = base;
     const out_dir = try std.fmt.allocPrint(arena, "{s}/out", .{base});
 
-    const code = try processDirectory(io, arena, in_dir, out_dir);
+    const code = try processDirectory(io, arena, in_dir, out_dir, null);
     try std.testing.expectEqual(@as(u8, 0), code);
 
     const names = [_][]const u8{ "snap_a", "snap_b" };
@@ -1145,7 +1172,7 @@ test "processInput routes directory path to multi-file conversion" {
 
     // Trailing separator is accepted and still resolves as a directory.
     const in_dir = try std.fmt.allocPrint(arena, "{s}/", .{base});
-    const code = try processInput(io, arena, in_dir, out_dir);
+    const code = try processInput(io, arena, in_dir, out_dir, null);
     try std.testing.expectEqual(@as(u8, 0), code);
 
     const c1 = try readFileAlloc(io, arena, try std.fmt.allocPrint(arena, "{s}/companies_data_batch1.csv", .{out_dir}));
@@ -1167,6 +1194,6 @@ test "processDirectory returns error when no .dat files present" {
     const base = try std.fmt.allocPrint(arena, ".zig-cache/tmp/{s}", .{tmp.sub_path});
     const out_dir = try std.fmt.allocPrint(arena, "{s}/out", .{base});
 
-    const code = try processDirectory(io, arena, base, out_dir);
+    const code = try processDirectory(io, arena, base, out_dir, null);
     try std.testing.expectEqual(@as(u8, 1), code);
 }

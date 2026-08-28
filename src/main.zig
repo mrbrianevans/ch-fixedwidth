@@ -91,7 +91,7 @@ pub fn main(init: std.process.Init) void {
         std.process.exit(1);
     }
 
-    const code = ch.file_convert.processInput(io, arena, args[1], args[2]) catch |err| {
+    const code = ch.file_convert.processInput(io, arena, args[1], args[2], null) catch |err| {
         std.debug.print("Fatal error: {s}\n", .{@errorName(err)});
         std.process.exit(1);
     };
