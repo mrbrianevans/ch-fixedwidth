@@ -21,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Streaming input (remote URL, stdin, local `--workers 1`, and 192 / 197) no longer grows memory with the whole file. CSV batches were allocated on the process-long arena, so draining a batch never released it. The stream now uses a freeing heap allocator, feeds 1 MiB slices straight from the reader buffer, and drains after each slice. Peak RSS stays flat (about 26 MiB for a 200 MiB or 800 MiB officers snapshot over HTTP, down from 326 MiB at 200 MiB).
 - Directory input gives each file its own scratch arena, freed before the next file starts. Read and write buffers no longer accumulate across files (6 × 48 MiB files: 586 MiB → 21 MiB at `--workers 1`).
+- Native read and write buffers are now 1 MiB, down from 8 MiB. Seek-split officers conversion allocated one read and two write buffers per worker, so peak RSS scaled with core count (about 575 MiB at 32 workers). It is now about 100 MiB at 32 workers and 14 MiB at 4. Single-stream runs peak at about 12.5 MiB. Benchmarks showed no throughput loss.
 
 ## [0.2.0] — 2026-08-22
 
