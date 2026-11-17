@@ -10,6 +10,7 @@ const Thread = std.Thread;
 const http = std.http;
 const parse = @import("parse.zig");
 const stream_mod = @import("stream.zig");
+const prefetch = @import("prefetch.zig");
 
 // 1 MiB read / write buffers. Larger buffers gave no throughput gain in benchmarks,
 // but every one is resident memory: seek-split officers conversion allocates one
@@ -1149,7 +1150,22 @@ fn processRemoteBody(
     const decompress_buf = try arena.alloc(u8, decompressBufferLen(encoding));
     var decompress: http.Decompress = undefined;
     const reader = http.Decompress.init(&decompress, body, decompress_buf, encoding);
-    const code = try processFromReader(io, arena, reader, output_folder, base_name);
+
+    const code = if (comptime builtin.single_threaded)
+        try processFromReader(io, arena, reader, output_folder, base_name)
+    else blk: {
+        // Download + decompress on a producer thread, convert on this one, so
+        // network time and conversion time overlap instead of adding up.
+        var pf: prefetch.Prefetch = undefined;
+        try pf.start(io, heapAllocator(), reader, try arena.alloc(u8, read_buffer_size), prefetch.default_block_len, prefetch.default_block_count);
+        const code = processFromReader(io, arena, &pf.interface, output_folder, base_name) catch |err| {
+            _ = pf.finish();
+            return err;
+        };
+        // Join the producer before inspecting `decompress` below.
+        _ = pf.finish();
+        break :blk code;
+    };
     // A decode failure surfaces from the reader as a bare `ReadFailed`; name it.
     const decode_err: ?anyerror = switch (decompress) {
         .zstd => |*d| d.err,
