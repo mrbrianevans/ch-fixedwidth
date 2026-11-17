@@ -591,7 +591,8 @@ pub fn sliceChars(s: []const u8, start: usize, end: usize) []const u8 {
         const len = unicode.utf8ByteSequenceLength(s[i]) catch 1;
         if (char_i == start) byte_start = i;
         char_i += 1;
-        i += len;
+        // A row cut inside a multi-byte character must not slice past its end.
+        i = @min(i + len, s.len);
         if (char_i == end) {
             const bs = byte_start orelse return s[0..0];
             return s[bs..i];
