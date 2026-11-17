@@ -16,6 +16,20 @@ const stream_mod = @import("stream.zig");
 const read_buffer_size: usize = if (builtin.single_threaded) 1 * 1024 * 1024 else 8 * 1024 * 1024;
 const write_buffer_size: usize = if (builtin.single_threaded) 1 * 1024 * 1024 else 8 * 1024 * 1024;
 const max_workers = 32;
+/// Upper bound on input bytes handed to `Stream.feed` before draining batches.
+/// Keeps pending CSV batches small regardless of the reader's buffer size.
+const stream_feed_slice: usize = 1 * 1024 * 1024;
+
+/// General-purpose allocator for allocations that are freed during a run
+/// (Stream carry / CSV batches, per-file scratch arenas). Unlike the
+/// process-long `std.process.Init` arena, frees here release memory, so peak
+/// RSS stays bounded on long-running or multi-file conversions.
+fn heapAllocator() std.mem.Allocator {
+    if (comptime builtin.cpu.arch.isWasm()) {
+        return std.heap.wasm_allocator;
+    }
+    return std.heap.smp_allocator;
+}
 
 const CsvOut = struct {
     file: Io.File,
@@ -488,8 +502,10 @@ fn processParallel(
     return 0;
 }
 
-/// Write one stream CSV batch to the matching output file (created lazily).
-/// Batch bytes already include the CSV header when it is the first flush for that kind.
+/// Write every ready stream CSV batch to the matching output file (created lazily)
+/// and free it. Batch bytes already include the CSV header when it is the first
+/// flush for that kind. `arena` is used only for the one-off output paths and
+/// write buffers (bounded by the number of output kinds).
 fn drainStreamBatches(
     io: Io,
     arena: std.mem.Allocator,
@@ -565,9 +581,29 @@ fn printStreamWarning(_: ?*anyopaque, message: []const u8) void {
 /// Stream input from `reader` into product-specific CSVs under `output_folder`.
 /// Uses the shared `stream.Stream` body parser (same as one-shot / WASM).
 /// Caller must ensure `output_folder` exists. Same output layout as a local file run.
+///
+/// Memory stays O(reader buffer + output write buffers + one feed slice of CSV),
+/// independent of input size: `arena` only receives fixed per-run allocations,
+/// while the Stream (whose CSV batches are allocated and freed continuously)
+/// runs on a freeing heap allocator and is torn down before returning.
 pub fn processFromReader(
     io: Io,
     arena: std.mem.Allocator,
+    reader: *Io.Reader,
+    output_folder: []const u8,
+    base_name: []const u8,
+) !u8 {
+    return processFromReaderWithAllocator(io, arena, heapAllocator(), reader, output_folder, base_name);
+}
+
+/// `processFromReader` with an explicit Stream allocator (tests pass a
+/// leak-checking, memory-limited allocator). `stream_gpa` must actually release
+/// memory on `free` — never pass an arena here, or every drained batch stays
+/// resident and peak memory grows with the whole file.
+fn processFromReaderWithAllocator(
+    io: Io,
+    arena: std.mem.Allocator,
+    stream_gpa: std.mem.Allocator,
     reader: *Io.Reader,
     output_folder: []const u8,
     base_name: []const u8,
@@ -583,12 +619,12 @@ pub fn processFromReader(
     });
     _ = processHeaderRow(header_row) catch return 1;
 
-    var s = stream_mod.Stream.init(arena, .{
+    var s = stream_mod.Stream.init(stream_gpa, .{
         .batch_rows = 0, // defaults
-        .batch_bytes = write_buffer_size,
+        .batch_bytes = stream_feed_slice,
     });
+    defer s.deinit();
     s.setWarnHandler(printStreamWarning, null);
-    // Arena-backed; no explicit deinit required for process lifetime.
 
     var outs: [parse.OutputKind.all.len]?CsvOut = .{null} ** parse.OutputKind.all.len;
     var write_bufs: [parse.OutputKind.all.len]?[]u8 = .{null} ** parse.OutputKind.all.len;
@@ -615,18 +651,23 @@ pub fn processFromReader(
             return 1;
     }
 
-    // Feed the remainder in large chunks (Stream handles partial lines).
-    const feed_buf = try arena.alloc(u8, read_buffer_size);
+    // Feed the remainder straight from the reader's own buffer (no extra copy),
+    // in bounded slices so pending batches never exceed ~one slice of CSV.
+    // Stream handles partial lines across slices.
     while (true) {
-        const n = reader.readSliceShort(feed_buf) catch |err| {
-            std.debug.print("Error reading input: {s}\n", .{@errorName(err)});
-            return 1;
+        const buffered = reader.peekGreedy(1) catch |err| switch (err) {
+            error.EndOfStream => break,
+            error.ReadFailed => {
+                std.debug.print("Error reading input: {s}\n", .{@errorName(err)});
+                return 1;
+            },
         };
-        if (n == 0) break;
-        s.feed(feed_buf[0..n]) catch |err| {
+        const chunk = buffered[0..@min(buffered.len, stream_feed_slice)];
+        s.feed(chunk) catch |err| {
             std.debug.print("Error parsing input: {s}\n", .{@errorName(err)});
             return 1;
         };
+        reader.toss(chunk.len);
         if ((try drainStreamBatches(io, arena, &s, output_folder, base_name, &outs, &write_bufs)) != 0)
             return 1;
     }
@@ -799,8 +840,13 @@ pub fn processDirectory(
     var any_failed = false;
     for (files) |file_path| {
         std.debug.print("Processing {s}\n", .{file_path});
+        // Per-file scratch arena: read/write buffers and paths for one file are
+        // released before the next, so a long directory run does not keep
+        // N files' worth of multi-MiB buffers resident.
+        var file_arena_state = std.heap.ArenaAllocator.init(heapAllocator());
+        defer file_arena_state.deinit();
         // One file at a time with full within-file multi-threading (same as lone file input).
-        const code = processOneLocalFile(io, arena, file_path, output_folder, worker_count) catch |err| {
+        const code = processOneLocalFile(io, file_arena_state.allocator(), file_path, output_folder, worker_count) catch |err| {
             std.debug.print("Fatal error processing {s}: {s}\n", .{ file_path, @errorName(err) });
             any_failed = true;
             continue;
@@ -1215,6 +1261,74 @@ test "processFromReader streams fixture like stdin and remote" {
     const persons = try readFileAlloc(io, arena, persons_path);
     try std.testing.expectEqualStrings(expected_companies_fixture, companies);
     try std.testing.expectEqualStrings(expected_persons_fixture, persons);
+}
+
+/// Build an officers snapshot of at least `min_bytes` by repeating the mini
+/// fixture body, with a matching trailer count.
+fn buildLargeSnapshot(allocator: std.mem.Allocator, min_bytes: usize) ![]u8 {
+    var lines = std.mem.tokenizeScalar(u8, mini_snapshot_fixture, '\n');
+    const header = lines.next().?;
+    const body_start = @intFromPtr(lines.peek().?.ptr) - @intFromPtr(mini_snapshot_fixture.ptr);
+    var body_lines: usize = 0;
+    var body_end: usize = body_start;
+    while (lines.next()) |line| {
+        if (std.mem.startsWith(u8, line, "99999999")) break;
+        body_lines += 1;
+        body_end = @intFromPtr(line.ptr) - @intFromPtr(mini_snapshot_fixture.ptr) + line.len + 1;
+    }
+    const body = mini_snapshot_fixture[body_start..body_end];
+
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try out.appendSlice(allocator, header);
+    try out.append(allocator, '\n');
+    var records: usize = 0;
+    while (out.items.len < min_bytes) {
+        try out.appendSlice(allocator, body);
+        records += body_lines;
+    }
+    try out.print(allocator, "99999999{d:0>8}\n", .{records});
+    return out.toOwnedSlice(allocator);
+}
+
+test "processFromReader stream memory stays bounded independent of input size" {
+    // Regression for streaming URL/stdin memory growing with the whole file:
+    // every drained CSV batch must be released, so the Stream's live heap stays
+    // near one feed slice even when the input is many times larger.
+    const io = std.testing.io;
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const input_bytes: usize = 12 * stream_feed_slice;
+    const stream_limit: usize = 4 * stream_feed_slice;
+
+    const input = try buildLargeSnapshot(std.testing.allocator, input_bytes);
+    defer std.testing.allocator.free(input);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const out_rel = try std.fmt.allocPrint(arena, ".zig-cache/tmp/{s}/out", .{tmp.sub_path});
+    try Io.Dir.cwd().createDirPath(io, out_rel);
+
+    var gpa_state: std.heap.DebugAllocator(.{ .enable_memory_limit = true }) = .init;
+    gpa_state.requested_memory_limit = stream_limit;
+    {
+        var reader = Io.Reader.fixed(input);
+        const code = try processFromReaderWithAllocator(io, arena, gpa_state.allocator(), &reader, out_rel, "big");
+        try std.testing.expectEqual(@as(u8, 0), code);
+        // Everything the Stream allocated has been returned.
+        try std.testing.expectEqual(@as(usize, 0), gpa_state.total_requested_bytes);
+    }
+    try std.testing.expectEqual(std.heap.Check.ok, gpa_state.deinit());
+
+    // Output is complete: header + one row per company record.
+    const companies_path = try std.fmt.allocPrint(arena, "{s}/companies_data_big.csv", .{out_rel});
+    const companies = try readFileAlloc(io, arena, companies_path);
+    const expected_rows = std.mem.count(u8, expected_companies_fixture, "\n") - 1;
+    const got_rows = std.mem.count(u8, companies, "\n") - 1;
+    try std.testing.expect(got_rows > expected_rows * 1000);
+    try std.testing.expectEqual(@as(usize, 0), got_rows % expected_rows);
 }
 
 test "parallel and sequential officers paths produce identical CSV" {
