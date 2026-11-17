@@ -1074,7 +1074,6 @@ pub fn processFromRemoteUrl(
 
         req = client.request(.GET, uri, .{
             .headers = .{
-                .accept_encoding = .{ .override = "identity" },
                 .user_agent = .{ .override = "ch-fixedwidth-parser" },
             },
             .keep_alive = false,
@@ -1084,6 +1083,7 @@ pub fn processFromRemoteUrl(
             continue;
         };
         req_live = true;
+        req.accept_encoding = remote_accept_encoding;
 
         req.sendBodiless() catch |err| {
             if (!try maybeRetryTransport(io, err, "sending HTTP request", attempt, url)) return 1;
@@ -1118,11 +1118,77 @@ pub fn processFromRemoteUrl(
         return 1;
     }
 
-    // Transfer buffer doubles as the Io.Reader buffer for line-delimited parsing.
-    const transfer_buf = try arena.alloc(u8, read_buffer_size);
-    const body_reader = response.reader(transfer_buf);
+    const encoding = response.head.content_encoding;
+    if (encoding != .identity) {
+        std.debug.print("Response is {s}-compressed; decompressing while streaming\n", .{@tagName(encoding)});
+    }
+    // Raw (transfer-decoded, still content-encoded) body bytes.
+    const transfer_buf = try arena.alloc(u8, transferBufferLen(encoding));
+    return processRemoteBody(io, arena, response.reader(transfer_buf), encoding, output_folder, base_name);
+}
 
-    return processFromReader(io, arena, body_reader, output_folder, base_name);
+/// Convert a remote response body with the given `Content-Encoding`.
+/// Identity bodies go straight to the parser; compressed bodies are wrapped in
+/// the matching std decompressor, whose buffer then feeds the parser.
+fn processRemoteBody(
+    io: Io,
+    arena: std.mem.Allocator,
+    body: *Io.Reader,
+    encoding: http.ContentEncoding,
+    output_folder: []const u8,
+    base_name: []const u8,
+) !u8 {
+    if (encoding == .compress) {
+        // Never requested, so `receiveHead` rejects it; guard anyway.
+        std.debug.print("Error: unsupported Content-Encoding: compress\n", .{});
+        return 1;
+    }
+    const decompress_buf = try arena.alloc(u8, decompressBufferLen(encoding));
+    var decompress: http.Decompress = undefined;
+    const reader = http.Decompress.init(&decompress, body, decompress_buf, encoding);
+    const code = try processFromReader(io, arena, reader, output_folder, base_name);
+    // A decode failure surfaces from the reader as a bare `ReadFailed`; name it.
+    const decode_err: ?anyerror = switch (decompress) {
+        .zstd => |*d| d.err,
+        .flate => |*d| d.err,
+        .none => null,
+    };
+    // `ReadFailed` here is the transport failing underneath the decoder.
+    if (decode_err) |err| if (err != error.ReadFailed) {
+        std.debug.print("Error decompressing {s} body: {s}\n", .{ @tagName(encoding), @errorName(err) });
+    };
+    return code;
+}
+
+/// Content codings the CLI asks for on remote GETs. zstd first: Companies
+/// Catalogue (Cloudflare) serves zstd straight from the stored object, about
+/// 5.5x fewer bytes than identity and without on-the-fly re-compression (gzip
+/// is re-compressed at the edge and is markedly slower). `std.http.Client`
+/// emits these in enum order with zstd first, and `receiveHead` rejects any
+/// coding not listed here.
+const remote_accept_encoding = blk: {
+    var flags = http.Client.Request.default_accept_encoding;
+    flags[@intFromEnum(http.ContentEncoding.zstd)] = true;
+    break :blk flags;
+};
+
+/// Body transfer buffer for `encoding`. Identity bodies are parsed straight
+/// from it, so it is large; compressed bodies only pass compressed bytes to the
+/// decompressor through it.
+fn transferBufferLen(encoding: http.ContentEncoding) usize {
+    return if (encoding == .identity) read_buffer_size else 64 * 1024;
+}
+
+/// Decompressor buffer length for `encoding` (0 for identity). zstd needs the
+/// default 8 MiB window plus one 128 KiB block (Cloudflare's frames declare a
+/// 2 MiB window; a frame over 8 MiB fails to decode). flate needs at least its
+/// 64 KiB window; 1 MiB lets the parser see larger reads per feed.
+fn decompressBufferLen(encoding: http.ContentEncoding) usize {
+    return switch (encoding) {
+        .identity, .compress => 0,
+        .zstd => std.compress.zstd.default_window_len + std.compress.zstd.block_size_max,
+        .deflate, .gzip => @max(std.compress.flate.max_window_len, 1024 * 1024),
+    };
 }
 
 /// Stream-read a fixed-width file from process stdin and convert to CSV under `output_folder`.
@@ -1507,6 +1573,88 @@ test "parallel split never starts a worker inside a re-joined record" {
             try readFileAlloc(io, arena, try std.fmt.allocPrint(arena, "{s}/persons_data_split.csv", .{out_par})),
         );
     }
+}
+
+const mini_snapshot_gzip_fixture = @embedFile("testdata/mini_snapshot.dat.gz");
+
+/// Wrap `data` in a zstd frame made of raw (stored) blocks of `block_len`
+/// bytes. `window_descriptor` is the frame header's window byte (0x58 = 2 MiB,
+/// what Cloudflare's frames declare). Std has no zstd compressor; stored blocks
+/// still exercise frame parsing, the window check, and buffer sizing.
+fn buildStoredZstdFrame(allocator: std.mem.Allocator, data: []const u8, block_len: usize, window_descriptor: u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try out.appendSlice(allocator, &.{ 0x28, 0xB5, 0x2F, 0xFD }); // magic
+    try out.append(allocator, 0x00); // no content size, not single-segment, no checksum
+    try out.append(allocator, window_descriptor);
+    var off: usize = 0;
+    while (true) {
+        const n = @min(block_len, data.len - off);
+        const last: u24 = @intFromBool(off + n == data.len);
+        const header: u24 = (@as(u24, @intCast(n)) << 3) | last; // block type 0 = raw
+        try out.appendSlice(allocator, &std.mem.toBytes(std.mem.nativeToLittle(u24, header))[0..3].*);
+        try out.appendSlice(allocator, data[off..][0..n]);
+        off += n;
+        if (last == 1) break;
+    }
+    return out.toOwnedSlice(allocator);
+}
+
+fn expectRemoteBodyConverts(encoding: http.ContentEncoding, body_bytes: []const u8) !void {
+    const io = std.testing.io;
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const out_rel = try std.fmt.allocPrint(arena, ".zig-cache/tmp/{s}/out", .{tmp.sub_path});
+    try Io.Dir.cwd().createDirPath(io, out_rel);
+
+    var body = Io.Reader.fixed(body_bytes);
+    try std.testing.expectEqual(@as(u8, 0), try processRemoteBody(io, arena, &body, encoding, out_rel, "remote"));
+
+    const companies = try readFileAlloc(io, arena, try std.fmt.allocPrint(arena, "{s}/companies_data_remote.csv", .{out_rel}));
+    const persons = try readFileAlloc(io, arena, try std.fmt.allocPrint(arena, "{s}/persons_data_remote.csv", .{out_rel}));
+    try std.testing.expectEqualStrings(expected_companies_fixture, companies);
+    try std.testing.expectEqualStrings(expected_persons_fixture, persons);
+}
+
+test "remote GET asks for zstd, gzip and deflate as well as identity" {
+    try std.testing.expect(remote_accept_encoding[@intFromEnum(http.ContentEncoding.zstd)]);
+    try std.testing.expect(remote_accept_encoding[@intFromEnum(http.ContentEncoding.gzip)]);
+    try std.testing.expect(remote_accept_encoding[@intFromEnum(http.ContentEncoding.deflate)]);
+    try std.testing.expect(remote_accept_encoding[@intFromEnum(http.ContentEncoding.identity)]);
+    try std.testing.expect(!remote_accept_encoding[@intFromEnum(http.ContentEncoding.compress)]);
+}
+
+test "processRemoteBody converts identity, zstd and gzip bodies alike" {
+    try expectRemoteBodyConverts(.identity, mini_snapshot_fixture);
+
+    // Several small blocks so lines straddle block boundaries.
+    const zst = try buildStoredZstdFrame(std.testing.allocator, mini_snapshot_fixture, 97, 0x58);
+    defer std.testing.allocator.free(zst);
+    try expectRemoteBodyConverts(.zstd, zst);
+
+    // `gzip -n -9 mini_snapshot.dat`
+    try expectRemoteBodyConverts(.gzip, mini_snapshot_gzip_fixture);
+}
+
+test "processRemoteBody fails cleanly on a zstd window over 8 MiB" {
+    const io = std.testing.io;
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const out_rel = try std.fmt.allocPrint(arena, ".zig-cache/tmp/{s}/out", .{tmp.sub_path});
+    try Io.Dir.cwd().createDirPath(io, out_rel);
+
+    // Window descriptor 0x70: 2^24 = 16 MiB, above the decoder's 8 MiB window.
+    const zst = try buildStoredZstdFrame(std.testing.allocator, mini_snapshot_fixture, 4096, 0x70);
+    defer std.testing.allocator.free(zst);
+    var body = Io.Reader.fixed(zst);
+    try std.testing.expectEqual(@as(u8, 1), try processRemoteBody(io, arena, &body, .zstd, out_rel, "remote"));
 }
 
 test "resolveLocalInputKind distinguishes file and directory" {
