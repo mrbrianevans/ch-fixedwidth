@@ -1011,6 +1011,180 @@ pub fn stripCr(row: []const u8) []const u8 {
     return row;
 }
 
+/// Byte length of the line terminator that ended `line_raw` (the bytes before
+/// a `\n`): 2 for CRLF, 1 for a bare LF.
+pub fn lineBreakLen(line_raw: []const u8) usize {
+    return if (line_raw.len > 0 and line_raw[line_raw.len - 1] == '\r') 2 else 1;
+}
+
+/// Number of Unicode characters in UTF-8 `s` (invalid lead bytes count as one).
+pub fn charCount(s: []const u8) usize {
+    if (isAscii(s)) return s.len;
+    var n: usize = 0;
+    for (s) |c| {
+        // Count every byte that is not a UTF-8 continuation byte.
+        if (c & 0xC0 != 0x80) n += 1;
+    }
+    return n;
+}
+
+/// Character offset where an officers company / person record's
+/// variable-length data should end, from the record's own length field.
+/// Company: name length at 36–40, name from 40. Snapshot person (195/216):
+/// variable length at 72–76, data from 76. Update person (198): 107–111, from 111.
+/// Returns null for any other line kind.
+pub fn officersDeclaredEnd(row: []const u8, kind: LineKind, file_type: FileType) ?usize {
+    const field = officersLengthField(kind, file_type) orelse return null;
+    // Only the fixed-width prefix matters; it is almost always ASCII, so avoid
+    // scanning the whole row.
+    const prefix = clamp(row, 0, field + 4);
+    const digits = if (isAscii(prefix)) clamp(row, field, field + 4) else sliceChars(row, field, field + 4);
+    return field + 4 + @as(usize, @intCast(fastAtoi(digits)));
+}
+
+/// Character offset of the 4-digit length field that precedes an officers
+/// record's variable-length data (see `officersDeclaredEnd`).
+pub fn officersLengthField(kind: LineKind, file_type: FileType) ?usize {
+    return switch (kind) {
+        .company => 36,
+        .person => switch (file_type) {
+            .officers_snapshot => 72,
+            .officers_update => 107,
+            .disqualifications, .liquidation => null,
+        },
+        .header, .trailer, .other => null,
+    };
+}
+
+/// True when `row` holds fewer characters than `declared_end`.
+pub fn isShortOf(row: []const u8, declared_end: usize) bool {
+    if (row.len < declared_end) return true;
+    // Byte length ≥ declared; only multi-byte rows can still be short, and a
+    // row of at least 4 bytes per declared character cannot be.
+    if (row.len / 4 >= declared_end) return false;
+    return charCount(row) < declared_end;
+}
+
+/// Maximum size of one officers record after re-joining split lines. The
+/// length fields are four digits, so a record's text is at most ~10 000
+/// characters; 16 KiB leaves room for multi-byte UTF-8.
+pub const max_joined_record_bytes: usize = 16 * 1024;
+
+/// Re-assembles an officers company / person record that Companies House
+/// published with a line break (CRLF or LF) inside its variable-length data.
+///
+/// A record is held when its line is shorter than its declared length. Each
+/// following line that is not a valid record start (`classifyLine` → `.other`)
+/// is appended until the declared length is reached, counting the original
+/// line-break bytes (the length field includes them). The embedded break is
+/// replaced by a single space in the joined record, so CSV rows stay on one
+/// line, and the record's length field is rewritten to match the joined text
+/// (a CRLF becomes one space, so the field shrinks by one). If the next line is a valid record start instead, the held record is
+/// emitted unchanged (some records are legitimately a character or two short).
+pub const RecordJoiner = struct {
+    buf: [max_joined_record_bytes]u8 = undefined,
+    len: usize = 0,
+    active: bool = false,
+    kind: LineKind = .other,
+    declared_end: usize = 0,
+    /// Characters covered so far, including original line-break bytes.
+    covered: usize = 0,
+    /// Line-break bytes that ended the most recently held segment.
+    pending_break: usize = 0,
+    /// 1-based input line number where the held record starts.
+    start_line: u64 = 0,
+    /// Character offset of the record's 4-digit length field.
+    length_field: usize = 0,
+    /// Line-break bytes dropped so far (CRLF → one space drops one byte).
+    removed: usize = 0,
+
+    pub const Error = error{ RowTooLarge, JoinOverrun };
+
+    /// Hold `row` (already CR-stripped). `break_len` is its terminator length.
+    pub fn begin(
+        self: *RecordJoiner,
+        row: []const u8,
+        kind: LineKind,
+        length_field: usize,
+        declared_end: usize,
+        break_len: usize,
+        line_number: u64,
+    ) Error!void {
+        if (row.len > self.buf.len) return error.RowTooLarge;
+        @memcpy(self.buf[0..row.len], row);
+        self.len = row.len;
+        self.active = true;
+        self.kind = kind;
+        self.declared_end = declared_end;
+        self.covered = charCount(row);
+        self.pending_break = break_len;
+        self.start_line = line_number;
+        self.length_field = length_field;
+        self.removed = 0;
+    }
+
+    /// Append a continuation line. Returns true once the record is complete.
+    /// `error.JoinOverrun` means the joined text exceeds the declared length,
+    /// so the continuation was not part of this record.
+    pub fn append(self: *RecordJoiner, row: []const u8, break_len: usize) Error!bool {
+        std.debug.assert(self.active);
+        const covered = self.covered + self.pending_break + charCount(row);
+        if (covered > self.declared_end) return error.JoinOverrun;
+        if (row.len + 1 > self.buf.len - self.len) return error.RowTooLarge;
+        self.buf[self.len] = ' ';
+        @memcpy(self.buf[self.len + 1 ..][0..row.len], row);
+        self.len += 1 + row.len;
+        self.covered = covered;
+        self.removed += self.pending_break - 1;
+        self.pending_break = break_len;
+        self.rewriteLengthField();
+        return covered == self.declared_end;
+    }
+
+    /// Shrink the declared length by the line-break bytes that were dropped.
+    fn rewriteLengthField(self: *RecordJoiner) void {
+        if (self.removed == 0) return;
+        const rec = self.buf[0..self.len];
+        const field = FieldView.init(rec).get(self.length_field, self.length_field + 4);
+        if (field.len != 4) return;
+        const declared = self.declared_end - self.length_field - 4;
+        const new = declared -| self.removed;
+        const start = @intFromPtr(field.ptr) - @intFromPtr(rec.ptr);
+        _ = std.fmt.bufPrint(self.buf[start..][0..4], "{d:0>4}", .{new}) catch unreachable;
+    }
+
+    pub fn record(self: *const RecordJoiner) []const u8 {
+        return self.buf[0..self.len];
+    }
+
+    pub fn reset(self: *RecordJoiner) void {
+        self.active = false;
+        self.len = 0;
+    }
+};
+
+/// Format a short location for a rejected line: `line N: "<first 40 bytes>"`,
+/// with control and non-ASCII bytes escaped. Returns the written slice.
+pub fn describeLine(dest: []u8, line_number: u64, row: []const u8) []const u8 {
+    return describeLineAt(dest, "line", line_number, row);
+}
+
+/// Like `describeLine` with a custom location label (e.g. `byte offset`).
+pub fn describeLineAt(dest: []u8, label: []const u8, location: u64, row: []const u8) []const u8 {
+    var w: std.Io.Writer = .fixed(dest);
+    w.print("{s} {d}: \"", .{ label, location }) catch return w.buffered();
+    const shown = row[0..@min(row.len, 40)];
+    for (shown) |c| {
+        if (c >= 0x20 and c < 0x7f and c != '"' and c != '\\') {
+            w.writeByte(c) catch return w.buffered();
+        } else {
+            w.print("\\x{x:0>2}", .{c}) catch return w.buffered();
+        }
+    }
+    w.writeAll(if (row.len > shown.len) "\"…" else "\"") catch return w.buffered();
+    return w.buffered();
+}
+
 /// Format one Prod 197 form group as a forms CSV row (including newline).
 pub fn formatLiqFormRow(dest: []u8, form: *const LiqForm) FormatError!usize {
     const fields = [_][]const u8{

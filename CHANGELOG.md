@@ -19,6 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Officers snapshot / update records that Companies House published with a line break (CRLF or bare LF) inside their variable-length data no longer fail with `UnknownRecord` (e.g. `Prod216_4342_ew_3.dat`, `Prod216_4342_ew_7.dat`). A company or person line shorter than its declared length is joined with the following non-record line(s) until the declared length is reached. The embedded break becomes a single space, so each CSV row stays on one line. Both the streaming path and the parallel seek-split path re-join records; split points never start a worker inside a joined record.
+- `UnknownRecord` errors now say where the bad line is: `line N` on the streaming path, `byte offset N` on the parallel path, plus the first 40 bytes of the line.
 - Streaming input (remote URL, stdin, local `--workers 1`, and 192 / 197) no longer grows memory with the whole file. CSV batches were allocated on the process-long arena, so draining a batch never released it. The stream now uses a freeing heap allocator, feeds 1 MiB slices straight from the reader buffer, and drains after each slice. Peak RSS stays flat (about 26 MiB for a 200 MiB or 800 MiB officers snapshot over HTTP, down from 326 MiB at 200 MiB).
 - Directory input gives each file its own scratch arena, freed before the next file starts. Read and write buffers no longer accumulate across files (6 × 48 MiB files: 586 MiB → 21 MiB at `--workers 1`).
 

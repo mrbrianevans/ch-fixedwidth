@@ -192,6 +192,17 @@ const WorkerResult = struct {
     persons: i32 = 0,
     trailer_count: ?i32 = null,
     err_msg: ?[]const u8 = null,
+    /// Location of the failing line (`byte offset N: "…"`), empty when unknown.
+    err_detail_buf: [256]u8 = undefined,
+    err_detail_len: usize = 0,
+
+    fn setDetail(self: *WorkerResult, byte_offset: u64, row: []const u8) void {
+        self.err_detail_len = parse.describeLineAt(&self.err_detail_buf, "byte offset", byte_offset, row).len;
+    }
+
+    fn detail(self: *const WorkerResult) []const u8 {
+        return self.err_detail_buf[0..self.err_detail_len];
+    }
 };
 
 const WorkerCtx = struct {
@@ -216,13 +227,39 @@ const WorkerCtx = struct {
 };
 
 fn workerMain(ctx: *WorkerCtx) void {
-    ctx.result.* = runWorker(ctx) catch |err| .{
-        .err_msg = @errorName(err),
+    ctx.result.* = .{};
+    runWorker(ctx, ctx.result) catch |err| {
+        ctx.result.err_msg = @errorName(err);
     };
 }
 
-fn runWorker(ctx: *WorkerCtx) !WorkerResult {
-    var result: WorkerResult = .{};
+/// Write one officers company / person record to the matching part CSV.
+fn writeOfficersRecord(
+    ctx: *WorkerCtx,
+    result: *WorkerResult,
+    companies_out: *CsvOut,
+    persons_out: *CsvOut,
+    kind: parse.LineKind,
+    row: []const u8,
+) !void {
+    switch (kind) {
+        .company => {
+            try writeCompanyRow(companies_out, row);
+            result.companies += 1;
+        },
+        .person => {
+            try writePersonRow(persons_out, ctx.file_type, row);
+            result.persons += 1;
+        },
+        .header, .trailer, .other => unreachable,
+    }
+}
+
+fn runWorker(ctx: *WorkerCtx, result: *WorkerResult) !void {
+    // Holds a record split by an embedded line break (see `parse.RecordJoiner`).
+    const joiner = try heapAllocator().create(parse.RecordJoiner);
+    defer heapAllocator().destroy(joiner);
+    joiner.* = .{};
 
     const input_file = try Io.Dir.cwd().openFile(ctx.io, ctx.input_path, .{});
     defer input_file.close(ctx.io);
@@ -250,10 +287,13 @@ fn runWorker(ctx: *WorkerCtx) !WorkerResult {
     var first = true;
     while (true) {
         const line_start = file_reader.logicalPos();
+        // Split points always land on a record start (`findLineStartAfter`),
+        // so a held record never continues into the next worker's range.
         if (line_start >= ctx.end_off and !first) break;
 
         const maybe_line = try reader.takeDelimiter('\n');
-        const row = parse.stripCr(maybe_line orelse break);
+        const line_raw = maybe_line orelse break;
+        const row = parse.stripCr(line_raw);
 
         if (first and ctx.handle_header) {
             // Header already validated by the parent before workers spawn.
@@ -264,39 +304,73 @@ fn runWorker(ctx: *WorkerCtx) !WorkerResult {
 
         if (line_start >= ctx.end_off) break;
 
-        if (row.len >= 8 and std.mem.eql(u8, row[0..8], parse.trailer_record_identifier)) {
-            result.trailer_count = parse.parseTrailerCount(row);
-            // Keep reading: extra non-whitespace after the trailer is an error.
-            continue;
-        }
-
         if (result.trailer_count != null) {
             for (row) |c| {
-                if (c != ' ' and c != '\t') return error.FeedAfterTrailer;
+                if (c != ' ' and c != '\t') {
+                    result.setDetail(line_start, row);
+                    return error.FeedAfterTrailer;
+                }
             }
             continue;
         }
 
-        if (row.len <= 8) return error.UnknownRecord;
+        if (row.len == 0) continue;
 
-        // Officers snapshot / update body (record type at byte 8).
-        switch (row[8]) {
-            parse.company_record_type => {
-                try writeCompanyRow(&companies_out, row);
-                result.companies += 1;
+        const kind = parse.classifyLine(row);
+
+        if (joiner.active) {
+            if (kind == .other) {
+                const done = joiner.append(row, parse.lineBreakLen(line_raw)) catch |err| {
+                    result.setDetail(line_start, row);
+                    return switch (err) {
+                        error.RowTooLarge => error.RowTooLarge,
+                        error.JoinOverrun => error.UnknownRecord,
+                    };
+                };
+                if (done) {
+                    try writeOfficersRecord(ctx, result, &companies_out, &persons_out, joiner.kind, joiner.record());
+                    joiner.reset();
+                }
+                continue;
+            }
+            try writeOfficersRecord(ctx, result, &companies_out, &persons_out, joiner.kind, joiner.record());
+            joiner.reset();
+        }
+
+        switch (kind) {
+            .trailer => {
+                result.trailer_count = parse.parseTrailerCount(row);
+                // Keep reading: extra non-whitespace after the trailer is an error.
             },
-            parse.person_record_type => {
-                try writePersonRow(&persons_out, ctx.file_type, row);
-                result.persons += 1;
+            .company, .person => {
+                const end = parse.officersDeclaredEnd(row, kind, ctx.file_type).?;
+                if (parse.isShortOf(row, end)) {
+                    joiner.begin(row, kind, parse.officersLengthField(kind, ctx.file_type).?, end, parse.lineBreakLen(line_raw), line_start) catch |err| {
+                        result.setDetail(line_start, row);
+                        return err;
+                    };
+                } else {
+                    try writeOfficersRecord(ctx, result, &companies_out, &persons_out, kind, row);
+                }
             },
-            else => return error.UnknownRecord,
+            .header, .other => {
+                result.setDetail(line_start, row);
+                return error.UnknownRecord;
+            },
         }
     }
 
-    return result;
+    if (joiner.active) {
+        try writeOfficersRecord(ctx, result, &companies_out, &persons_out, joiner.kind, joiner.record());
+        joiner.reset();
+    }
 }
 
-/// Find the file offset of the first byte of the line that contains or follows `target`.
+/// Find the file offset of the first record start at or after the line that
+/// contains or follows `target`. Lines that are not a record start (header,
+/// trailer, company or person — see `parse.classifyLine`) are skipped: they are
+/// continuations of a record split by an embedded line break, which must stay
+/// with the worker that reads the start of that record.
 fn findLineStartAfter(io: Io, path: []const u8, target: u64, file_size: u64, scratch: []u8) !u64 {
     if (target == 0) return 0;
     if (target >= file_size) return file_size;
@@ -305,19 +379,16 @@ fn findLineStartAfter(io: Io, path: []const u8, target: u64, file_size: u64, scr
     defer file.close(io);
 
     var reader = Io.File.Reader.init(file, io, scratch);
-    const seek_to = if (target > 0) target -| 1 else 0;
-    try reader.seekTo(seek_to);
+    // Start one byte early so a `target` that is already a line start is kept.
+    try reader.seekTo(target - 1);
+    // Discard the (partial) line containing `target - 1`.
+    if ((try reader.interface.takeDelimiter('\n')) == null) return file_size;
 
     while (reader.logicalPos() < file_size) {
-        const pos_before = reader.logicalPos();
+        const line_start = reader.logicalPos();
         const maybe = try reader.interface.takeDelimiter('\n');
-        if (maybe == null) return file_size;
-        if (pos_before < target) {
-            const next = reader.logicalPos();
-            if (next >= target) return next;
-            continue;
-        }
-        return pos_before;
+        const row = parse.stripCr(maybe orelse return file_size);
+        if (parse.classifyLine(row) != .other) return line_start;
     }
     return file_size;
 }
@@ -459,7 +530,12 @@ fn processParallel(
     r = 0;
     while (r < n_ranges) : (r += 1) {
         if (results[r].err_msg) |msg| {
-            std.debug.print("Error in worker {d}: {s}\n", .{ r, msg });
+            const detail = results[r].detail();
+            if (detail.len > 0) {
+                std.debug.print("Error in worker {d}: {s} at {s}\n", .{ r, msg, detail });
+            } else {
+                std.debug.print("Error in worker {d}: {s}\n", .{ r, msg });
+            }
             return 1;
         }
         companies_total += results[r].companies;
@@ -574,6 +650,15 @@ fn printStreamSummary(s: *const stream_mod.Stream) void {
     }
 }
 
+fn printStreamError(context: []const u8, err: anyerror, s: *const stream_mod.Stream) void {
+    const detail = s.errorDetailSlice();
+    if (detail.len > 0) {
+        std.debug.print("{s}: {s} at {s}\n", .{ context, @errorName(err), detail });
+    } else {
+        std.debug.print("{s}: {s}\n", .{ context, @errorName(err) });
+    }
+}
+
 fn printStreamWarning(_: ?*anyopaque, message: []const u8) void {
     std.debug.print("warning: {s}\n", .{message});
 }
@@ -664,7 +749,7 @@ fn processFromReaderWithAllocator(
         };
         const chunk = buffered[0..@min(buffered.len, stream_feed_slice)];
         s.feed(chunk) catch |err| {
-            std.debug.print("Error parsing input: {s}\n", .{@errorName(err)});
+            printStreamError("Error parsing input", err, &s);
             return 1;
         };
         reader.toss(chunk.len);
@@ -676,7 +761,7 @@ fn processFromReaderWithAllocator(
         switch (err) {
             error.MissingTrailer => std.debug.print("ERROR: No trailer record found.\n", .{}),
             error.TrailerMismatch => std.debug.print("ERROR: Trailer record count does not match rows parsed\n", .{}),
-            else => std.debug.print("Error finishing parse: {s}\n", .{@errorName(err)}),
+            else => printStreamError("Error finishing parse", err, &s),
         }
         return 1;
     };
@@ -1223,6 +1308,9 @@ test "baseInputName for local paths, URLs, and stdin" {
 const mini_snapshot_fixture = @embedFile("testdata/mini_snapshot.dat");
 const expected_companies_fixture = @embedFile("testdata/expected_companies.csv");
 const expected_persons_fixture = @embedFile("testdata/expected_persons.csv");
+const split_snapshot_fixture = @embedFile("testdata/mini_snapshot_split.dat");
+const expected_split_companies_fixture = @embedFile("testdata/expected_split_companies.csv");
+const expected_split_persons_fixture = @embedFile("testdata/expected_split_persons.csv");
 
 fn readFileAlloc(io: Io, allocator: std.mem.Allocator, path: []const u8) ![]u8 {
     const file = try Io.Dir.cwd().openFile(io, path, .{});
@@ -1366,6 +1454,59 @@ test "parallel and sequential officers paths produce identical CSV" {
     try std.testing.expectEqualStrings(seq_p, par_p);
     try std.testing.expectEqualStrings(expected_companies_fixture, seq_c);
     try std.testing.expectEqualStrings(expected_persons_fixture, seq_p);
+}
+
+test "parallel split never starts a worker inside a re-joined record" {
+    // Records broken by embedded CRLF / LF must stay with the worker that reads
+    // their first line, whatever the worker count (split points vary with it).
+    const io = std.testing.io;
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "split.dat", .data = split_snapshot_fixture });
+    const base = try std.fmt.allocPrint(arena, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    const input_path = try std.fmt.allocPrint(arena, "{s}/split.dat", .{base});
+
+    // Every split target inside a continuation line resolves to a record start.
+    const scratch = try arena.alloc(u8, 4096);
+    var off: u64 = 1;
+    while (off < split_snapshot_fixture.len) : (off += 1) {
+        const start = try findLineStartAfter(io, input_path, off, split_snapshot_fixture.len, scratch);
+        if (start >= split_snapshot_fixture.len) continue;
+        const rest = split_snapshot_fixture[start..];
+        const line = parse.stripCr(rest[0 .. std.mem.indexOfScalar(u8, rest, '\n') orelse rest.len]);
+        try std.testing.expect(parse.classifyLine(line) != .other);
+    }
+
+    const out_seq = try std.fmt.allocPrint(arena, "{s}/out_seq", .{base});
+    try Io.Dir.cwd().createDirPath(io, out_seq);
+    try std.testing.expectEqual(@as(u8, 0), try processSingle(io, arena, input_path, out_seq, "split"));
+    try std.testing.expectEqualStrings(
+        expected_split_companies_fixture,
+        try readFileAlloc(io, arena, try std.fmt.allocPrint(arena, "{s}/companies_data_split.csv", .{out_seq})),
+    );
+    try std.testing.expectEqualStrings(
+        expected_split_persons_fixture,
+        try readFileAlloc(io, arena, try std.fmt.allocPrint(arena, "{s}/persons_data_split.csv", .{out_seq})),
+    );
+
+    var workers: usize = 2;
+    while (workers <= 16) : (workers += 1) {
+        const out_par = try std.fmt.allocPrint(arena, "{s}/out_par_{d}", .{ base, workers });
+        try Io.Dir.cwd().createDirPath(io, out_par);
+        try std.testing.expectEqual(@as(u8, 0), try processParallel(io, arena, input_path, out_par, "split", workers));
+        try std.testing.expectEqualStrings(
+            expected_split_companies_fixture,
+            try readFileAlloc(io, arena, try std.fmt.allocPrint(arena, "{s}/companies_data_split.csv", .{out_par})),
+        );
+        try std.testing.expectEqualStrings(
+            expected_split_persons_fixture,
+            try readFileAlloc(io, arena, try std.fmt.allocPrint(arena, "{s}/persons_data_split.csv", .{out_par})),
+        );
+    }
 }
 
 test "resolveLocalInputKind distinguishes file and directory" {

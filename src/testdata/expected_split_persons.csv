@@ -1,0 +1,4 @@
+Company Number,App Date Origin,Appointment Type,Person number,Corporate indicator,Appointment Date,Resignation Date,Person Postcode,Partial Date of Birth,Full Date of Birth,Title,Forenames,Surname,Honours,Care_of,PO_box,Address line 1,Address line 2,Post_town,County,Country,Occupation,Nationality,Resident Country
+01234567,2,30,123480258000,0,20260430,        ,B3 2ES  ,        ,        ,,JANE,EXAMPLE CARE OF EXAMPLE SOLICITORS LLP,,,,1 HIGH STREET,,BIRMINGHAM,WEST MIDLANDS,,,,
+01234567,1,02,123480258001, ,20200101,        ,AB1 2CD ,197501  ,        ,MS,ZOË,SAMPLE,,,,2 LOW ROAD,,LEEDS,,ENGLAND,DIRECTOR,BRITISH,ENGLAND
+07654321,3,01,123480258002, ,20191009,        ,BL1 4AP ,195502  ,        ,MR,DAVID,WALKER,,,,52 CHORLEY NEW ROAD,,BOLTON,LANCASHIRE,ENGLAND,DIRECTOR,BRITISH,UNITED KINGDOM

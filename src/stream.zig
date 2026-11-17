@@ -102,6 +102,13 @@ pub const Stream = struct {
 
     row_buf: [parse.max_csv_row_bytes]u8 = undefined,
 
+    /// 1-based number of the input line most recently handled.
+    line_number: u64 = 0,
+    /// Officers record held while it is re-joined across an embedded line break.
+    joiner: parse.RecordJoiner = .{},
+    /// Location of the last hard error (`line N: "…"`), empty when none.
+    error_detail: [256]u8 = [_]u8{0} ** 256,
+
     pub fn init(allocator: std.mem.Allocator, config: StreamConfig) Stream {
         return .{
             .allocator = allocator,
@@ -138,6 +145,16 @@ pub const Stream = struct {
 
     pub fn lastWarningSlice(self: *const Stream) []const u8 {
         return std.mem.sliceTo(&self.last_warning, 0);
+    }
+
+    /// Where the last hard error occurred (e.g. for `UnknownRecord`); empty if unknown.
+    pub fn errorDetailSlice(self: *const Stream) []const u8 {
+        return std.mem.sliceTo(&self.error_detail, 0);
+    }
+
+    fn setErrorDetail(self: *Stream, line_number: u64, row: []const u8) void {
+        self.error_detail = [_]u8{0} ** 256;
+        _ = parse.describeLine(self.error_detail[0 .. self.error_detail.len - 1], line_number, row);
     }
 
     pub fn warn(self: *Stream, message: []const u8) void {
@@ -209,6 +226,7 @@ pub const Stream = struct {
         } else {
             self.carry.clearRetainingCapacity();
         }
+        try self.flushJoiner();
 
         const ft = self.file_type.?;
         for (ft.outputKinds()) |kind| {
@@ -269,12 +287,13 @@ pub const Stream = struct {
     }
 
     fn handleLine(self: *Stream, line_raw: []const u8) ParseError!void {
+        self.line_number += 1;
         const row = parse.stripCr(line_raw);
         if (row.len == 0) return;
 
         const file_type = self.file_type orelse return error.UnsupportedFileType;
         switch (file_type) {
-            .officers_snapshot, .officers_update => try self.handleOfficersLine(row, file_type),
+            .officers_snapshot, .officers_update => try self.handleOfficersLine(row, parse.lineBreakLen(line_raw), file_type),
             .disqualifications => try self.handleDisqualLine(row),
             .liquidation => try self.handleLiqLine(row),
         }
@@ -295,8 +314,63 @@ pub const Stream = struct {
         try self.flushKind(kind, false);
     }
 
-    fn handleOfficersLine(self: *Stream, row: []const u8, file_type: parse.FileType) ParseError!void {
-        switch (parse.classifyLine(row)) {
+    fn handleOfficersLine(
+        self: *Stream,
+        row: []const u8,
+        break_len: usize,
+        file_type: parse.FileType,
+    ) ParseError!void {
+        const kind = parse.classifyLine(row);
+
+        if (self.joiner.active) {
+            if (kind == .other) {
+                // Continuation of a record split by an embedded line break.
+                const done = self.joiner.append(row, break_len) catch |err| {
+                    self.setErrorDetail(self.line_number, row);
+                    return switch (err) {
+                        error.RowTooLarge => error.RowTooLarge,
+                        error.JoinOverrun => error.UnknownRecord,
+                    };
+                };
+                if (done) try self.flushJoiner();
+                return;
+            }
+            // Next line is a real record: the held one was just short.
+            try self.flushJoiner();
+        }
+
+        switch (kind) {
+            .company, .person => {
+                const end = parse.officersDeclaredEnd(row, kind, file_type).?;
+                if (parse.isShortOf(row, end)) {
+                    self.joiner.begin(row, kind, parse.officersLengthField(kind, file_type).?, end, break_len, self.line_number) catch {
+                        self.setErrorDetail(self.line_number, row);
+                        return error.RowTooLarge;
+                    };
+                    return;
+                }
+                try self.emitOfficersRecord(row, kind, file_type);
+            },
+            .header, .trailer, .other => try self.emitOfficersRecord(row, kind, file_type),
+        }
+    }
+
+    /// Emit the held (possibly re-joined) officers record, if any.
+    fn flushJoiner(self: *Stream) ParseError!void {
+        if (!self.joiner.active) return;
+        const file_type = self.file_type orelse return error.UnsupportedFileType;
+        const kind = self.joiner.kind;
+        defer self.joiner.reset();
+        try self.emitOfficersRecord(self.joiner.record(), kind, file_type);
+    }
+
+    fn emitOfficersRecord(
+        self: *Stream,
+        row: []const u8,
+        kind: parse.LineKind,
+        file_type: parse.FileType,
+    ) ParseError!void {
+        switch (kind) {
             .header => {
                 const info = parse.parseHeader(row) catch return error.UnsupportedFileType;
                 if (info.file_type != file_type) return error.UnsupportedFileType;
@@ -323,7 +397,10 @@ pub const Stream = struct {
                 };
                 try self.appendFormattedRow(.persons, file_type.personsCsvHeader(), n);
             },
-            .other => return error.UnknownRecord,
+            .other => {
+                self.setErrorDetail(self.line_number, row);
+                return error.UnknownRecord;
+            },
         }
     }
 
@@ -393,7 +470,10 @@ pub const Stream = struct {
             .data => {
                 try self.applyLiqRecord(row);
             },
-            .other => return error.UnknownRecord,
+            .other => {
+                self.setErrorDetail(self.line_number, row);
+                return error.UnknownRecord;
+            },
         }
     }
 
@@ -430,7 +510,10 @@ pub const Stream = struct {
                 const n = parse.formatVariationRow(&self.row_buf, row) catch return error.RowTooLarge;
                 try self.appendFormattedRow(.variations, parse.variations_header, n);
             },
-            .other => return error.UnknownRecord,
+            .other => {
+                self.setErrorDetail(self.line_number, row);
+                return error.UnknownRecord;
+            },
         }
     }
 

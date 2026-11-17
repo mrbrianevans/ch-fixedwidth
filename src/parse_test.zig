@@ -713,3 +713,142 @@ test "C ABI kind-indexed layout: counts start at 16, csv at 80" {
     try std.testing.expectEqual(@as(usize, 16), @offsetOf(c_api.ChStreamStats, "counts"));
     try std.testing.expectEqual(@as(usize, 80), @offsetOf(c_api.ChStreamStats, "last_warning"));
 }
+
+// --- Records split by an embedded line break (WDE-261) ---------------------
+
+const mini_snapshot_split = @embedFile("testdata/mini_snapshot_split.dat");
+const expected_split_companies = @embedFile("testdata/expected_split_companies.csv");
+const expected_split_persons = @embedFile("testdata/expected_split_persons.csv");
+
+fn collectStream(
+    allocator: std.mem.Allocator,
+    s: *stream_mod.Stream,
+    companies: *std.ArrayList(u8),
+    persons: *std.ArrayList(u8),
+) !void {
+    while (s.nextBatch()) |batch| {
+        var b = batch;
+        defer b.deinit(allocator);
+        switch (b.kind) {
+            .companies => try companies.appendSlice(allocator, b.data),
+            .persons => try persons.appendSlice(allocator, b.data),
+            else => return error.UnexpectedBatchKind,
+        }
+    }
+}
+
+test "stream re-joins records split by embedded CRLF and LF" {
+    const allocator = std.testing.allocator;
+    // Whole-buffer feed and byte-at-a-time feed must agree.
+    for ([_]bool{ false, true }) |tiny| {
+        var s = stream_mod.Stream.init(allocator, .{ .batch_rows = 2, .batch_bytes = 64 });
+        defer s.deinit();
+        var companies = std.ArrayList(u8).empty;
+        defer companies.deinit(allocator);
+        var persons = std.ArrayList(u8).empty;
+        defer persons.deinit(allocator);
+
+        if (tiny) {
+            for (mini_snapshot_split) |byte| {
+                try s.feed(&.{byte});
+                try collectStream(allocator, &s, &companies, &persons);
+            }
+        } else {
+            try s.feed(mini_snapshot_split);
+        }
+        try s.finish();
+        try collectStream(allocator, &s, &companies, &persons);
+
+        try std.testing.expectEqual(@as(i32, 3), s.countOf(.companies));
+        try std.testing.expectEqual(@as(i32, 3), s.countOf(.persons));
+        try std.testing.expectEqualStrings(expected_split_companies, companies.items);
+        try std.testing.expectEqualStrings(expected_split_persons, persons.items);
+    }
+}
+
+test "one-shot document re-joins records split by embedded line breaks" {
+    var result = try document.parseDocument(std.testing.allocator, mini_snapshot_split);
+    defer result.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings(expected_split_companies, result.csv(.companies));
+    try std.testing.expectEqualStrings(expected_split_persons, result.csv(.persons));
+}
+
+test "stream flushes a held short record at end of input" {
+    // Last record is short of its declared length and is followed only by the
+    // trailer: it must be emitted unchanged, not dropped.
+    const input =
+        "DDDDSNAP434220261102\n" ++
+        "012345672102123480258001        20200101        AB1 2CD 197501          0011MS<ZOE<SAM\n" ++
+        "9999999900000001\n";
+    const allocator = std.testing.allocator;
+    var s = stream_mod.Stream.init(allocator, .{});
+    defer s.deinit();
+    try s.feed(input);
+    try s.finish();
+    try std.testing.expectEqual(@as(i32, 1), s.countOf(.persons));
+    while (s.nextBatch()) |batch| {
+        var b = batch;
+        b.deinit(allocator);
+    }
+}
+
+test "UnknownRecord reports line number and line prefix" {
+    const input =
+        "DDDDSNAP434220261102\n" ++
+        "012345671D                      00020024EXAMPLE TRADING LIMITED<\n" ++
+        "this line is not a record at all, and it is quite long\n" ++
+        "9999999900000001\n";
+    const allocator = std.testing.allocator;
+    var s = stream_mod.Stream.init(allocator, .{});
+    defer s.deinit();
+    try std.testing.expectError(error.UnknownRecord, s.feed(input));
+    try std.testing.expectEqualStrings(
+        "line 3: \"this line is not a record at all, and it\"…",
+        s.errorDetailSlice(),
+    );
+}
+
+test "continuation longer than the declared length is rejected" {
+    // Person declares 13 chars of variable data but the "continuation" would
+    // overrun it: not a split record, so the stray line is an UnknownRecord.
+    const input =
+        "DDDDSNAP434220261102\n" ++
+        "012345672102123480258001        20200101        AB1 2CD 197501          0013MS<ZOE\n" ++
+        "SAMPLE<<<<2 LOW ROAD<<LEEDS\n" ++
+        "9999999900000001\n";
+    const allocator = std.testing.allocator;
+    var s = stream_mod.Stream.init(allocator, .{});
+    defer s.deinit();
+    try std.testing.expectError(error.UnknownRecord, s.feed(input));
+    try std.testing.expect(std.mem.startsWith(u8, s.errorDetailSlice(), "line 3: \"SAMPLE"));
+}
+
+test "RecordJoiner rewrites the length field after dropping CR bytes" {
+    var j: parse.RecordJoiner = .{};
+    const first = "076543211D                      00010029SPLIT NAME";
+    const end = parse.officersDeclaredEnd(first, .company, .officers_snapshot).?;
+    try std.testing.expectEqual(@as(usize, 69), end);
+    try j.begin(first, .company, parse.officersLengthField(.company, .officers_snapshot).?, end, 2, 7);
+    try std.testing.expect(try j.append("HOLDINGS LIMITED<", 1));
+    try std.testing.expectEqualStrings(
+        "076543211D                      00010028SPLIT NAME HOLDINGS LIMITED<",
+        j.record(),
+    );
+    try std.testing.expectEqual(@as(u64, 7), j.start_line);
+}
+
+test "officersDeclaredEnd covers snapshot and update person layouts" {
+    const snap = "0123456722301234802580000       20260430        B3 2ES                  0093<JANE";
+    try std.testing.expectEqual(@as(?usize, 76 + 93), parse.officersDeclaredEnd(snap, .person, .officers_snapshot));
+    const upd = "0220155221  Y  0000059771390005059771390005                        SE1 2AU 19921018                201610180112<<BONDLAW";
+    try std.testing.expectEqual(@as(?usize, 111 + 112), parse.officersDeclaredEnd(upd, .person, .officers_update));
+    try std.testing.expectEqual(@as(?usize, null), parse.officersDeclaredEnd(upd, .trailer, .officers_update));
+}
+
+test "describeLine escapes control and non-ASCII bytes" {
+    var buf: [128]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "line 9: \"A\\x0dB\\x22\\xc3\\x8b\"",
+        parse.describeLine(&buf, 9, "A\rB\"\xc3\x8b"),
+    );
+}

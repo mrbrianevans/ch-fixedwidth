@@ -11,3 +11,5 @@
 *.png binary
 *.jpg binary
 *.wasm binary
+# Regression fixture: embedded CRLF inside records must survive checkout.
+src/testdata/mini_snapshot_split.dat -text

@@ -58,6 +58,8 @@
 
 **Parser Notes**: Use length field for variable data. Consecutive `<` = empty. Resignations usually excluded from snapshot.
 
+**Embedded line breaks**: a few published records contain a CRLF or LF inside their variable data (for example a surname and care-of name pasted together in `Prod216_4342_ew_3.dat` and `Prod216_4342_ew_7.dat`). The length field counts those break bytes. The parser joins a short company / person line with the following non-record line(s) until the declared length is reached, replaces each break with one space, and rewrites the length field to match. A short line followed directly by a valid record is emitted unchanged, because some records are legitimately a character short.
+
 
 ## More info
 Further notes on the record types are available at: https://chguide.co.uk/bulk-data/officers/recordTypes
