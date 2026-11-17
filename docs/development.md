@@ -8,7 +8,7 @@ Canonical name: **ch-fixedwidth**. Library / C / WASM symbol prefix: `ch_fixedwi
 
 ## Performance
 
-Native builds use **multithreading** for officers products: the input is split on line boundaries and worker threads write part CSVs that are concatenated. Products with multi-CSV or form-group state (192 / 197) always use the sequential stream path.
+Native builds use **multithreading** for officers products: one reader thread cuts the input into ~1 MiB chunks that end just before a record start, worker threads format chunks into memory, and the calling thread writes finished chunks to the final CSVs in input order (`src/pipeline.zig`). There are no part files to concatenate, and memory is bounded by `workers + 2` chunk slots. Products with multi-CSV or form-group state (192 / 197) always use the sequential stream path.
 
 **Measured throughput** (PowerShell `Stopwatch` wall clock): `Prod216_4257_ew_6.dat` — 6 182 956 records in ~1.24 s → **~5.0 million records/second** (`zig build -Doptimize=ReleaseFast`). Absolute numbers vary with disk and CPU.
 
@@ -26,7 +26,7 @@ zig fmt --check .
 
 CLI binary: `./zig-out/bin/ch-fixedwidth` (or `ch-fixedwidth.exe` on Windows).
 
-Invocation: `ch-fixedwidth [--workers N] -o DIR <input>`. `-o` is required. Optional `--workers N` caps officers seek-split threads (default: `min(CPU count, 32)`). Products 192 / 197, stdin, and remote URLs stay sequential.
+Invocation: `ch-fixedwidth [--workers N] -o DIR <input>`. `-o` is required. Optional `--workers N` caps officers worker threads (default: `min(CPU count, 32)`). Products 192 / 197, stdin, and remote URLs stay sequential.
 
 ### Remote URL, stdin, and directory input (CLI only)
 
@@ -34,7 +34,7 @@ The native CLI accepts a local file path, a **directory** of `.dat` files, an `h
 
 | Input | Pipeline |
 |-------|----------|
-| Single local file | Multi-threaded seek split for officers products (`--workers N` or `min(CPU count, 32)`); sequential for 192 / 197 |
+| Single local file | Multi-threaded chunk pipeline for officers products (`--workers N` or `min(CPU count, 32)`); sequential for 192 / 197 |
 | Directory of `.dat` | Lists top-level `*.dat` only; processes **one file at a time** with the same per-file strategy as a single file. See [DDR-directory-parallelism.md](DDR-directory-parallelism.md) |
 | Remote URL / stdin | Sequential streaming via `processFromReader` (no parallel seeks). Remote GET sends `Accept-Encoding: zstd, gzip, deflate` and decompresses while streaming (zstd window up to 8 MiB). Remote GET retries 429, 5xx, and connect/send/header failures with exponential backoff (5 attempts, 200 ms base, 10 s cap; integer `Retry-After` up to 60 s) |
 

@@ -27,6 +27,7 @@ test {
     _ = document;
     _ = stream;
     _ = file_convert;
+    _ = @import("pipeline.zig");
     _ = c_api;
     _ = @import("parse_test.zig");
 }
