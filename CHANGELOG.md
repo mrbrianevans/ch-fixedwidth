@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Remote `.dat` downloads ask for `zstd, gzip, deflate` (plus identity) and decompress while streaming. Companies Catalogue serves zstd, which is about 5.5x fewer bytes than the uncompressed file: `Prod216_4342_ew_7.dat` (1.49 GB) now downloads and converts in about 30 s instead of over 2 minutes. A zstd frame whose window is larger than 8 MiB fails with a named decompression error.
 - **Breaking:** CLI is `ch-fixedwidth [--workers N] -o DIR <input>`. `-o` is required (the current directory is not used as a default). Flags must precede the positional input. Optional `--workers N` sets officers seek-split thread count (default: `min(CPU count, 32)`; ignored for 192 / 197).
 - Usage errors (no args, extra args, unknown flag, missing `-o`) exit **2**. `-h` / `-V` stay **0**. Conversion failures stay **1**. Ctrl-C exits **130**.
 
