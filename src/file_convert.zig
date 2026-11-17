@@ -11,10 +11,13 @@ const http = std.http;
 const parse = @import("parse.zig");
 const stream_mod = @import("stream.zig");
 
-// Smaller buffers under single-threaded (wasm32-wasi) to stay within linear memory
-// and avoid host WASI edge cases with multi‑MB vectored I/O.
-const read_buffer_size: usize = if (builtin.single_threaded) 1 * 1024 * 1024 else 8 * 1024 * 1024;
-const write_buffer_size: usize = if (builtin.single_threaded) 1 * 1024 * 1024 else 8 * 1024 * 1024;
+// 1 MiB read / write buffers. Larger buffers gave no throughput gain in benchmarks,
+// but every one is resident memory: seek-split officers conversion allocates one
+// read + two write buffers per worker (up to `max_workers`), and the streaming
+// path one per output CSV. 1 MiB also keeps wasm32-wasi within linear memory and
+// clear of host WASI edge cases with multi-MB vectored I/O.
+const read_buffer_size: usize = 1 * 1024 * 1024;
+const write_buffer_size: usize = 1 * 1024 * 1024;
 const max_workers = 32;
 /// Upper bound on input bytes handed to `Stream.feed` before draining batches.
 /// Keeps pending CSV batches small regardless of the reader's buffer size.
