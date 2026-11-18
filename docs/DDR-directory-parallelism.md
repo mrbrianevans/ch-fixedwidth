@@ -15,7 +15,7 @@ Expected production shape of a directory argument:
 - Run on a modern multi-core machine (e.g. Intel Core i7 class)
 - Conversion is usually **CPU-bound** on large snapshots once I/O is local NVMe-class storage
 
-Single-file input already supports **within-file** multi-threading: the file is split on line boundaries by seek offsets; workers write part CSVs that are concatenated (`processParallel`).
+Single-file input already supports **within-file** multi-threading: the file is split on line boundaries by seek offsets; workers write part CSVs that are concatenated (`processParallel`). *(Since superseded by the ordered chunk pipeline in `src/pipeline.zig`, which writes straight to the final CSVs; the decision below is unaffected.)*
 
 ## Decision drivers
 

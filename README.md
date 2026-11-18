@@ -50,7 +50,7 @@ ch-fixedwidth [--workers N] -o DIR <input.dat|input_dir/|http(s)://.../file.dat|
 | Argument | Description |
 |----------|-------------|
 | `-o DIR` | Directory for CSV output (required; created if missing). Not defaulted to the current directory. |
-| `--workers N` | Optional officers seek-split thread count (default: `min(CPU count, 32)`; ignored for 192 / 197) |
+| `--workers N` | Optional officers worker thread count (default: `min(CPU count, 32)`; ignored for 192 / 197) |
 | Input | A `.dat` file, a directory of `.dat` files, an `http://` / `https://` URL, or `-` (stdin) |
 
 Flags must come before the positional input.

@@ -10,6 +10,7 @@ const Thread = std.Thread;
 const http = std.http;
 const parse = @import("parse.zig");
 const stream_mod = @import("stream.zig");
+const pipeline = @import("pipeline.zig");
 
 // 1 MiB read / write buffers. Larger buffers gave no throughput gain in benchmarks,
 // but every one is resident memory: seek-split officers conversion allocates one
@@ -67,22 +68,6 @@ const CsvOut = struct {
         self.file.close(self.io);
     }
 };
-
-fn writeCompanyRow(out: *CsvOut, row: []const u8) !void {
-    const dest = try out.beginRow();
-    const p = try parse.formatCompanyRow(dest, row);
-    out.endRow(p);
-}
-
-fn writePersonRow(out: *CsvOut, file_type: parse.FileType, row: []const u8) !void {
-    const dest = try out.beginRow();
-    const p = switch (file_type) {
-        .officers_snapshot => try parse.formatPersonRow(dest, row),
-        .officers_update => try parse.formatUpdatePersonRow(dest, row),
-        .disqualifications, .liquidation => return error.NotImplemented,
-    };
-    out.endRow(p);
-}
 
 /// Identify the product from the header row and ensure a body parser exists.
 /// Returns the parsed header on success so callers can branch if needed.
@@ -190,227 +175,6 @@ pub fn baseInputName(input_path: []const u8) []const u8 {
     return stripExtension(std.fs.path.basename(input_path));
 }
 
-const WorkerResult = struct {
-    companies: i32 = 0,
-    persons: i32 = 0,
-    trailer_count: ?i32 = null,
-    err_msg: ?[]const u8 = null,
-    /// Location of the failing line (`byte offset N: "…"`), empty when unknown.
-    err_detail_buf: [256]u8 = undefined,
-    err_detail_len: usize = 0,
-
-    fn setDetail(self: *WorkerResult, byte_offset: u64, row: []const u8) void {
-        self.err_detail_len = parse.describeLineAt(&self.err_detail_buf, "byte offset", byte_offset, row).len;
-    }
-
-    fn detail(self: *const WorkerResult) []const u8 {
-        return self.err_detail_buf[0..self.err_detail_len];
-    }
-};
-
-const WorkerCtx = struct {
-    io: Io,
-    input_path: []const u8,
-    companies_path: []const u8,
-    persons_path: []const u8,
-    file_type: parse.FileType,
-    /// Inclusive start file offset (first byte of first line to process).
-    start_off: u64,
-    /// Exclusive end file offset (do not process lines starting at or after this).
-    end_off: u64,
-    /// If true, first line in range is the product header (already validated).
-    handle_header: bool,
-    /// If true, write CSV headers.
-    write_headers: bool,
-    /// Thread-local buffers (owned by parent, not freed by worker).
-    read_buf: []u8,
-    companies_buf: []u8,
-    persons_buf: []u8,
-    result: *WorkerResult,
-};
-
-fn workerMain(ctx: *WorkerCtx) void {
-    ctx.result.* = .{};
-    runWorker(ctx, ctx.result) catch |err| {
-        ctx.result.err_msg = @errorName(err);
-    };
-}
-
-/// Write one officers company / person record to the matching part CSV.
-fn writeOfficersRecord(
-    ctx: *WorkerCtx,
-    result: *WorkerResult,
-    companies_out: *CsvOut,
-    persons_out: *CsvOut,
-    kind: parse.LineKind,
-    row: []const u8,
-) !void {
-    switch (kind) {
-        .company => {
-            try writeCompanyRow(companies_out, row);
-            result.companies += 1;
-        },
-        .person => {
-            try writePersonRow(persons_out, ctx.file_type, row);
-            result.persons += 1;
-        },
-        .header, .trailer, .other => unreachable,
-    }
-}
-
-fn runWorker(ctx: *WorkerCtx, result: *WorkerResult) !void {
-    // Holds a record split by an embedded line break (see `parse.RecordJoiner`).
-    const joiner = try heapAllocator().create(parse.RecordJoiner);
-    defer heapAllocator().destroy(joiner);
-    joiner.* = .{};
-
-    const input_file = try Io.Dir.cwd().openFile(ctx.io, ctx.input_path, .{});
-    defer input_file.close(ctx.io);
-
-    var file_reader = Io.File.Reader.init(input_file, ctx.io, ctx.read_buf);
-    try file_reader.seekTo(ctx.start_off);
-    const reader = &file_reader.interface;
-
-    var companies_out = try CsvOut.create(
-        ctx.io,
-        ctx.companies_path,
-        if (ctx.write_headers) parse.companies_header else null,
-        ctx.companies_buf,
-    );
-    defer companies_out.close();
-
-    var persons_out = try CsvOut.create(
-        ctx.io,
-        ctx.persons_path,
-        if (ctx.write_headers) ctx.file_type.personsCsvHeader() else null,
-        ctx.persons_buf,
-    );
-    defer persons_out.close();
-
-    var first = true;
-    while (true) {
-        const line_start = file_reader.logicalPos();
-        // Split points always land on a record start (`findLineStartAfter`),
-        // so a held record never continues into the next worker's range.
-        if (line_start >= ctx.end_off and !first) break;
-
-        const maybe_line = try reader.takeDelimiter('\n');
-        const line_raw = maybe_line orelse break;
-        const row = parse.stripCr(line_raw);
-
-        if (first and ctx.handle_header) {
-            // Header already validated by the parent before workers spawn.
-            first = false;
-            continue;
-        }
-        first = false;
-
-        if (line_start >= ctx.end_off) break;
-
-        if (result.trailer_count != null) {
-            for (row) |c| {
-                if (c != ' ' and c != '\t') {
-                    result.setDetail(line_start, row);
-                    return error.FeedAfterTrailer;
-                }
-            }
-            continue;
-        }
-
-        if (row.len == 0) continue;
-
-        const kind = parse.classifyLine(row);
-
-        if (joiner.active) {
-            if (kind == .other) {
-                const done = joiner.append(row, parse.lineBreakLen(line_raw)) catch |err| {
-                    result.setDetail(line_start, row);
-                    return switch (err) {
-                        error.RowTooLarge => error.RowTooLarge,
-                        error.JoinOverrun => error.UnknownRecord,
-                    };
-                };
-                if (done) {
-                    try writeOfficersRecord(ctx, result, &companies_out, &persons_out, joiner.kind, joiner.record());
-                    joiner.reset();
-                }
-                continue;
-            }
-            try writeOfficersRecord(ctx, result, &companies_out, &persons_out, joiner.kind, joiner.record());
-            joiner.reset();
-        }
-
-        switch (kind) {
-            .trailer => {
-                result.trailer_count = parse.parseTrailerCount(row);
-                // Keep reading: extra non-whitespace after the trailer is an error.
-            },
-            .company, .person => {
-                const end = parse.officersDeclaredEnd(row, kind, ctx.file_type).?;
-                if (parse.isShortOf(row, end)) {
-                    joiner.begin(row, kind, parse.officersLengthField(kind, ctx.file_type).?, end, parse.lineBreakLen(line_raw), line_start) catch |err| {
-                        result.setDetail(line_start, row);
-                        return err;
-                    };
-                } else {
-                    try writeOfficersRecord(ctx, result, &companies_out, &persons_out, kind, row);
-                }
-            },
-            .header, .other => {
-                result.setDetail(line_start, row);
-                return error.UnknownRecord;
-            },
-        }
-    }
-
-    if (joiner.active) {
-        try writeOfficersRecord(ctx, result, &companies_out, &persons_out, joiner.kind, joiner.record());
-        joiner.reset();
-    }
-}
-
-/// Find the file offset of the first record start at or after the line that
-/// contains or follows `target`. Lines that are not a record start (header,
-/// trailer, company or person — see `parse.classifyLine`) are skipped: they are
-/// continuations of a record split by an embedded line break, which must stay
-/// with the worker that reads the start of that record.
-fn findLineStartAfter(io: Io, path: []const u8, target: u64, file_size: u64, scratch: []u8) !u64 {
-    if (target == 0) return 0;
-    if (target >= file_size) return file_size;
-
-    const file = try Io.Dir.cwd().openFile(io, path, .{});
-    defer file.close(io);
-
-    var reader = Io.File.Reader.init(file, io, scratch);
-    // Start one byte early so a `target` that is already a line start is kept.
-    try reader.seekTo(target - 1);
-    // Discard the (partial) line containing `target - 1`.
-    if ((try reader.interface.takeDelimiter('\n')) == null) return file_size;
-
-    while (reader.logicalPos() < file_size) {
-        const line_start = reader.logicalPos();
-        const maybe = try reader.interface.takeDelimiter('\n');
-        const row = parse.stripCr(maybe orelse return file_size);
-        if (parse.classifyLine(row) != .other) return line_start;
-    }
-    return file_size;
-}
-
-fn concatFiles(io: Io, dest_path: []const u8, parts: []const []const u8, write_buf: []u8, read_buf: []u8) !void {
-    const dest = try Io.Dir.cwd().createFile(io, dest_path, .{});
-    defer dest.close(io);
-    var dest_writer = Io.File.Writer.initStreaming(dest, io, write_buf);
-    const dw = &dest_writer.interface;
-    defer dw.flush() catch {};
-
-    for (parts) |part_path| {
-        const src = try Io.Dir.cwd().openFile(io, part_path, .{});
-        defer src.close(io);
-        var src_reader = Io.File.Reader.init(src, io, read_buf);
-        _ = try dw.sendFileAll(&src_reader, .unlimited);
-    }
-}
-
 fn processParallel(
     io: Io,
     arena: std.mem.Allocator,
@@ -419,20 +183,31 @@ fn processParallel(
     base_name: []const u8,
     n_workers: usize,
 ) !u8 {
-    const input_file = try Io.Dir.cwd().openFile(io, input_path, .{});
-    const file_size = (try input_file.stat(io)).size;
-    input_file.close(io);
+    return processParallelChunked(io, arena, input_path, output_folder, base_name, n_workers, pipeline.default_chunk_len);
+}
 
+/// Officers conversion of a local file on `n_workers` threads through the
+/// ordered chunk pipeline (`pipeline.zig`): rows are written straight to the
+/// final CSVs in input order, with no part files to concatenate.
+fn processParallelChunked(
+    io: Io,
+    arena: std.mem.Allocator,
+    input_path: []const u8,
+    output_folder: []const u8,
+    base_name: []const u8,
+    n_workers: usize,
+    chunk_len: usize,
+) !u8 {
     const workers = @max(1, @min(n_workers, max_workers));
 
-    const probe_buf = try arena.alloc(u8, 1024 * 1024);
+    const read_buf = try arena.alloc(u8, read_buffer_size);
 
-    // Identify product from the header before splitting so every worker uses
-    // the correct person formatter / CSV header.
+    // Identify product from the header so the right person formatter and CSV
+    // header are used. The pipeline re-reads the header line (and skips it).
     const header_info = blk: {
         const f = try Io.Dir.cwd().openFile(io, input_path, .{});
         defer f.close(io);
-        var fr = Io.File.Reader.init(f, io, probe_buf);
+        var fr = Io.File.Reader.init(f, io, read_buf);
         const maybe = try fr.interface.takeDelimiter('\n');
         const row = parse.stripCr(maybe orelse {
             std.debug.print("ERROR: empty input\n", .{});
@@ -441,29 +216,9 @@ fn processParallel(
         break :blk processHeaderRow(row) catch return 1;
     };
 
-    var starts: [max_workers + 1]u64 = undefined;
-    starts[0] = 0;
-    starts[workers] = file_size;
-    var w_i: usize = 1;
-    while (w_i < workers) : (w_i += 1) {
-        const target = (file_size * w_i) / workers;
-        starts[w_i] = try findLineStartAfter(io, input_path, target, file_size, probe_buf);
-    }
-
-    var ranges: [max_workers]struct { start: u64, end: u64 } = undefined;
-    var n_ranges: usize = 0;
-    {
-        var i: usize = 0;
-        while (i < workers) : (i += 1) {
-            if (starts[i] >= starts[i + 1]) continue;
-            ranges[n_ranges] = .{ .start = starts[i], .end = starts[i + 1] };
-            n_ranges += 1;
-        }
-    }
-    if (n_ranges == 0) {
-        std.debug.print("ERROR: empty input\n", .{});
-        return 1;
-    }
+    const input_file = try Io.Dir.cwd().openFile(io, input_path, .{});
+    defer input_file.close(io);
+    var file_reader = Io.File.Reader.init(input_file, io, read_buf);
 
     const companies_filename = try std.fs.path.join(arena, &.{
         output_folder,
@@ -476,98 +231,28 @@ fn processParallel(
     std.debug.print("Saving companies data to {s}\n", .{companies_filename});
     std.debug.print("Saving persons data to {s}\n", .{persons_filename});
 
-    const parts_dir = try std.fs.path.join(arena, &.{ output_folder, ".zig_parts" });
-    Io.Dir.cwd().createDirPath(io, parts_dir) catch |err| {
-        std.debug.print("Error creating parts directory: {s}\n", .{@errorName(err)});
+    var companies_out = try CsvOut.create(io, companies_filename, parse.companies_header, try arena.alloc(u8, write_buffer_size));
+    defer companies_out.close();
+    var persons_out = try CsvOut.create(io, persons_filename, header_info.file_type.personsCsvHeader(), try arena.alloc(u8, write_buffer_size));
+    defer persons_out.close();
+
+    const result = try pipeline.run(io, heapAllocator(), &file_reader.interface, header_info.file_type, companies_out.w(), persons_out.w(), .{
+        .workers = workers,
+        .chunk_len = chunk_len,
+    });
+
+    if (result.err) |err| {
+        const detail = result.detail();
+        if (detail.len > 0) {
+            std.debug.print("Error parsing input: {s} at {s}\n", .{ @errorName(err), detail });
+        } else {
+            std.debug.print("Error parsing input: {s}\n", .{@errorName(err)});
+        }
         return 1;
-    };
-
-    var ctxs: [max_workers]WorkerCtx = undefined;
-    var results: [max_workers]WorkerResult = undefined;
-    var threads: [max_workers]Thread = undefined;
-
-    var r: usize = 0;
-    while (r < n_ranges) : (r += 1) {
-        const co = try std.fmt.allocPrint(arena, "{s}/c_{d}.csv", .{ parts_dir, r });
-        const pe = try std.fmt.allocPrint(arena, "{s}/p_{d}.csv", .{ parts_dir, r });
-        ctxs[r] = .{
-            .io = io,
-            .input_path = input_path,
-            .companies_path = co,
-            .persons_path = pe,
-            .file_type = header_info.file_type,
-            .start_off = ranges[r].start,
-            .end_off = ranges[r].end,
-            .handle_header = (r == 0),
-            .write_headers = (r == 0),
-            .read_buf = try arena.alloc(u8, read_buffer_size),
-            .companies_buf = try arena.alloc(u8, write_buffer_size),
-            .persons_buf = try arena.alloc(u8, write_buffer_size),
-            .result = &results[r],
-        };
-        results[r] = .{};
     }
 
-    if (n_ranges == 1) {
-        workerMain(&ctxs[0]);
-    } else if (comptime builtin.single_threaded) {
-        var t: usize = 0;
-        while (t < n_ranges) : (t += 1) {
-            workerMain(&ctxs[t]);
-        }
-    } else {
-        var t: usize = 1;
-        while (t < n_ranges) : (t += 1) {
-            threads[t] = try Thread.spawn(.{}, workerMain, .{&ctxs[t]});
-        }
-        workerMain(&ctxs[0]);
-        t = 1;
-        while (t < n_ranges) : (t += 1) {
-            threads[t].join();
-        }
-    }
-
-    var companies_total: i32 = 0;
-    var persons_total: i32 = 0;
-    var trailer_count: ?i32 = null;
-    r = 0;
-    while (r < n_ranges) : (r += 1) {
-        if (results[r].err_msg) |msg| {
-            const detail = results[r].detail();
-            if (detail.len > 0) {
-                std.debug.print("Error in worker {d}: {s} at {s}\n", .{ r, msg, detail });
-            } else {
-                std.debug.print("Error in worker {d}: {s}\n", .{ r, msg });
-            }
-            return 1;
-        }
-        companies_total += results[r].companies;
-        persons_total += results[r].persons;
-        if (results[r].trailer_count) |tc| trailer_count = tc;
-    }
-
-    var company_parts: [max_workers][]const u8 = undefined;
-    var person_parts: [max_workers][]const u8 = undefined;
-    r = 0;
-    while (r < n_ranges) : (r += 1) {
-        company_parts[r] = ctxs[r].companies_path;
-        person_parts[r] = ctxs[r].persons_path;
-    }
-
-    const concat_write = try arena.alloc(u8, write_buffer_size);
-    const concat_read = try arena.alloc(u8, read_buffer_size);
-    try concatFiles(io, companies_filename, company_parts[0..n_ranges], concat_write, concat_read);
-    try concatFiles(io, persons_filename, person_parts[0..n_ranges], concat_write, concat_read);
-
-    r = 0;
-    while (r < n_ranges) : (r += 1) {
-        Io.Dir.cwd().deleteFile(io, ctxs[r].companies_path) catch {};
-        Io.Dir.cwd().deleteFile(io, ctxs[r].persons_path) catch {};
-    }
-    Io.Dir.cwd().deleteDir(io, parts_dir) catch {};
-
-    const total = companies_total + persons_total;
-    if (trailer_count) |tc| {
+    const total = result.companies + result.persons;
+    if (result.trailer_count) |tc| {
         if (tc != total) {
             std.debug.print("ERROR: Processed {d} records out of {d}\n", .{ total, tc });
             return 1;
@@ -577,7 +262,7 @@ fn processParallel(
         return 1;
     }
 
-    std.debug.print("Processed {d} records: {d} companies, {d} persons.\n", .{ total, companies_total, persons_total });
+    std.debug.print("Processed {d} records: {d} companies, {d} persons.\n", .{ total, result.companies, result.persons });
     return 0;
 }
 
@@ -1539,15 +1224,21 @@ test "parallel split never starts a worker inside a re-joined record" {
     const base = try std.fmt.allocPrint(arena, ".zig-cache/tmp/{s}", .{tmp.sub_path});
     const input_path = try std.fmt.allocPrint(arena, "{s}/split.dat", .{base});
 
-    // Every split target inside a continuation line resolves to a record start.
-    const scratch = try arena.alloc(u8, 4096);
-    var off: u64 = 1;
-    while (off < split_snapshot_fixture.len) : (off += 1) {
-        const start = try findLineStartAfter(io, input_path, off, split_snapshot_fixture.len, scratch);
-        if (start >= split_snapshot_fixture.len) continue;
-        const rest = split_snapshot_fixture[start..];
-        const line = parse.stripCr(rest[0 .. std.mem.indexOfScalar(u8, rest, '\n') orelse rest.len]);
-        try std.testing.expect(parse.classifyLine(line) != .other);
+    // Every chunk size from 1 byte up to the whole file: chunk boundaries
+    // land everywhere, including inside split records, and must never cut one.
+    var chunk_len: usize = 1;
+    while (chunk_len <= split_snapshot_fixture.len) : (chunk_len += 1) {
+        const out_chunk = try std.fmt.allocPrint(arena, "{s}/out_chunk_{d}", .{ base, chunk_len });
+        try Io.Dir.cwd().createDirPath(io, out_chunk);
+        try std.testing.expectEqual(@as(u8, 0), try processParallelChunked(io, arena, input_path, out_chunk, "split", 3, chunk_len));
+        try std.testing.expectEqualStrings(
+            expected_split_companies_fixture,
+            try readFileAlloc(io, arena, try std.fmt.allocPrint(arena, "{s}/companies_data_split.csv", .{out_chunk})),
+        );
+        try std.testing.expectEqualStrings(
+            expected_split_persons_fixture,
+            try readFileAlloc(io, arena, try std.fmt.allocPrint(arena, "{s}/persons_data_split.csv", .{out_chunk})),
+        );
     }
 
     const out_seq = try std.fmt.allocPrint(arena, "{s}/out_seq", .{base});
@@ -1658,6 +1349,85 @@ test "processRemoteBody fails cleanly on a zstd window over 8 MiB" {
     defer std.testing.allocator.free(zst);
     var body = Io.Reader.fixed(zst);
     try std.testing.expectEqual(@as(u8, 1), try processRemoteBody(io, arena, &body, .zstd, out_rel, "remote"));
+}
+
+const mini_update_fixture = @embedFile("testdata/mini_update.dat");
+const expected_update_companies_fixture = @embedFile("testdata/expected_update_companies.csv");
+const expected_update_persons_fixture = @embedFile("testdata/expected_update_persons.csv");
+
+/// Run the chunked parallel path on `input` and return (exit code, companies, persons).
+fn runChunked(arena: std.mem.Allocator, input: []const u8, workers: usize, chunk_len: usize) !struct { u8, []u8, []u8 } {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "in.dat", .data = input });
+    const base = try std.fmt.allocPrint(arena, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    const input_path = try std.fmt.allocPrint(arena, "{s}/in.dat", .{base});
+    const out = try std.fmt.allocPrint(arena, "{s}/out", .{base});
+    try Io.Dir.cwd().createDirPath(io, out);
+    const code = try processParallelChunked(io, arena, input_path, out, "in", workers, chunk_len);
+    const c = readFileAlloc(io, arena, try std.fmt.allocPrint(arena, "{s}/companies_data_in.csv", .{out})) catch try arena.dupe(u8, "");
+    const p = readFileAlloc(io, arena, try std.fmt.allocPrint(arena, "{s}/persons_data_in.csv", .{out})) catch try arena.dupe(u8, "");
+    return .{ code, c, p };
+}
+
+test "chunked parallel path matches expected CSV for every chunk size and worker count" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const cases = [_]struct { []const u8, []const u8, []const u8 }{
+        .{ mini_snapshot_fixture, expected_companies_fixture, expected_persons_fixture },
+        .{ mini_update_fixture, expected_update_companies_fixture, expected_update_persons_fixture },
+    };
+    for (cases) |case| {
+        for ([_]usize{ 1, 2, 3, 8 }) |workers| {
+            var chunk_len: usize = 1;
+            while (chunk_len <= case[0].len + 1) : (chunk_len += 7) {
+                const code, const companies, const persons = try runChunked(arena, case[0], workers, chunk_len);
+                try std.testing.expectEqual(@as(u8, 0), code);
+                try std.testing.expectEqualStrings(case[1], companies);
+                try std.testing.expectEqualStrings(case[2], persons);
+            }
+        }
+    }
+}
+
+test "chunked parallel path rejects data after the trailer, even in a later chunk" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const trailer = std.mem.indexOf(u8, mini_snapshot_fixture, "99999999").?;
+    // Body, trailer, then a repeat of the body after the trailer.
+    const input = try std.mem.concat(arena, u8, &.{
+        mini_snapshot_fixture,
+        mini_snapshot_fixture[std.mem.indexOfScalar(u8, mini_snapshot_fixture, '\n').? + 1 .. trailer],
+    });
+    for ([_]usize{ 64, 300, 1 << 20 }) |chunk_len| {
+        const code, _, _ = try runChunked(arena, input, 3, chunk_len);
+        try std.testing.expectEqual(@as(u8, 1), code);
+    }
+    // Trailing blank lines after the trailer are still fine.
+    const blank_tail = try std.mem.concat(arena, u8, &.{ mini_snapshot_fixture, "   \n\t\n\n" });
+    const code, _, _ = try runChunked(arena, blank_tail, 3, 64);
+    try std.testing.expectEqual(@as(u8, 0), code);
+}
+
+test "chunked parallel path fails on unknown records, missing or wrong trailers" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const trailer = std.mem.indexOf(u8, mini_snapshot_fixture, "99999999").?;
+
+    const garbage = try std.mem.concat(arena, u8, &.{ mini_snapshot_fixture[0..trailer], "GARBAGE LINE\n", mini_snapshot_fixture[trailer..] });
+    const no_trailer = mini_snapshot_fixture[0..trailer];
+    const wrong_trailer = try std.mem.concat(arena, u8, &.{ mini_snapshot_fixture[0..trailer], "9999999900000099\n" });
+    for ([_][]const u8{ garbage, no_trailer, wrong_trailer }) |input| {
+        for ([_]usize{ 50, 1 << 20 }) |chunk_len| {
+            const code, _, _ = try runChunked(arena, input, 2, chunk_len);
+            try std.testing.expectEqual(@as(u8, 1), code);
+        }
+    }
 }
 
 test "resolveLocalInputKind distinguishes file and directory" {

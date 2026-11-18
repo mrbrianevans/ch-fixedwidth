@@ -69,7 +69,7 @@ fn printHelp() void {
         \\Options:
         \\  -o DIR                 Output directory (required; created if missing).
         \\                         There is no default; the current directory is not used.
-        \\  -workers, --workers N  Officers seek-split threads (default: min(CPU count, 32)).
+        \\  -workers, --workers N  Officers worker threads (default: min(CPU count, 32)).
         \\                         Ignored for products 192 and 197.
         \\  -h, --help             Show this help
         \\  -V, --version          Print version and git commit

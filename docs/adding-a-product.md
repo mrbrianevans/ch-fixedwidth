@@ -70,7 +70,7 @@ stream.Stream   (single body parser: lines → OutputKind batches + trailer chec
     ├─ document.parseDocument   (feed all + concat batches → ParseResult)
     ├─ file_convert sequential  (drain batches → CSV files; URL / stdin / single-thread)
     ├─ C / WASM ch_stream_*     (host drains batches)
-    └─ file_convert parallel    (officers only: seek-split workers, own line loop)
+    └─ pipeline (officers only: ordered chunk workers, own line loop)
 ```
 
 | Layer | Path | Responsibility |
@@ -101,7 +101,7 @@ New kinds are **additive minors** in 1.x: append a `CH_OUTPUT_*` id and fill the
 
 | Body shape | Path |
 |------------|------|
-| Independent lines; record type alone is enough (officers) | May use seek-split multi-threaded workers (`processParallel`) |
+| Independent lines; record type alone is enough (officers) | May use the multi-threaded chunk pipeline (`pipeline.zig`, via `processParallel`) |
 | Multi-line groups, multi-CSV, or order-sensitive state (192, 197) | **Sequential only** (`processFromReader` / `processSingle`); gate in `processOneLocalFile` |
 
 Default for a new product: **sequential** unless you have proven independent line-parallel safety.

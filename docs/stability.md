@@ -27,7 +27,7 @@ New bulk products in 1.x are **minors**: append a `CH_OUTPUT_*` / `CH_FILE_*` id
 
 Adding a CLI **input kind** that does not change existing invocations (the `-o DIR` form still works the same way for file / directory / URL / stdin) is a **minor**. Changing those invocations, or requiring a new flag for current inputs, is a major.
 
-`--workers N` defaults to `min(CPU count, 32)` for officers seek-split. Products 192 and 197 ignore it (sequential). The flag is part of the frozen CLI.
+`--workers N` defaults to `min(CPU count, 32)` for officers worker threads. Products 192 and 197 ignore it (sequential). The flag is part of the frozen CLI.
 
 ## What is a major after 1.0
 
