@@ -852,3 +852,14 @@ test "describeLine escapes control and non-ASCII bytes" {
         parse.describeLine(&buf, 9, "A\rB\"\xc3\x8b"),
     );
 }
+
+test "sliceChars stays in bounds when a row ends inside a multi-byte character" {
+    // "AB" + first byte of "Ë" (0xC3 0x8B): the last character is cut short.
+    const row = "AB\xc3";
+    try std.testing.expectEqualStrings("\xc3", parse.sliceChars(row, 2, 3));
+    try std.testing.expectEqualStrings("B\xc3", parse.sliceChars(row, 1, 5));
+    var dest: [256]u8 = undefined;
+    // A person row truncated inside a UTF-8 character formats without panicking.
+    const person = "029052132102038532340001        1995060119990201BB3 3LD 196608          0010<J\xc3\x8bAN<\xc3";
+    _ = try parse.formatPersonRow(&dest, person);
+}
