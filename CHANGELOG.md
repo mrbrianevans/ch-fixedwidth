@@ -11,13 +11,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Officers products read from stdin (`-`) now use the multi-threaded chunk pipeline (honouring `--workers N`; `--workers 1` stays sequential). 192 / 197 stdin input is unchanged. Output is byte-identical. On real Prod 216 files (4 workers): piped with `cat file |`, `Prod216_4342_ew_7.dat` 5.2 s → 2.7 s and `Prod216_4342_ew_1.dat` 8.6 s → 4.2 s; redirected with `< file`, 5.1 s → 1.4 s and 8.5 s → 2.1 s (median, against 0.2.6).
+- Officers products read from stdin (`-`) now use the multi-threaded chunk pipeline (honouring `--workers N`; `--workers 1` stays sequential). 192 / 197 stdin input is unchanged. Output is byte-identical. On real Prod 216 files (4 workers): piped with `cat file |`, `Prod216_4342_ew_7.dat` 5.2 s → 2.7 s and `Prod216_4342_ew_1.dat` 8.6 s → 4.2 s; redirected with `< file`, 5.1 s → 1.4 s and 8.5 s → 2.1 s (median, against 0.2.4).
 
 ## [0.2.6] — 2026-11-18
 
 ### Changed
 
-- Multi-threaded officers conversion of a local file writes rows straight to the final CSVs in input order instead of writing per-worker part files and concatenating them afterwards (no `.zig_parts` directory). A reader thread cuts the input into ~1 MiB chunks that end before a record start; workers format chunks; the main thread writes them in order. Output is byte-identical. On real Prod 216 files (4 workers): `Prod216_4342_ew_7.dat` 1.70 s → 1.24 s and `Prod216_4342_ew_1.dat` 4.16 s → 2.11 s (median, against 0.2.5 without the row-formatting change). Peak RSS stays bounded (about 17 MiB at 4 workers, 80 MiB at 32). Parse errors on this path now print `Error parsing input: … at byte offset N` instead of `Error in worker K: …`.
+- Multi-threaded officers conversion of a local file writes rows straight to the final CSVs in input order instead of writing per-worker part files and concatenating them afterwards (no `.zig_parts` directory). A reader thread cuts the input into ~1 MiB chunks that end before a record start; workers format chunks; the main thread writes them in order. Output is byte-identical. On real Prod 216 files (4 workers): `Prod216_4342_ew_7.dat` 1.70 s → 1.24 s and `Prod216_4342_ew_1.dat` 4.16 s → 2.11 s (median, against 0.2.4). Peak RSS stays bounded (about 17 MiB at 4 workers, 80 MiB at 32). Parse errors on this path now print `Error parsing input: … at byte offset N` instead of `Error in worker K: …`.
 
 ## [0.2.5] — 2026-11-18
 
