@@ -219,7 +219,21 @@ fn processParallelChunked(
     const input_file = try Io.Dir.cwd().openFile(io, input_path, .{});
     defer input_file.close(io);
     var file_reader = Io.File.Reader.init(input_file, io, read_buf);
+    return convertOfficersParallel(io, arena, &file_reader.interface, header_info.file_type, output_folder, base_name, workers, chunk_len);
+}
 
+/// Run the ordered chunk pipeline over `reader` (positioned at the header
+/// line) into `companies_data_<base>.csv` / `persons_data_<base>.csv`.
+fn convertOfficersParallel(
+    io: Io,
+    arena: std.mem.Allocator,
+    reader: *Io.Reader,
+    file_type: parse.FileType,
+    output_folder: []const u8,
+    base_name: []const u8,
+    workers: usize,
+    chunk_len: usize,
+) !u8 {
     const companies_filename = try std.fs.path.join(arena, &.{
         output_folder,
         try std.fmt.allocPrint(arena, "companies_data_{s}.csv", .{base_name}),
@@ -233,10 +247,10 @@ fn processParallelChunked(
 
     var companies_out = try CsvOut.create(io, companies_filename, parse.companies_header, try arena.alloc(u8, write_buffer_size));
     defer companies_out.close();
-    var persons_out = try CsvOut.create(io, persons_filename, header_info.file_type.personsCsvHeader(), try arena.alloc(u8, write_buffer_size));
+    var persons_out = try CsvOut.create(io, persons_filename, file_type.personsCsvHeader(), try arena.alloc(u8, write_buffer_size));
     defer persons_out.close();
 
-    const result = try pipeline.run(io, heapAllocator(), &file_reader.interface, header_info.file_type, companies_out.w(), persons_out.w(), .{
+    const result = try pipeline.run(io, heapAllocator(), reader, file_type, companies_out.w(), persons_out.w(), .{
         .workers = workers,
         .chunk_len = chunk_len,
     });
@@ -886,6 +900,7 @@ pub fn processFromStdin(
     io: Io,
     arena: std.mem.Allocator,
     output_folder: []const u8,
+    worker_count: ?usize,
 ) !u8 {
     Io.Dir.cwd().createDirPath(io, output_folder) catch |err| {
         std.debug.print("Error creating output directory: {s}\n", .{@errorName(err)});
@@ -899,14 +914,47 @@ pub fn processFromStdin(
     // Do not close stdin — process owns the standard handles.
     const stdin_file = Io.File.stdin();
     var file_reader = Io.File.Reader.initStreaming(stdin_file, io, read_buf);
-    return processFromReader(io, arena, &file_reader.interface, output_folder, base_name);
+    return processFromStreamReader(io, arena, &file_reader.interface, output_folder, base_name, worker_count);
+}
+
+/// Convert a non-seekable stream. Officers products (195 / 216 / 198) run on
+/// the multi-threaded chunk pipeline when more than one worker is available;
+/// 192 / 197 and single-worker runs use the sequential `processFromReader`.
+fn processFromStreamReader(
+    io: Io,
+    arena: std.mem.Allocator,
+    reader: *Io.Reader,
+    output_folder: []const u8,
+    base_name: []const u8,
+    worker_count: ?usize,
+) !u8 {
+    const workers = resolveWorkerCount(worker_count);
+    if (comptime builtin.single_threaded) {
+        return processFromReader(io, arena, reader, output_folder, base_name);
+    }
+    if (workers > 1) {
+        // Peek (do not consume) the header: the pipeline reads it again.
+        if (reader.peekDelimiterInclusive('\n')) |line| {
+            const row = parse.stripCr(line[0 .. line.len - 1]);
+            const info = parse.parseHeader(row) catch null;
+            if (info) |h| if (h.file_type == .officers_snapshot or h.file_type == .officers_update) {
+                _ = processHeaderRow(row) catch return 1;
+                return convertOfficersParallel(io, arena, reader, h.file_type, output_folder, base_name, workers, pipeline.default_chunk_len);
+            };
+        } else |_| {
+            // No complete header line (empty input, read error, oversized
+            // line): the sequential path reports it as before.
+        }
+    }
+    return processFromReader(io, arena, reader, output_folder, base_name);
 }
 
 /// Convert a local file path, directory of `.dat` files, HTTP(S) URL, or stdin (`-`)
 /// into CSV files under `output_folder`. Returns a process exit code (0 = success).
 ///
-/// `worker_count` applies to local officers files (seek-split). Stdin, remote URLs,
-/// and products 192 / 197 stay sequential. `null` uses CPU count (capped at `max_workers`).
+/// `worker_count` applies to officers products from local files and stdin
+/// (chunk pipeline). Remote URLs and products 192 / 197 stay sequential.
+/// `null` uses CPU count (capped at `max_workers`).
 pub fn processInput(
     io: Io,
     arena: std.mem.Allocator,
@@ -915,7 +963,7 @@ pub fn processInput(
     worker_count: ?usize,
 ) !u8 {
     if (isStdinInput(input)) {
-        return processFromStdin(io, arena, output_folder);
+        return processFromStdin(io, arena, output_folder, worker_count);
     }
     if (isRemoteUrl(input)) {
         return processFromRemoteUrl(io, arena, input, output_folder);
@@ -1425,6 +1473,75 @@ test "chunked parallel path fails on unknown records, missing or wrong trailers"
     for ([_][]const u8{ garbage, no_trailer, wrong_trailer }) |input| {
         for ([_]usize{ 50, 1 << 20 }) |chunk_len| {
             const code, _, _ = try runChunked(arena, input, 2, chunk_len);
+            try std.testing.expectEqual(@as(u8, 1), code);
+        }
+    }
+}
+
+fn runStream(arena: std.mem.Allocator, input: []const u8, workers: usize) !struct { u8, []const u8 } {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const out = try std.fmt.allocPrint(arena, ".zig-cache/tmp/{s}/out", .{tmp.sub_path});
+    try Io.Dir.cwd().createDirPath(io, out);
+    var reader = Io.Reader.fixed(input);
+    const code = try processFromStreamReader(io, arena, &reader, out, "stdin", workers);
+    // Concatenate every output file (sorted by name) for comparison.
+    var names: std.ArrayList([]const u8) = .empty;
+    var dir = try Io.Dir.cwd().openDir(io, out, .{ .iterate = true });
+    defer dir.close(io);
+    var it = dir.iterate();
+    while (try it.next(io)) |e| try names.append(arena, try arena.dupe(u8, e.name));
+    std.mem.sort([]const u8, names.items, {}, struct {
+        fn less(_: void, x: []const u8, y: []const u8) bool {
+            return std.mem.lessThan(u8, x, y);
+        }
+    }.less);
+    var all: std.ArrayList(u8) = .empty;
+    for (names.items) |n| {
+        try all.print(arena, "== {s}\n", .{n});
+        try all.appendSlice(arena, try readFileAlloc(io, arena, try std.fmt.allocPrint(arena, "{s}/{s}", .{ out, n })));
+    }
+    return .{ code, all.items };
+}
+
+test "stdin stream route: parallel officers output matches the sequential path" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const inputs = [_][]const u8{
+        mini_snapshot_fixture,
+        mini_update_fixture,
+        split_snapshot_fixture,
+        @embedFile("testdata/mini_disqual.dat"),
+        @embedFile("testdata/mini_liquidation.dat"),
+    };
+    for (inputs) |input| {
+        const seq_code, const seq = try runStream(arena, input, 1);
+        try std.testing.expectEqual(@as(u8, 0), seq_code);
+        for ([_]usize{ 2, 4, 8 }) |workers| {
+            const par_code, const par = try runStream(arena, input, workers);
+            try std.testing.expectEqual(seq_code, par_code);
+            try std.testing.expectEqualStrings(seq, par);
+        }
+    }
+}
+
+test "stdin stream route: failures exit 1 on both paths" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const trailer = std.mem.indexOf(u8, mini_snapshot_fixture, "99999999").?;
+    const bad = [_][]const u8{
+        "",
+        "DDDDSNAP425720260706",
+        "NOTAHEADER\n",
+        mini_snapshot_fixture[0..trailer],
+        try std.mem.concat(arena, u8, &.{ mini_snapshot_fixture[0..trailer], "GARBAGE\n", mini_snapshot_fixture[trailer..] }),
+    };
+    for (bad) |input| {
+        for ([_]usize{ 1, 4 }) |workers| {
+            const code, _ = try runStream(arena, input, workers);
             try std.testing.expectEqual(@as(u8, 1), code);
         }
     }

@@ -26,7 +26,7 @@ zig fmt --check .
 
 CLI binary: `./zig-out/bin/ch-fixedwidth` (or `ch-fixedwidth.exe` on Windows).
 
-Invocation: `ch-fixedwidth [--workers N] -o DIR <input>`. `-o` is required. Optional `--workers N` caps officers worker threads (default: `min(CPU count, 32)`). Products 192 / 197, stdin, and remote URLs stay sequential.
+Invocation: `ch-fixedwidth [--workers N] -o DIR <input>`. `-o` is required. Optional `--workers N` caps officers worker threads (default: `min(CPU count, 32)`). Officers products from stdin use the same worker threads. Products 192 / 197 and remote URLs stay sequential.
 
 ### Remote URL, stdin, and directory input (CLI only)
 
@@ -36,7 +36,8 @@ The native CLI accepts a local file path, a **directory** of `.dat` files, an `h
 |-------|----------|
 | Single local file | Multi-threaded chunk pipeline for officers products (`--workers N` or `min(CPU count, 32)`); sequential for 192 / 197 |
 | Directory of `.dat` | Lists top-level `*.dat` only; processes **one file at a time** with the same per-file strategy as a single file. See [DDR-directory-parallelism.md](DDR-directory-parallelism.md) |
-| Remote URL / stdin | Sequential streaming via `processFromReader` (no parallel seeks). Remote GET sends `Accept-Encoding: zstd, gzip, deflate` and decompresses while streaming (zstd window up to 8 MiB). Remote GET retries 429, 5xx, and connect/send/header failures with exponential backoff (5 attempts, 200 ms base, 10 s cap; integer `Retry-After` up to 60 s) |
+| Stdin (`-`) | Officers products (195 / 216 / 198): multi-threaded chunk pipeline, same as a local file (`--workers 1` keeps it sequential). 192 / 197: sequential streaming via `processFromReader` |
+| Remote URL | Sequential streaming via `processFromReader`. Remote GET sends `Accept-Encoding: zstd, gzip, deflate` and decompresses while streaming (zstd window up to 8 MiB). Remote GET retries 429, 5xx, and connect/send/header failures with exponential backoff (5 attempts, 200 ms base, 10 s cap; integer `Retry-After` up to 60 s) |
 
 WASM and the C ABI are unchanged (no network or directory fan-out).
 
@@ -85,7 +86,7 @@ Parsing is separate from CLI I/O so the same logic can be embedded:
 | C ABI | `include/ch_fixedwidth.h`, `libch_fixedwidth` | `ch_parse` (one-shot) + `ch_stream_*` (batched streaming by `CH_OUTPUT_*`) |
 | WASM | `zig build wasm` → `ch_fixedwidth.wasm` | Same C-style exports, no filesystem I/O |
 | TypeScript host | [`wasm-ts/`](../wasm-ts/) | `ChFixedWidthStream` + `ChFixedWidthParser`; Bun CLI under `wasm-ts/local/` |
-| CLI | `src/main.zig` + `src/file_convert.zig` | Multithreaded local officers files; sequential multi-CSV products; directory / HTTP(S) / stdin |
+| CLI | `src/main.zig` + `src/file_convert.zig` | Multithreaded officers files and stdin; sequential multi-CSV products; directory / HTTP(S) / stdin |
 
 ### Output kinds (never overloaded)
 
