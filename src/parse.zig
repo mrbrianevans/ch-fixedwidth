@@ -591,7 +591,8 @@ pub fn sliceChars(s: []const u8, start: usize, end: usize) []const u8 {
         const len = unicode.utf8ByteSequenceLength(s[i]) catch 1;
         if (char_i == start) byte_start = i;
         char_i += 1;
-        i += len;
+        // A row cut inside a multi-byte character must not slice past its end.
+        i = @min(i + len, s.len);
         if (char_i == end) {
             const bs = byte_start orelse return s[0..0];
             return s[bs..i];
@@ -819,9 +820,151 @@ pub fn parseDisqualTrailer(row: []const u8) error{MissingTrailer}!DisqualTrailer
     };
 }
 
+// --- Fast path -------------------------------------------------------------
+//
+// Almost every officers row is ASCII and contains none of `,` `"` `\r` `\n`,
+// so no CSV field needs quoting and character offsets equal byte offsets. For
+// those rows the formatters below copy fixed-width fields directly and turn the
+// variable data's `<` separators into `,` in one vectorised pass, instead of
+// splitting into slices and quote-checking and copying each field separately.
+// Any other row takes the general path, which produces identical output.
+
+const fast_vec_len = 32;
+const FastVec = @Vector(fast_vec_len, u8);
+
+/// True when `s` is ASCII and contains no byte that forces CSV quoting.
+fn isPlainAscii(s: []const u8) bool {
+    var i: usize = 0;
+    while (i + fast_vec_len <= s.len) : (i += fast_vec_len) {
+        const v: FastVec = s[i..][0..fast_vec_len].*;
+        const bad = (v >= @as(FastVec, @splat(0x80))) |
+            (v == @as(FastVec, @splat(','))) |
+            (v == @as(FastVec, @splat('"'))) |
+            (v == @as(FastVec, @splat('\n'))) |
+            (v == @as(FastVec, @splat('\r')));
+        if (@reduce(.Or, bad)) return false;
+    }
+    while (i < s.len) : (i += 1) {
+        const c = s[i];
+        if (c >= 0x80 or c == ',' or c == '"' or c == '\n' or c == '\r') return false;
+    }
+    return true;
+}
+
+/// Copy row[start..end) (comptime bounds; caller guarantees row.len >= end).
+inline fn copyFixed(dest: []u8, p: usize, row: []const u8, comptime start: usize, comptime end: usize) usize {
+    @memcpy(dest[p..][0 .. end - start], row[start..end]);
+    return p + (end - start);
+}
+
+/// Write `n_fields` chevron-separated fields of `variable` as `,`-separated
+/// CSV (no leading comma), matching `splitChevron`: text after the
+/// `n_fields`-th `<` is dropped and missing fields are written empty.
+/// Caller guarantees `variable` needs no quoting and `dest` has room for
+/// `variable.len + n_fields` bytes from `p`.
+fn writeChevronFieldsPlain(dest: []u8, p_start: usize, variable: []const u8, n_fields: usize) usize {
+    var p = p_start;
+    var seps: usize = 0; // `<` seen so far
+    var i: usize = 0;
+    const lt: FastVec = @splat('<');
+    const comma: FastVec = @splat(',');
+    while (i + fast_vec_len <= variable.len) : (i += fast_vec_len) {
+        const v: FastVec = variable[i..][0..fast_vec_len].*;
+        const is_lt = v == lt;
+        const n_lt: usize = @popCount(@as(u32, @bitCast(is_lt)));
+        if (seps + n_lt >= n_fields) break; // the cut-off separator is in this chunk
+        dest[p..][0..fast_vec_len].* = @select(u8, is_lt, comma, v);
+        p += fast_vec_len;
+        seps += n_lt;
+    }
+    while (i < variable.len) : (i += 1) {
+        const c = variable[i];
+        if (c == '<') {
+            seps += 1;
+            if (seps == n_fields) return p; // later text is not exported
+            dest[p] = ',';
+        } else {
+            dest[p] = c;
+        }
+        p += 1;
+    }
+    // `seps + 1` fields written; pad the rest as empty.
+    while (seps + 1 < n_fields) : (seps += 1) {
+        dest[p] = ',';
+        p += 1;
+    }
+    return p;
+}
+
+/// Fast path for `formatPersonRow`; null when the row needs the general path.
+fn formatPersonRowPlain(dest: []u8, row: []const u8) ?usize {
+    if (row.len < 76) return null;
+    const var_len: usize = @intCast(fastAtoi(row[72..76]));
+    const variable = clamp(row, 76, 76 + var_len);
+    // Only bytes up to the end of the exported data matter.
+    if (!isPlainAscii(row[0 .. 76 + variable.len])) return null;
+    // 64 fixed bytes + 10 commas + variable + 13 padding commas + newline.
+    if (dest.len < 88 + variable.len) return null;
+
+    var p: usize = 0;
+    p = copyFixed(dest, p, row, 0, 8);
+    dest[p] = ',';
+    p = copyFixed(dest, p + 1, row, 9, 10);
+    dest[p] = ',';
+    p = copyFixed(dest, p + 1, row, 10, 12);
+    dest[p] = ',';
+    p = copyFixed(dest, p + 1, row, 12, 24);
+    dest[p] = ',';
+    p = copyFixed(dest, p + 1, row, 24, 25);
+    dest[p] = ',';
+    p = copyFixed(dest, p + 1, row, 32, 40);
+    dest[p] = ',';
+    p = copyFixed(dest, p + 1, row, 40, 48);
+    dest[p] = ',';
+    p = copyFixed(dest, p + 1, row, 48, 56);
+    dest[p] = ',';
+    p = copyFixed(dest, p + 1, row, 56, 64);
+    dest[p] = ',';
+    p = copyFixed(dest, p + 1, row, 64, 72);
+    dest[p] = ',';
+    p = writeChevronFieldsPlain(dest, p + 1, variable, 14);
+    dest[p] = '\n';
+    return p + 1;
+}
+
+/// Fast path for `formatCompanyRow`; null when the row needs the general path.
+fn formatCompanyRowPlain(dest: []u8, row: []const u8) ?usize {
+    if (row.len < 40) return null;
+    const name_length: usize = @intCast(fastAtoi(row[36..40]));
+    var name = clamp(row, 40, 40 + name_length -| 1);
+    // Company rows are space-padded far past the name; only check what is used.
+    if (!isPlainAscii(row[0 .. 40 + name.len])) return null;
+    name = trimRightSpaces(name);
+    // 8 + 1 + up to 11 (officer count) + name + 3 commas + newline.
+    if (dest.len < 24 + name.len) return null;
+
+    var p: usize = copyFixed(dest, 0, row, 0, 8);
+    dest[p] = ',';
+    p = copyFixed(dest, p + 1, row, 9, 10);
+    dest[p] = ',';
+    p = appendInt(dest, p + 1, fastAtoi(row[32..36])) catch return null;
+    dest[p] = ',';
+    p += 1;
+    @memcpy(dest[p..][0..name.len], name);
+    p += name.len;
+    dest[p] = '\n';
+    return p + 1;
+}
+
 /// Format a company record as one CSV line (including trailing newline).
 /// `dest` must be large enough (typically `max_csv_row_bytes`); never overflows.
 pub fn formatCompanyRow(dest: []u8, row: []const u8) FormatError!usize {
+    if (formatCompanyRowPlain(dest, row)) |n| return n;
+    return formatCompanyRowGeneral(dest, row);
+}
+
+/// General path for `formatCompanyRow` (any UTF-8, CSV quoting as needed).
+fn formatCompanyRowGeneral(dest: []u8, row: []const u8) FormatError!usize {
     const v = FieldView.init(row);
     const name_length: usize = @intCast(v.atoi(36, 40));
     var name = v.get(40, 40 + name_length -| 1);
@@ -870,6 +1013,12 @@ fn fillFixed(v: FieldView, ranges: []const [2]usize, out: [][]const u8) void {
 /// Format a snapshot person record (Prod 195/216) as one CSV line (incl. newline).
 /// `dest` must be large enough (typically `max_csv_row_bytes`); never overflows.
 pub fn formatPersonRow(dest: []u8, row: []const u8) FormatError!usize {
+    if (formatPersonRowPlain(dest, row)) |n| return n;
+    return formatPersonRowGeneral(dest, row);
+}
+
+/// General path for `formatPersonRow` (any UTF-8, CSV quoting as needed).
+fn formatPersonRowGeneral(dest: []u8, row: []const u8) FormatError!usize {
     const v = FieldView.init(row);
     const ranges = [_][2]usize{
         .{ 0, 8 },   .{ 9, 10 },  .{ 10, 12 }, .{ 12, 24 }, .{ 24, 25 },
@@ -1245,4 +1394,102 @@ pub fn formatLiqFreeTextRow(dest: []u8, form: *const LiqForm, index: usize) Form
         form.freeText(index),
     };
     return writeCsvFields(dest, &fields, &.{});
+}
+
+// --- Fast path ≡ general path ------------------------------------------------
+
+/// Random officers-shaped row: a fixed-width prefix of `prefix_len` chars, a
+/// 4-digit length field, then chevron data. Bytes are mostly plain ASCII but
+/// include separators, quoting characters, CR/LF and multi-byte UTF-8, and the
+/// declared length is sometimes wrong, so both paths and every fallback run.
+fn randomOfficersRow(rand: std.Random, buf: []u8, prefix_len: usize) []const u8 {
+    const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ 0123456789<<<<<.-/&'";
+    const rare = [_][]const u8{ ",", "\"", "\r", "\n", "Ë", "€", "😀", "<" };
+    var n: usize = 0;
+    var i: usize = 0;
+    while (i < prefix_len) : (i += 1) {
+        buf[n] = if (rand.uintLessThan(u8, 40) == 0) ',' else alphabet[rand.uintLessThan(usize, 37)];
+        n += 1;
+    }
+    // Variable data.
+    var tmp: [400]u8 = undefined;
+    var t: usize = 0;
+    const want = rand.uintLessThan(usize, 200);
+    var chars: usize = 0;
+    while (chars < want and t + 4 < tmp.len) : (chars += 1) {
+        if (rand.uintLessThan(u8, 30) == 0) {
+            const r = rare[rand.uintLessThan(usize, rare.len)];
+            @memcpy(tmp[t..][0..r.len], r);
+            t += r.len;
+        } else {
+            tmp[t] = alphabet[rand.uintLessThan(usize, alphabet.len)];
+            t += 1;
+        }
+    }
+    const declared: usize = switch (rand.uintLessThan(u8, 4)) {
+        0 => chars -| rand.uintLessThan(usize, 5),
+        1 => chars + rand.uintLessThan(usize, 5),
+        else => chars,
+    };
+    _ = std.fmt.bufPrint(buf[n..][0..4], "{d:0>4}", .{declared}) catch unreachable;
+    n += 4;
+    @memcpy(buf[n..][0..t], tmp[0..t]);
+    n += t;
+    // Sometimes truncate (short rows, cut inside a multi-byte char).
+    if (rand.uintLessThan(u8, 10) == 0) n = rand.uintLessThan(usize, n + 1);
+    return buf[0..n];
+}
+
+fn expectSameFormat(
+    comptime public: fn ([]u8, []const u8) FormatError!usize,
+    comptime general: fn ([]u8, []const u8) FormatError!usize,
+    row: []const u8,
+    dest_len: usize,
+) !void {
+    var a_buf: [4096]u8 = undefined;
+    var b_buf: [4096]u8 = undefined;
+    const a = public(a_buf[0..dest_len], row);
+    const b = general(b_buf[0..dest_len], row);
+    if (b) |nb| {
+        const na = try a;
+        try std.testing.expectEqualStrings(b_buf[0..nb], a_buf[0..na]);
+    } else |err| {
+        try std.testing.expectError(err, a);
+    }
+}
+
+test "person and company fast paths match the general path" {
+    var prng = std.Random.DefaultPrng.init(0x216_4342);
+    const rand = prng.random();
+    var row_buf: [1024]u8 = undefined;
+    var i: usize = 0;
+    while (i < 20_000) : (i += 1) {
+        const dest_len: usize = if (rand.uintLessThan(u8, 8) == 0) rand.uintLessThan(usize, 300) else 4096;
+        const person = randomOfficersRow(rand, &row_buf, 72);
+        try expectSameFormat(formatPersonRow, formatPersonRowGeneral, person, dest_len);
+        const company = randomOfficersRow(rand, &row_buf, 36);
+        try expectSameFormat(formatCompanyRow, formatCompanyRowGeneral, company, dest_len);
+    }
+}
+
+test "person fast path keeps only the first 14 chevron fields" {
+    const prefix = "029052132102038532340001        1995060119990201BB3 3LD 196608          ";
+    var buf: [2048]u8 = undefined;
+    // 0, 13, 14, 15 and 40 separators, with long fields to cross vector chunks.
+    for ([_]usize{ 0, 13, 14, 15, 40 }) |seps| {
+        var vbuf: [1024]u8 = undefined;
+        var vn: usize = 0;
+        var s: usize = 0;
+        while (s <= seps) : (s += 1) {
+            const field = "FIELD NUMBER XX";
+            @memcpy(vbuf[vn..][0..field.len], field);
+            vn += field.len;
+            if (s < seps) {
+                vbuf[vn] = '<';
+                vn += 1;
+            }
+        }
+        const row = try std.fmt.bufPrint(&buf, "{s}{d:0>4}{s}", .{ prefix, vn, vbuf[0..vn] });
+        try expectSameFormat(formatPersonRow, formatPersonRowGeneral, row, 4096);
+    }
 }
