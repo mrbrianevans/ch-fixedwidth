@@ -7,6 +7,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.7] — 2026-11-18
+
+### Changed
+
+- Officers products read from stdin (`-`) now use the multi-threaded chunk pipeline (honouring `--workers N`; `--workers 1` stays sequential). 192 / 197 stdin input is unchanged. Output is byte-identical. On real Prod 216 files (4 workers): piped with `cat file |`, `Prod216_4342_ew_7.dat` 5.2 s → 2.7 s and `Prod216_4342_ew_1.dat` 8.6 s → 4.2 s; redirected with `< file`, 5.1 s → 1.4 s and 8.5 s → 2.1 s (median, against 0.2.4).
+
+## [0.2.6] — 2026-11-18
+
+### Changed
+
+- Multi-threaded officers conversion of a local file writes rows straight to the final CSVs in input order instead of writing per-worker part files and concatenating them afterwards (no `.zig_parts` directory). A reader thread cuts the input into ~1 MiB chunks that end before a record start; workers format chunks; the main thread writes them in order. Output is byte-identical. On real Prod 216 files (4 workers): `Prod216_4342_ew_7.dat` 1.70 s → 1.24 s and `Prod216_4342_ew_1.dat` 4.16 s → 2.11 s (median, against 0.2.4). Peak RSS stays bounded (about 17 MiB at 4 workers, 80 MiB at 32). Parse errors on this path now print `Error parsing input: … at byte offset N` instead of `Error in worker K: …`.
+
+## [0.2.5] — 2026-11-18
+
+### Changed
+
+- Officers snapshot company and person rows format about 2× faster on one thread. Rows that are ASCII and need no CSV quoting (the vast majority) copy fixed-width fields directly and turn `<` separators into `,` in one vectorised pass; other rows use the existing path, with byte-identical output. On real Prod 216 files: `--workers 1` and stdin 4.8 s → 2.4 s (`Prod216_4342_ew_7.dat`, 1.49 GB) and 8.3 s → 3.4 s (`Prod216_4342_ew_1.dat`, 2.05 GB); default parallel 1.7 s → 1.0 s and 3.0 s → 1.8 s.
+
+### Fixed
+
+- `sliceChars` no longer reads past the end of a row that ends inside a multi-byte UTF-8 character (debug builds panicked; release builds read out of bounds).
+
+## [0.2.4] — 2026-11-17
+
+### Changed
+
+- Remote `.dat` downloads ask for `zstd, gzip, deflate` (plus identity) and decompress while streaming. Companies Catalogue serves zstd, which is about 5.5x fewer bytes than the uncompressed file: `Prod216_4342_ew_7.dat` (1.49 GB) now downloads and converts in about 30 s instead of over 2 minutes. A zstd frame whose window is larger than 8 MiB fails with a named decompression error.
+
+### Fixed
+
+- Native read and write buffers are now 1 MiB, down from 8 MiB. Seek-split officers conversion allocated one read and two write buffers per worker, so peak RSS scaled with core count (about 575 MiB at 32 workers). It is now about 100 MiB at 32 workers and 14 MiB at 4. Single-stream runs peak at about 12.5 MiB. Benchmarks showed no throughput loss.
+
+## [0.2.3] — 2026-11-17
+
+### Fixed
+
+- Officers snapshot / update records that Companies House published with a line break (CRLF or bare LF) inside their variable-length data no longer fail with `UnknownRecord` (e.g. `Prod216_4342_ew_3.dat`, `Prod216_4342_ew_7.dat`). A company or person line shorter than its declared length is joined with the following non-record line(s) until the declared length is reached. The embedded break becomes a single space, so each CSV row stays on one line. Both the streaming path and the parallel seek-split path re-join records; split points never start a worker inside a joined record.
+- `UnknownRecord` errors now say where the bad line is: `line N` on the streaming path, `byte offset N` on the parallel path, plus the first 40 bytes of the line.
+
+## [0.2.2] — 2026-11-17
+
+### Fixed
+
+- Streaming input (remote URL, stdin, local `--workers 1`, and 192 / 197) no longer grows memory with the whole file. CSV batches were allocated on the process-long arena, so draining a batch never released it. The stream now uses a freeing heap allocator, feeds 1 MiB slices straight from the reader buffer, and drains after each slice. Peak RSS stays flat (about 26 MiB for a 200 MiB or 800 MiB officers snapshot over HTTP, down from 326 MiB at 200 MiB).
+- Directory input gives each file its own scratch arena, freed before the next file starts. Read and write buffers no longer accumulate across files (6 × 48 MiB files: 586 MiB → 21 MiB at `--workers 1`).
+
+## [0.2.1] — 2026-08-28
+
 ### Added
 
 - Remote `.dat` GET retries on 429, 5xx, and connection failures (connect / send / headers) with exponential backoff (5 attempts, 200 ms base, 10 s cap). Integer `Retry-After` is honoured, capped at 60 s. 4xx other than 429, and a failed body stream, are not retried.
@@ -14,21 +62,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Officers products read from stdin (`-`) now use the multi-threaded chunk pipeline (honouring `--workers N`; `--workers 1` stays sequential). 192 / 197 stdin input is unchanged. Output is byte-identical. On real Prod 216 files (4 workers): piped with `cat file |`, `Prod216_4342_ew_7.dat` 5.2 s → 2.7 s and `Prod216_4342_ew_1.dat` 8.6 s → 4.2 s; redirected with `< file`, 5.1 s → 1.4 s and 8.5 s → 2.1 s (median).
-- Multi-threaded officers conversion of a local file writes rows straight to the final CSVs in input order instead of writing per-worker part files and concatenating them afterwards (no `.zig_parts` directory). A reader thread cuts the input into ~1 MiB chunks that end before a record start; workers format chunks; the main thread writes them in order. Output is byte-identical. On real Prod 216 files (4 workers): `Prod216_4342_ew_7.dat` 1.70 s → 1.24 s and `Prod216_4342_ew_1.dat` 4.16 s → 2.11 s (median). Peak RSS stays bounded (about 17 MiB at 4 workers, 80 MiB at 32). Parse errors on this path now print `Error parsing input: … at byte offset N` instead of `Error in worker K: …`.
-- Officers snapshot company and person rows format about 2× faster on one thread. Rows that are ASCII and need no CSV quoting (the vast majority) copy fixed-width fields directly and turn `<` separators into `,` in one vectorised pass; other rows use the existing path, with byte-identical output. On real Prod 216 files: `--workers 1` and stdin 4.8 s → 2.4 s (`Prod216_4342_ew_7.dat`, 1.49 GB) and 8.3 s → 3.4 s (`Prod216_4342_ew_1.dat`, 2.05 GB); default parallel 1.7 s → 1.0 s and 3.0 s → 1.8 s.
-- Remote `.dat` downloads ask for `zstd, gzip, deflate` (plus identity) and decompress while streaming. Companies Catalogue serves zstd, which is about 5.5x fewer bytes than the uncompressed file: `Prod216_4342_ew_7.dat` (1.49 GB) now downloads and converts in about 30 s instead of over 2 minutes. A zstd frame whose window is larger than 8 MiB fails with a named decompression error.
 - **Breaking:** CLI is `ch-fixedwidth [--workers N] -o DIR <input>`. `-o` is required (the current directory is not used as a default). Flags must precede the positional input. Optional `--workers N` sets officers seek-split thread count (default: `min(CPU count, 32)`; ignored for 192 / 197).
 - Usage errors (no args, extra args, unknown flag, missing `-o`) exit **2**. `-h` / `-V` stay **0**. Conversion failures stay **1**. Ctrl-C exits **130**.
-
-### Fixed
-
-- `sliceChars` no longer reads past the end of a row that ends inside a multi-byte UTF-8 character (debug builds panicked; release builds read out of bounds).
-- Officers snapshot / update records that Companies House published with a line break (CRLF or bare LF) inside their variable-length data no longer fail with `UnknownRecord` (e.g. `Prod216_4342_ew_3.dat`, `Prod216_4342_ew_7.dat`). A company or person line shorter than its declared length is joined with the following non-record line(s) until the declared length is reached. The embedded break becomes a single space, so each CSV row stays on one line. Both the streaming path and the parallel seek-split path re-join records; split points never start a worker inside a joined record.
-- `UnknownRecord` errors now say where the bad line is: `line N` on the streaming path, `byte offset N` on the parallel path, plus the first 40 bytes of the line.
-- Streaming input (remote URL, stdin, local `--workers 1`, and 192 / 197) no longer grows memory with the whole file. CSV batches were allocated on the process-long arena, so draining a batch never released it. The stream now uses a freeing heap allocator, feeds 1 MiB slices straight from the reader buffer, and drains after each slice. Peak RSS stays flat (about 26 MiB for a 200 MiB or 800 MiB officers snapshot over HTTP, down from 326 MiB at 200 MiB).
-- Directory input gives each file its own scratch arena, freed before the next file starts. Read and write buffers no longer accumulate across files (6 × 48 MiB files: 586 MiB → 21 MiB at `--workers 1`).
-- Native read and write buffers are now 1 MiB, down from 8 MiB. Seek-split officers conversion allocated one read and two write buffers per worker, so peak RSS scaled with core count (about 575 MiB at 32 workers). It is now about 100 MiB at 32 workers and 14 MiB at 4. Single-stream runs peak at about 12.5 MiB. Benchmarks showed no throughput loss.
 
 ## [0.2.0] — 2026-08-22
 
@@ -133,6 +168,14 @@ Initial production-oriented release of the Zig Companies House fixed-width parse
 
 - Supported input in 0.0.1: snapshot products **195 / 216** (`DDDDSNAP` header) only
 
+[0.2.7]: https://github.com/mrbrianevans/ch-fixedwidth/releases/tag/v0.2.7
+[0.2.6]: https://github.com/mrbrianevans/ch-fixedwidth/releases/tag/v0.2.6
+[0.2.5]: https://github.com/mrbrianevans/ch-fixedwidth/releases/tag/v0.2.5
+[0.2.4]: https://github.com/mrbrianevans/ch-fixedwidth/releases/tag/v0.2.4
+[0.2.3]: https://github.com/mrbrianevans/ch-fixedwidth/releases/tag/v0.2.3
+[0.2.2]: https://github.com/mrbrianevans/ch-fixedwidth/releases/tag/v0.2.2
+[0.2.1]: https://github.com/mrbrianevans/ch-fixedwidth/releases/tag/v0.2.1
+[0.2.0]: https://github.com/mrbrianevans/ch-fixedwidth/releases/tag/v0.2.0
 [0.1.0]: https://github.com/mrbrianevans/ch-fixedwidth/releases/tag/v0.1.0
 [0.0.2]: https://github.com/mrbrianevans/ch-fixedwidth/releases/tag/v0.0.2
 [0.0.1]: https://github.com/mrbrianevans/ch-fixedwidth/releases/tag/v0.0.1
